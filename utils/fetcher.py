@@ -8,12 +8,6 @@ from datetime import datetime, timezone
 from io import StringIO
 from typing import Optional
 
-import pandas as pd
-import requests
-from bs4 import BeautifulSoup
-from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
 
 
 BASE_URL = "https://webbsite.0xmd.com"
@@ -97,7 +91,14 @@ def clean_stock_code(value: str) -> str:
     return digits.zfill(5) if digits else ""
 
 
+def looks_like_issue_id(value: str) -> bool:
+    text = (value or "").strip()
+    return bool(re.fullmatch(r"\d{4,8}", text)) and not text.startswith("0")
+
+
 def extract_tables_from_html(html: str) -> list[pd.DataFrame]:
+    import pandas as pd
+
     if not html:
         return []
     tables = pd.read_html(StringIO(html), flavor="lxml")
@@ -118,12 +119,16 @@ def extract_tables_from_html(html: str) -> list[pd.DataFrame]:
 
 
 def html_to_text(html: str, limit: int = 8000) -> str:
+    from bs4 import BeautifulSoup
+
     soup = BeautifulSoup(html or "", "lxml")
     text = soup.get_text("\n", strip=True)
     return text[:limit]
 
 
 def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
+    import requests
+
     result = FetchResult(name=name, url=url, fetched_time=now_iso(), method="requests")
     try:
         response = requests.get(
@@ -150,6 +155,10 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
 
 
 def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> FetchResult:
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+
     result = FetchResult(name=name, url=url, fetched_time=now_iso(), method="playwright")
     try:
         with sync_playwright() as p:
@@ -199,6 +208,8 @@ def fetch_page(name: str, url: str, timeout: int = 60, headless: bool = True) ->
 
 
 def extract_issue_id_from_html(html: str) -> tuple[str, str]:
+    from bs4 import BeautifulSoup
+
     if not html:
         return "", ""
 
@@ -249,6 +260,19 @@ def resolve_issue_id_from_stock(stock_code: str, timeout: int = 60, headless: bo
         message="Cannot automatically determine Webb-site issue ID. Please enter the Webb-site Issue ID manually.",
         result=result,
     )
+
+
+def resolve_issue_id(value: str, input_type: str = "Stock Code", timeout: int = 60, headless: bool = True) -> IssueLookup:
+    if input_type == "Webb-site Issue ID" or looks_like_issue_id(value):
+        issue_id = (value or "").strip()
+        return IssueLookup(
+            stock_code="",
+            issue_id=issue_id,
+            method="manually entered",
+            status="success",
+            message="Issue ID was manually entered.",
+        )
+    return resolve_issue_id_from_stock(value, timeout=timeout, headless=headless)
 
 
 def fetch_all(issue_id: str, stock_code: str = "", timeout: int = 60, headless: bool = True, delay_seconds: Optional[float] = None) -> dict[str, FetchResult]:

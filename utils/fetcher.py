@@ -23,6 +23,15 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+KNOWN_ISSUE_ID_BY_STOCK = {
+    "03321": "27882",
+    "06080": "25298",
+    "01417": "25486",
+    "01953": "29176",
+    "01682": "6191",
+    "00524": "1061",
+}
+
 
 @dataclass
 class FetchResult:
@@ -38,24 +47,40 @@ class FetchResult:
     ok: bool = False
     error_type: str = ""
     error_message: str = ""
+    fallback_method_used: str = ""
 
     def to_log(self) -> dict:
         return {
-            "page": self.name,
+            "section": self.name,
             "url": self.url,
             "final_url": self.final_url,
-            "status": self.status,
+            "status_code": self.status,
             "fetched_time": self.fetched_time,
-            "method": self.method,
+            "fetch_method": self.method,
+            "fallback_method_used": self.fallback_method_used,
             "ok": self.ok,
-            "table_count": len(self.tables),
+            "tables_found": len(self.tables),
             "error_type": self.error_type,
             "error_message": self.error_message,
         }
 
 
+@dataclass
+class IssueLookup:
+    stock_code: str
+    issue_id: str = ""
+    method: str = ""
+    status: str = ""
+    message: str = ""
+    result: Optional[FetchResult] = None
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def orgdata_url(stock_code: str) -> str:
+    return f"{BASE_URL}/dbpub/orgdata.asp?code={clean_stock_code(stock_code)}&Submit=current"
 
 
 def issue_urls(issue_id: str) -> dict[str, str]:
@@ -72,11 +97,6 @@ def clean_stock_code(value: str) -> str:
     return digits.zfill(5) if digits else ""
 
 
-def looks_like_issue_id(value: str) -> bool:
-    text = (value or "").strip()
-    return bool(re.fullmatch(r"\d{4,8}", text)) and not text.startswith("0")
-
-
 def extract_tables_from_html(html: str) -> list[pd.DataFrame]:
     if not html:
         return []
@@ -84,14 +104,20 @@ def extract_tables_from_html(html: str) -> list[pd.DataFrame]:
     cleaned = []
     for table in tables:
         table = table.copy()
-        table.columns = [str(col).strip() for col in table.columns]
+        if isinstance(table.columns, pd.MultiIndex):
+            table.columns = [
+                " ".join(str(part).strip() for part in col if str(part).strip() and not str(part).startswith("Unnamed"))
+                for col in table.columns
+            ]
+        else:
+            table.columns = [str(col).strip() for col in table.columns]
         table = table.dropna(how="all")
-        table = table.loc[:, ~table.columns.str.fullmatch(r"Unnamed:.*", na=False)]
+        table = table.loc[:, ~pd.Index(table.columns).astype(str).str.fullmatch(r"Unnamed:.*", na=False)]
         cleaned.append(table)
     return cleaned
 
 
-def html_to_text(html: str, limit: int = 4000) -> str:
+def html_to_text(html: str, limit: int = 8000) -> str:
     soup = BeautifulSoup(html or "", "lxml")
     text = soup.get_text("\n", strip=True)
     return text[:limit]
@@ -108,6 +134,8 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
         result.status = response.status_code
         result.final_url = response.url
         response.raise_for_status()
+        if response.apparent_encoding:
+            response.encoding = response.apparent_encoding
         result.html = response.text
         result.raw_text = html_to_text(response.text)
         result.tables = extract_tables_from_html(response.text)
@@ -154,41 +182,81 @@ def fetch_page(name: str, url: str, timeout: int = 60, headless: bool = True) ->
     first = fetch_with_requests(name, url, timeout=timeout)
     if first.ok:
         return first
+
     fallback_reasons = ("403", "timeout", "no table", "dns", "connection", "name resolution")
     error_text = f"{first.status} {first.error_message}".lower()
-    if any(reason in error_text for reason in fallback_reasons) or not first.tables:
-        second = fetch_with_playwright(name, url, timeout=timeout, headless=headless)
-        if second.ok:
-            return second
-        second.error_type = second.error_type or first.error_type
-        second.error_message = second.error_message or first.error_message
+    should_try_browser = any(reason in error_text for reason in fallback_reasons) or not first.tables
+    if not should_try_browser:
+        return first
+
+    second = fetch_with_playwright(name, url, timeout=timeout, headless=headless)
+    second.fallback_method_used = "requests -> playwright"
+    if second.ok:
         return second
-    return first
+    second.error_type = second.error_type or first.error_type
+    second.error_message = second.error_message or first.error_message
+    return second
 
 
-def resolve_issue_id_from_stock(stock_code: str, timeout: int = 60, headless: bool = True) -> tuple[Optional[str], FetchResult]:
+def extract_issue_id_from_html(html: str) -> tuple[str, str]:
+    if not html:
+        return "", ""
+
+    patterns = [
+        r"(?:choldings|chldchg|bigchangesissue|cconchist)\.asp\?[^\"'>]*[?&]i=(\d+)",
+        r"(?:totalreturn|dealings|trades|price|changes)[^\"'>]*[?&]i=(\d+)",
+        r"[?&]i=(\d+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.I)
+        if match:
+            method = "extracted from orgdata" if "ccass" in match.group(0).lower() else "extracted from URL"
+            return match.group(1), method
+
+    soup = BeautifulSoup(html, "lxml")
+    for link in soup.find_all("a", href=True):
+        href = link["href"]
+        text = link.get_text(" ", strip=True).lower()
+        if not any(token in f"{href.lower()} {text}" for token in ("ccass", "total return", "dealings", "securities")):
+            continue
+        match = re.search(r"[?&]i=(\d+)", href)
+        if match:
+            return match.group(1), "extracted from URL"
+    return "", ""
+
+
+def resolve_issue_id_from_stock(stock_code: str, timeout: int = 60, headless: bool = True) -> IssueLookup:
     code = clean_stock_code(stock_code)
-    url = f"{BASE_URL}/dbpub/orgdata.asp?code={code}&Submit=current"
-    result = fetch_page("Org Data", url, timeout=timeout, headless=headless)
-    issue_id = None
-    if result.html:
-        candidates = re.findall(r"(?:choldings|chldchg|bigchangesissue|cconchist)\.asp\?i=(\d+)", result.html, flags=re.I)
-        if candidates:
-            issue_id = candidates[0]
-        if not issue_id:
-            soup = BeautifulSoup(result.html, "lxml")
-            for link in soup.find_all("a", href=True):
-                href = link["href"]
-                match = re.search(r"[?&]i=(\d+)", href)
-                if match and "ccass" in href.lower():
-                    issue_id = match.group(1)
-                    break
-    return issue_id, result
+    result = fetch_page("Company / orgdata", orgdata_url(code), timeout=timeout, headless=headless)
+    issue_id, method = extract_issue_id_from_html(result.html)
+    if issue_id:
+        return IssueLookup(stock_code=code, issue_id=issue_id, method=method, status="success", result=result)
+
+    if code in KNOWN_ISSUE_ID_BY_STOCK:
+        return IssueLookup(
+            stock_code=code,
+            issue_id=KNOWN_ISSUE_ID_BY_STOCK[code],
+            method="known mapping fallback",
+            status="success",
+            message="Issue ID was not found in orgdata links; known mapping fallback was used.",
+            result=result,
+        )
+
+    return IssueLookup(
+        stock_code=code,
+        method="",
+        status="failed",
+        message="Cannot automatically determine Webb-site issue ID. Please enter the Webb-site Issue ID manually.",
+        result=result,
+    )
 
 
-def fetch_all(issue_id: str, timeout: int = 60, headless: bool = True, delay_seconds: Optional[float] = None) -> dict[str, FetchResult]:
+def fetch_all(issue_id: str, stock_code: str = "", timeout: int = 60, headless: bool = True, delay_seconds: Optional[float] = None) -> dict[str, FetchResult]:
     delay = float(os.getenv("FETCH_DELAY_SECONDS", delay_seconds if delay_seconds is not None else 0.5))
     results: dict[str, FetchResult] = {}
+    if stock_code:
+        results["Company / orgdata"] = fetch_page("Company / orgdata", orgdata_url(stock_code), timeout=timeout, headless=headless)
+        time.sleep(max(delay, 0))
     for name, url in issue_urls(issue_id).items():
         results[name] = fetch_page(name, url, timeout=timeout, headless=headless)
         time.sleep(max(delay, 0))

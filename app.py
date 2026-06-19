@@ -4,11 +4,26 @@ import json
 import os
 import importlib
 
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+try:
+    import altair as alt
+except ImportError:
+    alt = None
+
 import utils.exporters as exporters
-from utils.fetcher import IssueLookup, clean_stock_code, fetch_all, resolve_issue_id_from_stock
+from utils.fetcher import (
+    USER_AGENT,
+    IssueLookup,
+    clean_stock_code,
+    extract_tables_from_html,
+    fetch_all,
+    fetch_with_requests,
+    issue_urls,
+    resolve_issue_id_from_stock,
+)
 from utils.parser import SECTIONS, build_fetch_summary, parse_results, table_preview_records
 from utils.report import build_report
 
@@ -158,6 +173,358 @@ def render_concentration_change(parsed) -> None:
         [{"Metric": key, "Change": value} for key, value in parsed.concentration_5day_change.items()],
         use_container_width=True,
     )
+
+
+def numeric_percent(value) -> float | None:
+    text = str(value or "").replace(",", "").replace("%", "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def build_rainbow_chart_data(concentration_table: pd.DataFrame) -> pd.DataFrame:
+    if concentration_table is None or concentration_table.empty:
+        return pd.DataFrame()
+
+    rows = []
+    band_order = {"Top 5": 1, "Top 6-10": 2, "NCIP": 3, "Other CCASS": 4, "Outside CCASS": 5}
+    for _, row in concentration_table.iterrows():
+        date = pd.to_datetime(row.get("Date"), errors="coerce")
+        if pd.isna(date):
+            continue
+
+        top5 = numeric_percent(row.get("Top 5 %"))
+        top10 = numeric_percent(row.get("Top 10 %"))
+        top10_ncip = numeric_percent(row.get("Top 10 + NCIP %"))
+        stake = numeric_percent(row.get("Stake in CCASS %"))
+        if top5 is None or top10 is None:
+            continue
+
+        top10_ncip = top10_ncip if top10_ncip is not None else top10
+        stake = stake if stake is not None else max(top10_ncip, top10)
+        bands = [
+            ("Top 5", top5),
+            ("Top 6-10", top10 - top5),
+            ("NCIP", top10_ncip - top10),
+            ("Other CCASS", stake - top10_ncip),
+            ("Outside CCASS", 100 - stake),
+        ]
+        for band, pct in bands:
+            if pct is not None and pct > 0:
+                rows.append({"Date": date, "Band": band, "BandOrder": band_order[band], "Percent": pct})
+
+    return pd.DataFrame(rows)
+
+
+def render_rainbow_chart(parsed) -> None:
+    st.markdown("**Concentration Band Chart (not DT rainbow)**")
+    if alt is None:
+        st.warning("Altair is not installed, so the chart cannot be drawn. Install requirements.txt and rerun the app.")
+        return
+    chart_data = build_rainbow_chart_data(parsed.concentration_table)
+    if chart_data.empty:
+        st.caption("Not enough concentration history to draw the concentration band chart.")
+        return
+
+    band_order = ["Top 5", "Top 6-10", "NCIP", "Other CCASS", "Outside CCASS"]
+    chart = (
+        alt.Chart(chart_data)
+        .mark_area(interpolate="monotone")
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Percent:Q", stack="zero", title="Share of issued securities (%)", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color(
+                "Band:N",
+                sort=band_order,
+                scale=alt.Scale(
+                    domain=band_order,
+                    range=["#7f1d1d", "#f97316", "#facc15", "#22c55e", "#38bdf8"],
+                ),
+                title="Holder group",
+            ),
+            order=alt.Order("BandOrder:Q", sort="ascending"),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date", format="%Y-%m-%d"),
+                alt.Tooltip("Band:N", title="Group"),
+                alt.Tooltip("Percent:Q", title="Band %", format=".2f"),
+            ],
+        )
+        .properties(height=420)
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.caption("Bands are derived from concentration history: Top 5, Top 6-10, NCIP, other CCASS holdings, and shares outside CCASS.")
+
+
+def pick_history_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    normalized = {str(col).lower().replace(".", "").strip(): col for col in df.columns}
+    for candidate in candidates:
+        wanted = candidate.lower().replace(".", "").strip()
+        for normalized_name, original in normalized.items():
+            if wanted in normalized_name:
+                return original
+    return None
+
+
+def participant_label(name: str, ccass_id: str) -> str:
+    clean = " ".join(str(name or "").split())
+    clean = clean.replace("(HONG KONG)", "(HK)").replace("COMPANY LIMITED", "CO LTD")
+    if len(clean) > 34:
+        clean = clean[:31].rstrip() + "..."
+    return f"{clean} ({ccass_id})" if ccass_id else clean
+
+
+def current_top_participants(parsed, limit: int) -> list[dict[str, object]]:
+    if parsed.holdings_table is None or parsed.holdings_table.empty:
+        return []
+    rows = []
+    for idx, row in parsed.holdings_table.head(limit).iterrows():
+        ccass_id = str(row.get("CCASS ID", "") or "").strip()
+        if not ccass_id:
+            continue
+        name = str(row.get("Participant", "") or "").strip()
+        rows.append(
+            {
+                "ccass_id": ccass_id,
+                "name": name,
+                "label": participant_label(name, ccass_id),
+                "order": len(rows) + 1,
+            }
+        )
+    return rows
+
+
+def sampled_history_dates(concentration_table: pd.DataFrame, max_points: int) -> list[str]:
+    if concentration_table is None or concentration_table.empty or "Date" not in concentration_table:
+        return []
+    dates = pd.to_datetime(concentration_table["Date"], errors="coerce").dropna().drop_duplicates().sort_values()
+    if dates.empty:
+        return []
+    latest = dates.max()
+    recent = dates[dates >= latest - pd.Timedelta(days=365)]
+    dates = recent if not recent.empty else dates
+    if len(dates) > max_points:
+        positions = sorted({round(i * (len(dates) - 1) / (max_points - 1)) for i in range(max_points)})
+        dates = dates.iloc[positions]
+    return [date.strftime("%Y-%m-%d") for date in dates]
+
+
+def parse_historical_holdings_table(table: pd.DataFrame, participants: list[dict[str, object]], date: str) -> list[dict[str, object]]:
+    if table is None or table.empty:
+        return []
+    df = table.copy()
+    id_col = pick_history_column(df, ["CCASS ID", "Participant ID", "ID"])
+    name_col = pick_history_column(df, ["Name"])
+    holding_col = pick_history_column(df, ["Holding"])
+    stake_col = pick_history_column(df, ["Stake %", "Stake", "%"])
+    if not id_col or not stake_col:
+        return []
+
+    wanted = {item["ccass_id"]: item for item in participants}
+    found = {}
+    for _, row in df.iterrows():
+        ccass_id = str(row.get(id_col, "") or "").strip()
+        if ccass_id not in wanted:
+            continue
+        found[ccass_id] = {
+            "Date": date,
+            "Participant": wanted[ccass_id]["label"],
+            "ParticipantOrder": wanted[ccass_id]["order"],
+            "CCASS ID": ccass_id,
+            "Name": row.get(name_col, wanted[ccass_id]["name"]) if name_col else wanted[ccass_id]["name"],
+            "Holding": row.get(holding_col, "") if holding_col else "",
+            "Stake": numeric_percent(row.get(stake_col)),
+        }
+
+    rows = []
+    for item in participants:
+        record = found.get(item["ccass_id"])
+        if record:
+            rows.append(record)
+        else:
+            rows.append(
+                {
+                    "Date": date,
+                    "Participant": item["label"],
+                    "ParticipantOrder": item["order"],
+                    "CCASS ID": item["ccass_id"],
+                    "Name": item["name"],
+                    "Holding": "",
+                    "Stake": 0.0,
+                }
+            )
+    return rows
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_participant_history(issue_id: str, dates: tuple[str, ...], participants: tuple[tuple[str, str, str, int], ...], timeout: int, headless: bool) -> pd.DataFrame:
+    from playwright.sync_api import sync_playwright
+
+    participant_rows = [
+        {"ccass_id": ccass_id, "name": name, "label": label, "order": order}
+        for ccass_id, name, label, order in participants
+    ]
+    rows = []
+    base_url = issue_urls(issue_id)["Holdings"]
+    browser_jobs = []
+    for date in dates:
+        url = base_url.replace(f"?i={issue_id}", f"?d={date}&i={issue_id}")
+        result = fetch_with_requests(f"Holdings {date}", url, timeout=timeout)
+        if not result.ok:
+            browser_jobs.append((date, url))
+            continue
+        best_rows = []
+        for table in result.tables:
+            parsed_rows = parse_historical_holdings_table(table, participant_rows, date)
+            if len(parsed_rows) > len(best_rows):
+                best_rows = parsed_rows
+        rows.extend(best_rows)
+
+    if browser_jobs:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(headless=headless)
+            except Exception as launch_exc:
+                message = str(launch_exc).lower()
+                missing_headless_shell = "chromium_headless_shell" in message or "chrome-headless-shell" in message
+                if not headless or not missing_headless_shell:
+                    raise
+                browser = p.chromium.launch(headless=False)
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1440, "height": 1000},
+                locale="en-US",
+            )
+            page = context.new_page()
+            for date, url in browser_jobs:
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                    page.wait_for_timeout(500)
+                    tables = extract_tables_from_html(page.content())
+                except Exception:
+                    continue
+                best_rows = []
+                for table in tables:
+                    parsed_rows = parse_historical_holdings_table(table, participant_rows, date)
+                    if len(parsed_rows) > len(best_rows):
+                        best_rows = parsed_rows
+                rows.extend(best_rows)
+            browser.close()
+    return pd.DataFrame(rows)
+
+
+def render_dt_participant_rainbow(parsed, timeout: int, headless: bool) -> None:
+    stock_label = parsed.stock_code or parsed.issue_id or "current stock"
+    st.markdown(f"**CCASS 中央結算持股分佈圖 - {stock_label}**")
+    st.caption("DT-style rainbow: each colour is one CCASS participant/broker for this stock. This is different from Top 5 / Top 10 concentration.")
+
+    if alt is None:
+        st.warning("Altair is not installed, so the chart cannot be drawn. Install requirements.txt and rerun the app.")
+        return
+    if parsed.holdings_table is None or parsed.holdings_table.empty:
+        st.caption("Holdings table is required before participant history can be drawn.")
+        return
+    if parsed.concentration_table is None or parsed.concentration_table.empty:
+        st.caption("Concentration history dates are required before participant history can be sampled.")
+        return
+
+    col1, col2, col3 = st.columns([1, 1, 2])
+    top_n = col1.number_input("顯示前 N 名參與者", min_value=3, max_value=20, value=8, step=1)
+    date_points = col2.number_input("歷史日期數量", min_value=6, max_value=80, value=26, step=2)
+    build_clicked = col3.button("生成真正 DT 彩虹圖", type="primary", use_container_width=True)
+
+    participants = current_top_participants(parsed, int(top_n))
+    dates = sampled_history_dates(parsed.concentration_table, int(date_points))
+    if not participants or not dates:
+        st.caption("Not enough parsed holdings/concentration data to prepare the chart.")
+        return
+
+    participant_ids = ",".join(str(item["ccass_id"]) for item in participants)
+    cache_key = f"{parsed.issue_id}:{participant_ids}:{top_n}:{date_points}:{dates[0]}:{dates[-1]}"
+    if st.session_state.get("dt_rainbow_key") != cache_key and not build_clicked:
+        st.session_state.pop("dt_rainbow_data", None)
+
+    if build_clicked or st.session_state.get("dt_rainbow_key") == cache_key:
+        with st.spinner(f"Fetching {len(dates)} historical holdings pages for {len(participants)} participants..."):
+            participant_tuple = tuple(
+                (str(item["ccass_id"]), str(item["name"]), str(item["label"]), int(item["order"]))
+                for item in participants
+            )
+            chart_data = fetch_participant_history(parsed.issue_id, tuple(dates), participant_tuple, int(timeout), bool(headless))
+        st.session_state.dt_rainbow_key = cache_key
+        st.session_state.dt_rainbow_data = chart_data
+    else:
+        top_preview = ", ".join(str(item["label"]) for item in participants[:3])
+        st.info(
+            f"按上面的紅色按鈕生成真正 DT 彩虹圖。將抓取 {len(dates)} 個歷史日期、"
+            f"{len(participants)} 個此股票的主要 CCASS 參與者。Top examples: {top_preview}"
+        )
+        return
+
+    chart_data = st.session_state.get("dt_rainbow_data", pd.DataFrame())
+    if chart_data.empty:
+        st.warning("Historical participant holdings could not be fetched. The source may be blocking requests or the selected dates may be unavailable.")
+        return
+
+    palette = [
+        "#f97316",
+        "#84cc16",
+        "#dc2626",
+        "#2563eb",
+        "#22c55e",
+        "#facc15",
+        "#db2777",
+        "#4f46e5",
+        "#06b6d4",
+        "#a855f7",
+        "#14b8a6",
+        "#eab308",
+        "#ef4444",
+        "#0ea5e9",
+        "#65a30d",
+        "#9333ea",
+        "#f59e0b",
+        "#10b981",
+        "#64748b",
+        "#be123c",
+    ]
+    domain = [item["label"] for item in participants]
+    chart = (
+        alt.Chart(chart_data)
+        .mark_area(interpolate="monotone")
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Stake:Q", stack="zero", title="持股百分比 (%)"),
+            color=alt.Color(
+                "Participant:N",
+                sort=domain,
+                scale=alt.Scale(domain=domain, range=palette[: len(domain)]),
+                title="CCASS 參與者",
+                legend=alt.Legend(orient="bottom", columns=2, labelLimit=360),
+            ),
+            order=alt.Order("ParticipantOrder:Q", sort="ascending"),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date", format="%Y-%m-%d"),
+                alt.Tooltip("Participant:N", title="CCASS 參與者"),
+                alt.Tooltip("Stake:Q", title="持股 %", format=".2f"),
+                alt.Tooltip("Holding:N", title="Holding"),
+            ],
+        )
+        .properties(height=430, title="CCASS 中央結算持股分佈圖")
+    )
+    st.altair_chart(chart, use_container_width=True)
+    latest_rows = (
+        chart_data.sort_values("Date")
+        .groupby("Participant", as_index=False)
+        .tail(1)
+        .sort_values("ParticipantOrder")
+        [["Participant", "Stake", "Holding"]]
+    )
+    st.caption(f"Fetched {chart_data['Date'].nunique()} dates. Missing participant rows are treated as 0%.")
+    with st.expander("Latest legend values", expanded=True):
+        st.dataframe(latest_rows, use_container_width=True, hide_index=True)
 
 
 def compact_fetch_summary(fetch_summary):
@@ -381,12 +748,17 @@ with st.expander("CSV content preview", expanded=False):
 st.markdown(
     """
     **Jump to:** [Fetch Summary](#fetch-summary) | [All Tables](#all-tables) |
+    [DT Rainbow](#dt-rainbow) |
     [Company](#company) | [Holdings](#holdings) | [Changes](#changes) |
     [Big Changes](#big-changes) | [Concentration](#concentration) |
     [Raw Previews](#raw-table-previews) | [Copy for ChatGPT](#copy-for-chatgpt) |
     [Downloads](#download-files)
     """
 )
+
+st.divider()
+st.markdown('<div id="dt-rainbow"></div>', unsafe_allow_html=True)
+render_dt_participant_rainbow(parsed, timeout, headless)
 
 st.markdown('<div id="fetch-summary"></div>', unsafe_allow_html=True)
 st.subheader("Fetch Summary")
@@ -466,6 +838,8 @@ render_section(
 )
 if parse and parse.status == "partial success":
     st.warning(parse.error)
+with st.expander("Show concentration band chart (not DT rainbow)", expanded=False):
+    render_rainbow_chart(parsed)
 render_concentration_change(parsed)
 
 st.divider()

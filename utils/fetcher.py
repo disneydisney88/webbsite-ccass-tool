@@ -162,7 +162,15 @@ def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> 
     result = FetchResult(name=name, url=url, fetched_time=now_iso(), method="playwright")
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=headless)
+            try:
+                browser = p.chromium.launch(headless=headless)
+            except Exception as launch_exc:
+                message = str(launch_exc).lower()
+                missing_headless_shell = "chromium_headless_shell" in message or "chrome-headless-shell" in message
+                if not headless or not missing_headless_shell:
+                    raise
+                browser = p.chromium.launch(headless=False)
+                result.fallback_method_used = "playwright headless -> headed"
             context = browser.new_context(
                 user_agent=USER_AGENT,
                 viewport={"width": 1440, "height": 1000},

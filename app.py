@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -14,6 +14,7 @@ except ImportError:
     alt = None
 
 import utils.exporters as exporters
+from utils.hkexnews import HKEXAnnouncementResult, fetch_announcements
 from utils.fetcher import (
     USER_AGENT,
     IssueLookup,
@@ -164,6 +165,31 @@ def render_all_parsed_tables(parsed) -> None:
             st.warning(f"{section} parsed table is not available. Check Raw Table Previews.")
 
 
+
+def empty_announcements(stock_code: str = "", period_years: int = 1) -> HKEXAnnouncementResult:
+    return HKEXAnnouncementResult(stock_code=stock_code, period_years=period_years, table=pd.DataFrame())
+
+
+def render_hkex_announcements(announcements: HKEXAnnouncementResult) -> None:
+    st.subheader("HKEX Announcements")
+    if not announcements or announcements.table is None:
+        st.info("HKEX announcements were not fetched.")
+        return
+    period = f"{announcements.period_years} year" if announcements.period_years == 1 else f"{announcements.period_years} years"
+    st.caption(
+        f"Stock {announcements.stock_code or '-'} {announcements.stock_name or ''} | "
+        f"Period: {announcements.from_date or '-'} to {announcements.to_date or '-'} ({period}) | "
+        f"HKEX total count: {announcements.total_count}"
+    )
+    if announcements.url:
+        st.caption(announcements.url)
+    if announcements.error:
+        st.warning(announcements.error)
+    if announcements.table.empty:
+        st.info("No HKEX announcements found for this period.")
+        return
+    display_cols = ["Publish time", "Category", "Title", "File info", "URL"]
+    st.dataframe(announcements.table[display_cols], use_container_width=True, hide_index=True)
 def render_concentration_change(parsed) -> None:
     st.markdown("**Recent 5 trading days concentration change**")
     if not parsed.concentration_5day_change:
@@ -616,6 +642,7 @@ with st.sidebar:
         value=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60")),
         step=5,
     )
+    announcement_years = st.selectbox("HKEX announcements period", [1, 2], index=0, format_func=lambda value: f"{value} year" if value == 1 else f"{value} years")
     headless = st.toggle("Playwright headless", value=env_bool("PLAYWRIGHT_HEADLESS", True))
     fetch_clicked = st.button("Fetch Webb-site Data", type="primary", use_container_width=True)
 
@@ -624,10 +651,14 @@ if "results" not in st.session_state:
     st.session_state.lookup = empty_lookup()
     st.session_state.manual_issue_id = ""
 
+if "hkex_announcements" not in st.session_state:
+    st.session_state.hkex_announcements = empty_announcements()
+
 if fetch_clicked:
     raw_input = user_input.strip()
     st.session_state.results = None
     st.session_state.lookup = empty_lookup()
+    st.session_state.hkex_announcements = empty_announcements(period_years=int(announcement_years))
 
     if not raw_input:
         st.error("Please enter a Stock Code or Webb-site Issue ID.")
@@ -671,11 +702,21 @@ if fetch_clicked:
                     if result:
                         st.write(f"{section}: {'success' if result.ok else 'failed'}, tables={len(result.tables)}")
                 status.update(label="Fetch complete", state="complete")
+            if stock_code:
+                with st.status("Fetching HKEX announcements...", expanded=True) as status:
+                    announcements = fetch_announcements(stock_code, period_years=int(announcement_years), timeout=int(timeout))
+                    if announcements.ok:
+                        st.write(f"HKEX announcements: {len(announcements.table)} rows loaded, HKEX total count={announcements.total_count}")
+                    else:
+                        st.warning(announcements.error)
+                    status.update(label="HKEX announcement fetch complete", state="complete")
+                st.session_state.hkex_announcements = announcements
             st.session_state.results = results
             st.session_state.lookup = lookup
 
 results = st.session_state.results
 lookup = st.session_state.lookup
+hkex_announcements = st.session_state.hkex_announcements
 
 st.subheader("Resolved Metadata")
 meta_cols = st.columns(4)
@@ -710,7 +751,7 @@ parsed = parse_results(
     id_lookup_status=lookup.status,
     selected_indices=manual_overrides,
 )
-report = build_report(parsed, results)
+report = build_report(parsed, results, hkex_announcements=hkex_announcements)
 fetch_summary = build_fetch_summary(parsed, results)
 json_ready = parsed_to_json_ready(parsed, results)
 
@@ -748,7 +789,7 @@ with st.expander("CSV content preview", expanded=False):
 st.markdown(
     """
     **Jump to:** [Fetch Summary](#fetch-summary) | [All Tables](#all-tables) |
-    [DT Rainbow](#dt-rainbow) |
+    [DT Rainbow](#dt-rainbow) | [HKEX Announcements](#hkex-announcements) |
     [Company](#company) | [Holdings](#holdings) | [Changes](#changes) |
     [Big Changes](#big-changes) | [Concentration](#concentration) |
     [Raw Previews](#raw-table-previews) | [Copy for ChatGPT](#copy-for-chatgpt) |
@@ -759,6 +800,10 @@ st.markdown(
 st.divider()
 st.markdown('<div id="dt-rainbow"></div>', unsafe_allow_html=True)
 render_dt_participant_rainbow(parsed, timeout, headless)
+
+st.divider()
+st.markdown('<div id="hkex-announcements"></div>', unsafe_allow_html=True)
+render_hkex_announcements(hkex_announcements)
 
 st.markdown('<div id="fetch-summary"></div>', unsafe_allow_html=True)
 st.subheader("Fetch Summary")

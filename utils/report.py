@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pandas as pd
 
@@ -72,7 +72,7 @@ def concentration_change_lines(parsed: ParsedCCASS) -> str:
     return "\n".join(f"* {labels.get(key, key)}: {value}" for key, value in parsed.concentration_5day_change.items())
 
 
-def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> str:
+def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_announcements=None) -> str:
     fetch_summary = build_fetch_summary(parsed, results)
     fetch_summary_report = fetch_summary[
         ["Section", "Status", "Tables found", "Selected table index", "Latest date / data date", "Error"]
@@ -122,6 +122,12 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> str:
 * Concentration latest date: {value_or_reason(parsed.concentration_latest_date, conc_failed, "Concentration")}
 * Source URLs:
 {source_url_lines(results)}
+* HKEX announcements period: {getattr(hkex_announcements, "from_date", "")} to {getattr(hkex_announcements, "to_date", "")}
+* HKEX announcements total count: {getattr(hkex_announcements, "total_count", 0)}
+
+## HKEX Announcements
+
+{markdown_table(hkex_announcements.table) if hkex_announcements is not None and hkex_announcements.table is not None and not hkex_announcements.table.empty else "No HKEX announcements found or fetched."}
 
 ## Holdings
 

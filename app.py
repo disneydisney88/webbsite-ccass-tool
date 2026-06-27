@@ -377,6 +377,77 @@ def parse_event_markers(text: str) -> list[dict[str, object]]:
     return rows
 
 
+def build_ccass_concentration_line_data(concentration_table: pd.DataFrame, window: str = "1Y") -> pd.DataFrame:
+    if concentration_table is None or concentration_table.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, row in concentration_table.iterrows():
+        date = pd.to_datetime(row.get("Date"), errors="coerce")
+        top5 = numeric_percent(row.get("Top 5 %"))
+        top10 = numeric_percent(row.get("Top 10 %"))
+        top10_ncip = numeric_percent(row.get("Top 10 + NCIP %"))
+        if pd.isna(date):
+            continue
+        ncip = None
+        if top10 is not None and top10_ncip is not None:
+            ncip = max(top10_ncip - top10, 0)
+        top5_ncip = top5 + ncip if top5 is not None and ncip is not None else None
+        series = [
+            ("Top5 + 非流通股票", top5_ncip),
+            ("Top10 + 非流通股票", top10_ncip),
+        ]
+        for label, value in series:
+            if value is not None:
+                rows.append({"Date": date, "Metric": label, "Percent": value, "PercentLabel": f"{value:.2f}%"})
+    data = pd.DataFrame(rows)
+    if data.empty:
+        return data
+    latest = data["Date"].max()
+    window_days = {"1M": 31, "3M": 93, "6M": 186, "1Y": 365}.get(window)
+    if window_days:
+        data = data[data["Date"] >= latest - pd.Timedelta(days=window_days)]
+    return data.sort_values("Date")
+
+
+def latest_ccass_concentration_values(concentration_data: pd.DataFrame) -> pd.DataFrame:
+    if concentration_data is None or concentration_data.empty:
+        return pd.DataFrame()
+    return (
+        concentration_data.sort_values("Date")
+        .groupby("Metric", as_index=False)
+        .tail(1)
+        .sort_values("Metric")
+        [["Metric", "Percent", "PercentLabel", "Date"]]
+    )
+
+
+def ccass_concentration_chart(concentration_data: pd.DataFrame, height: int = 145):
+    if concentration_data is None or concentration_data.empty or alt is None:
+        return None
+    return (
+        alt.Chart(concentration_data)
+        .mark_line(strokeWidth=2.2)
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Percent:Q", title="CCASS 股權集中度 (%)", scale=alt.Scale(zero=False)),
+            color=alt.Color(
+                "Metric:N",
+                scale=alt.Scale(
+                    domain=["Top5 + 非流通股票", "Top10 + 非流通股票"],
+                    range=["#f97316", "#2563eb"],
+                ),
+                legend=alt.Legend(orient="top", title=None),
+            ),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date", format="%Y-%m-%d"),
+                alt.Tooltip("Metric:N", title="Metric"),
+                alt.Tooltip("Percent:Q", title="Percent", format=".2f"),
+            ],
+        )
+        .properties(height=height, title="CCASS 股權集中度")
+    )
+
+
 def price_turnover_chart(
     chart_data: pd.DataFrame,
     bar_mode: str = "Turnover",
@@ -478,6 +549,20 @@ def price_turnover_chart(
     return alt.layer(*layers).resolve_scale(y="independent").properties(height=height)
 
 
+def render_ccass_concentration_summary(parsed, window: str = "1Y", chart_height: int = 150) -> None:
+    concentration_data = build_ccass_concentration_line_data(parsed.concentration_table, window)
+    if concentration_data.empty:
+        st.caption("CCASS concentration data is not available for Top5/Top10 + non-circulating shares.")
+        return
+    latest = latest_ccass_concentration_values(concentration_data)
+    metric_cols = st.columns(2)
+    for idx, (_, row) in enumerate(latest.iterrows()):
+        metric_cols[min(idx, 1)].metric(row["Metric"], f"{row['Percent']:.2f}%", pd.to_datetime(row["Date"]).strftime("%Y-%m-%d"))
+    chart = ccass_concentration_chart(concentration_data, height=chart_height)
+    if chart is not None:
+        st.altair_chart(chart, use_container_width=True)
+
+
 def render_price_history(parsed) -> None:
     st.markdown("**Price & Turnover History**")
     if alt is None:
@@ -512,6 +597,7 @@ def render_price_history(parsed) -> None:
     )
     st.altair_chart(chart, use_container_width=True)
     st.caption(f"Price history comes from Webb-site hpu.asp. Latest daily figures are as of {stats.get('date', '-')}. Grey bands mark long gaps with no price records.")
+    render_ccass_concentration_summary(parsed, window or "1Y")
 
 
 def build_rainbow_chart_data(concentration_table: pd.DataFrame) -> pd.DataFrame:
@@ -870,22 +956,41 @@ def render_dt_participant_rainbow(parsed, timeout: int, headless: bool) -> None:
     )
     if align_price:
         price_data = build_price_history_chart_data(parsed.price_history_table, "Max")
+        concentration_line_data = build_ccass_concentration_line_data(parsed.concentration_table, "Max")
         if not price_data.empty:
             rainbow_dates = pd.to_datetime(chart_data["Date"], errors="coerce").dropna()
             if not rainbow_dates.empty:
                 date_min = rainbow_dates.min()
                 date_max = rainbow_dates.max()
                 price_data = price_data[(price_data["Date"] >= date_min) & (price_data["Date"] <= date_max)]
+                if not concentration_line_data.empty:
+                    concentration_line_data = concentration_line_data[
+                        (concentration_line_data["Date"] >= date_min) & (concentration_line_data["Date"] <= date_max)
+                    ]
             price_panel = price_turnover_chart(price_data, "Turnover", height=220)
             if price_panel is not None:
                 price_panel = price_panel.properties(title="Price / Daily VWAP / Turnover aligned with CCASS rainbow")
-                combined = alt.vconcat(price_panel, rainbow_chart).resolve_scale(
+                panels = [price_panel, rainbow_chart]
+                concentration_panel = ccass_concentration_chart(concentration_line_data, height=150)
+                if concentration_panel is not None:
+                    panels.append(concentration_panel)
+                combined = alt.vconcat(*panels).resolve_scale(
                     x="shared",
                     y="independent",
                     color="independent",
                     strokeDash="independent",
                 )
                 st.altair_chart(combined, use_container_width=True)
+                if not concentration_line_data.empty:
+                    latest_concentration = latest_ccass_concentration_values(concentration_line_data)
+                    with st.expander("CCASS 股權集中度最新數值", expanded=True):
+                        st.dataframe(
+                            latest_concentration.assign(Date=latest_concentration["Date"].dt.strftime("%Y-%m-%d"))[
+                                ["Metric", "PercentLabel", "Date"]
+                            ],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
             else:
                 st.altair_chart(rainbow_chart, use_container_width=True)
         else:

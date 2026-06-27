@@ -879,7 +879,12 @@ def render_dt_participant_rainbow(parsed, timeout: int, headless: bool) -> None:
             price_panel = price_turnover_chart(price_data, "Turnover", height=220)
             if price_panel is not None:
                 price_panel = price_panel.properties(title="Price / Daily VWAP / Turnover aligned with CCASS rainbow")
-                combined = alt.vconcat(price_panel, rainbow_chart).resolve_scale(x="shared", y="independent")
+                combined = alt.vconcat(price_panel, rainbow_chart).resolve_scale(
+                    x="shared",
+                    y="independent",
+                    color="independent",
+                    strokeDash="independent",
+                )
                 st.altair_chart(combined, use_container_width=True)
             else:
                 st.altair_chart(rainbow_chart, use_container_width=True)

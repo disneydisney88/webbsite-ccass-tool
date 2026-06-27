@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: webbsite-ccass-tool
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PLAYWRIGHT_HEADLESS
+        value: "true"
+      - key: REQUEST_TIMEOUT_SECONDS
+        value: "60"
+      - key: FETCH_DELAY_SECONDS
+        value: "0.5"
+
+  - type: web
+    name: webbsite-ccass-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.api
+    envVars:
+      - key: PLAYWRIGHT_HEADLESS
+        value: "true"
+      - key: REQUEST_TIMEOUT_SECONDS
+        value: "60"
+      - key: FETCH_DELAY_SECONDS
+        value: "0.5"
+      - key: API_QUIET
+        value: "1"
+      - key: API_TOKEN
+        sync: false

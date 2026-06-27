@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from .fetcher import FetchResult
 
 
-SECTIONS = ["Company / orgdata", "Holdings", "Changes", "Big Changes", "Concentration"]
+SECTIONS = ["Company / orgdata", "Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
 
 
 @dataclass
@@ -36,6 +36,7 @@ class ParsedCCASS:
     changes_trading_date: str = ""
     big_changes_latest_date: str = ""
     concentration_latest_date: str = ""
+    price_history_latest_date: str = ""
     issued_securities: str = ""
     total_in_ccass: str = ""
     total_in_ccass_pct: str = ""
@@ -46,6 +47,10 @@ class ParsedCCASS:
     volume: str = ""
     turnover: str = ""
     average_price: str = ""
+    latest_price: str = ""
+    latest_price_turnover: str = ""
+    latest_price_volume: str = ""
+    latest_price_vwap: str = ""
     total_ccass_change: str = ""
     major_increases: list[str] = field(default_factory=list)
     major_decreases: list[str] = field(default_factory=list)
@@ -58,6 +63,7 @@ class ParsedCCASS:
     changes_table: pd.DataFrame = field(default_factory=pd.DataFrame)
     big_changes_table: pd.DataFrame = field(default_factory=pd.DataFrame)
     concentration_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    price_history_table: pd.DataFrame = field(default_factory=pd.DataFrame)
     section_parses: dict[str, SectionParse] = field(default_factory=dict)
 
 
@@ -215,6 +221,7 @@ def score_table(section: str, df: pd.DataFrame) -> int:
         ],
         "Big Changes": ["date", "participant", "change", "change %", "holding change"],
         "Concentration": ["date", "top 5", "top 10", "top 10 ncip", "stake in ccass"],
+        "Price History": ["date", "close", "price", "volume", "turnover", "vwap"],
         "Company / orgdata": ["code", "listed", "hk main", "stock code", "name", "issue"],
     }
     score = sum(1 for keyword in rules.get(section, []) if norm(keyword) in text)
@@ -230,6 +237,8 @@ def score_table(section: str, df: pd.DataFrame) -> int:
     if section == "Big Changes" and not ("date" in text and "change" in text):
         return 0
     if section == "Concentration" and not ("date" in text and ("top 5" in text or "top5" in text)):
+        return 0
+    if section == "Price History" and not ("date" in text and ("close" in text or "price" in text)):
         return 0
     return score
 
@@ -569,6 +578,58 @@ def parse_concentration(result: FetchResult, parsed: ParsedCCASS, overrides: dic
     validate_concentration(parsed)
 
 
+def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
+    parse = SectionParse("Price History")
+    parsed.section_parses[parse.section] = parse
+    table = get_selected_table(parse.section, result, overrides, parse)
+    if table.empty:
+        return
+
+    date_col = pick_first_column(table, [["date"]])
+    close_col = pick_first_column(table, [["close"], ["price"]])
+    volume_col = pick_first_column(table, [["volume"], ["vol"]])
+    turnover_col = pick_first_column(table, [["turnover"], ["value"], ["amount"]])
+    vwap_col = pick_first_column(table, [["vwap"], ["average price"], ["avg price"]])
+    high_col = pick_first_column(table, [["high"]])
+    low_col = pick_first_column(table, [["low"]])
+    open_col = pick_first_column(table, [["open"]])
+
+    if any(col is None for col in [date_col, close_col]):
+        parse.status = "no matching table"
+        parse.error = "Price History table parsing failed. Raw table previews are shown below."
+        return
+
+    output = pd.DataFrame()
+    output["Date"] = table[date_col]
+    output["Close"] = table[close_col]
+    output["Open"] = table[open_col] if open_col else ""
+    output["High"] = table[high_col] if high_col else ""
+    output["Low"] = table[low_col] if low_col else ""
+    output["Volume"] = table[volume_col] if volume_col else ""
+    output["Turnover"] = table[turnover_col] if turnover_col else ""
+    output["VWAP"] = table[vwap_col] if vwap_col else ""
+    output = output.dropna(how="all")
+    output = output[output["Date"].astype(str).str.strip().ne("")]
+    parsed.price_history_table = output
+
+    if parsed.price_history_table.empty:
+        parse.status = "no matching table"
+        parse.error = "Price History table parsing failed. Raw table previews are shown below."
+        return
+
+    parsed.price_history_latest_date = latest_date_from_column(parsed.price_history_table, "Date")
+    parse.latest_date = parsed.price_history_latest_date
+    sorted_df = parsed.price_history_table.copy()
+    sorted_df["_date"] = sorted_df["Date"].map(parse_date_value)
+    sorted_df = sorted_df.dropna(subset=["_date"]).sort_values("_date", ascending=False)
+    if not sorted_df.empty:
+        latest = sorted_df.iloc[0]
+        parsed.latest_price = safe_str(latest.get("Close"))
+        parsed.latest_price_volume = safe_str(latest.get("Volume"))
+        parsed.latest_price_turnover = safe_str(latest.get("Turnover"))
+        parsed.latest_price_vwap = safe_str(latest.get("VWAP"))
+
+
 def calculate_concentration_5day_change(df: pd.DataFrame) -> dict[str, str]:
     if df.empty or len(df) < 2:
         return {}
@@ -679,6 +740,11 @@ def parse_results(
             parse_concentration(results["Concentration"], parsed, selected_indices)
         else:
             parsed.section_parses["Concentration"] = SectionParse("Concentration", status="failed", error=results["Concentration"].error_message)
+    if results.get("Price History"):
+        if results["Price History"].ok:
+            parse_price_history(results["Price History"], parsed, selected_indices)
+        else:
+            parsed.section_parses["Price History"] = SectionParse("Price History", status="failed", error=results["Price History"].error_message)
 
     fallback_concentration_from_holdings(parsed, results.get("Concentration"))
     add_cross_section_warnings(parsed)

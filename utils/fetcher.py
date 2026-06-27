@@ -83,6 +83,7 @@ def issue_urls(issue_id: str) -> dict[str, str]:
         "Changes": f"{BASE_URL}/ccass/chldchg.asp?i={issue_id}",
         "Big Changes": f"{BASE_URL}/ccass/bigchangesissue.asp?i={issue_id}",
         "Concentration": f"{BASE_URL}/ccass/cconchist.asp?i={issue_id}",
+        "Price History": f"{BASE_URL}/dbpub/hpu.asp?i={issue_id}",
     }
 
 

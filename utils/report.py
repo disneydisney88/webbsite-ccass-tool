@@ -10,6 +10,7 @@ REPORT_COLUMNS = {
     "holdings": ["Rank", "Participant", "CCASS ID", "Holding", "Stake %", "Cumulative %"],
     "changes": ["Participant", "Change", "Change %", "Holding after", "Stake after"],
     "concentration": ["Date", "Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"],
+    "price_history": ["Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP"],
 }
 
 
@@ -83,6 +84,7 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
     changes_failed = parsed.changes_table.empty
     big_failed = parsed.big_changes_table.empty
     conc_failed = parsed.concentration_table.empty
+    price_failed = parsed.price_history_table.empty
 
     report = f"""# {parsed.stock_code or "Unknown stock code"} {parsed.stock_name or "Unknown stock name"}｜Webb-site CCASS 抽取結果
 
@@ -103,6 +105,8 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 {bullet_list(parsed.major_decreases)}
 * Big Changes latest date: {value_or_reason(parsed.big_changes_latest_date, big_failed, "Big Changes")}
 * Concentration latest date: {value_or_reason(parsed.concentration_latest_date, conc_failed, "Concentration")}
+* Price latest date: {value_or_reason(parsed.price_history_latest_date, price_failed, "Price History")}
+* Latest close / volume / turnover: {parsed.latest_price or "not available"} / {parsed.latest_price_volume or "not available"} / {parsed.latest_price_turnover or "not available"}
 
 ## Fetch Summary
 
@@ -120,6 +124,11 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * Changes trading date: {value_or_reason(parsed.changes_trading_date, changes_failed, "Changes")}
 * Big Changes latest date: {value_or_reason(parsed.big_changes_latest_date, big_failed, "Big Changes")}
 * Concentration latest date: {value_or_reason(parsed.concentration_latest_date, conc_failed, "Concentration")}
+* Price latest date: {value_or_reason(parsed.price_history_latest_date, price_failed, "Price History")}
+* Latest close: {parsed.latest_price}
+* Latest volume: {parsed.latest_price_volume}
+* Latest turnover: {parsed.latest_price_turnover}
+* Latest VWAP: {parsed.latest_price_vwap}
 * Source URLs:
 {source_url_lines(results)}
 * HKEX announcements period: {getattr(hkex_announcements, "from_date", "")} to {getattr(hkex_announcements, "to_date", "")}
@@ -174,6 +183,10 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 ## Concentration Recent 5 Trading Days Change
 
 {concentration_change_lines(parsed)}
+
+## Price History
+
+{markdown_table(parsed.price_history_table.head(80), REPORT_COLUMNS["price_history"])}
 
 ## Data Quality Warnings
 

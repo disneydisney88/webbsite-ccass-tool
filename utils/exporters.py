@@ -21,6 +21,7 @@ def metadata_dict(parsed: ParsedCCASS) -> dict:
         "changes_trading_date": parsed.changes_trading_date,
         "big_changes_latest_date": parsed.big_changes_latest_date,
         "concentration_latest_date": parsed.concentration_latest_date,
+        "price_history_latest_date": parsed.price_history_latest_date,
         "issued_securities": parsed.issued_securities,
         "total_in_ccass": parsed.total_in_ccass,
         "total_in_ccass_pct": parsed.total_in_ccass_pct,
@@ -28,6 +29,10 @@ def metadata_dict(parsed: ParsedCCASS) -> dict:
         "largest_participant": parsed.largest_participant,
         "top5_cumulative_pct": parsed.top5_cumulative_pct,
         "top10_cumulative_pct": parsed.top10_cumulative_pct,
+        "latest_price": parsed.latest_price,
+        "latest_price_volume": parsed.latest_price_volume,
+        "latest_price_turnover": parsed.latest_price_turnover,
+        "latest_price_vwap": parsed.latest_price_vwap,
     }
 
 
@@ -40,6 +45,7 @@ def parsed_to_json_ready(parsed: ParsedCCASS, results: dict[str, FetchResult]) -
         "changes": parsed.changes_table.to_dict(orient="records"),
         "bigchanges": parsed.big_changes_table.to_dict(orient="records"),
         "concentration": parsed.concentration_table.to_dict(orient="records"),
+        "price_history": parsed.price_history_table.to_dict(orient="records"),
         "raw_table_previews": table_preview_records(results),
         "major_increases": parsed.major_increases,
         "major_decreases": parsed.major_decreases,
@@ -77,6 +83,12 @@ def combined_stock_csv(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> 
             "Top holder concentration history",
             parsed.concentration_latest_date,
             parsed.concentration_table,
+        ),
+        (
+            "Price History",
+            "Historical close price, volume, turnover and VWAP",
+            parsed.price_history_latest_date,
+            parsed.price_history_table,
         ),
     ]
     frames = []
@@ -138,5 +150,6 @@ def excel_bytes(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> bytes:
         parsed.changes_table.to_excel(writer, sheet_name="changes", index=False)
         parsed.big_changes_table.to_excel(writer, sheet_name="bigchanges", index=False)
         parsed.concentration_table.to_excel(writer, sheet_name="concentration", index=False)
+        parsed.price_history_table.to_excel(writer, sheet_name="price_history", index=False)
         raw_preview_dataframe(results).to_excel(writer, sheet_name="raw_table_previews", index=False)
     return buffer.getvalue()

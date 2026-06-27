@@ -123,11 +123,12 @@ def render_download_buttons(parsed, results, report: str, key_prefix: str) -> No
         csv_text = all_csv.decode("utf-8-sig", errors="replace")
         preview_lines = "\n".join(csv_text.splitlines()[:80])
         st.text_area("First 80 CSV lines", preview_lines, height=260, key=f"{key_prefix}_{base}_csv_preview")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.download_button("Holdings CSV", csv_bytes(parsed.holdings_table), f"{base}_holdings.csv", "text/csv", key=f"{key_prefix}_{base}_holdings_csv")
     col2.download_button("Changes CSV", csv_bytes(parsed.changes_table), f"{base}_changes.csv", "text/csv", key=f"{key_prefix}_{base}_changes_csv")
     col3.download_button("Big Changes CSV", csv_bytes(parsed.big_changes_table), f"{base}_bigchanges.csv", "text/csv", key=f"{key_prefix}_{base}_bigchanges_csv")
     col4.download_button("Concentration CSV", csv_bytes(parsed.concentration_table), f"{base}_concentration.csv", "text/csv", key=f"{key_prefix}_{base}_concentration_csv")
+    col5.download_button("Price CSV", csv_bytes(parsed.price_history_table), f"{base}_price_history.csv", "text/csv", key=f"{key_prefix}_{base}_price_history_csv")
 
     col5, col6, col7 = st.columns(3)
     col5.download_button("Markdown Report", report.encode("utf-8"), f"{base}_report.md", "text/markdown", key=f"{key_prefix}_{base}_report_md")
@@ -155,6 +156,7 @@ def render_all_parsed_tables(parsed) -> None:
         ("Changes", parsed.changes_trading_date or parsed.changes_date_range, parsed.changes_table),
         ("Big Changes", parsed.big_changes_latest_date, parsed.big_changes_table),
         ("Concentration", parsed.concentration_latest_date, parsed.concentration_table),
+        ("Price History", parsed.price_history_latest_date, parsed.price_history_table),
     ]
     for section, date_value, df in sections:
         st.markdown(f"### {section}")
@@ -209,6 +211,307 @@ def numeric_percent(value) -> float | None:
         return float(text)
     except ValueError:
         return None
+
+
+def numeric_amount(value) -> float | None:
+    text = str(value or "").upper().replace(",", "").replace("HK$", "").replace("$", "").strip()
+    if not text:
+        return None
+    multiplier = 1.0
+    if text.endswith("K"):
+        multiplier = 1_000.0
+        text = text[:-1]
+    elif text.endswith("M"):
+        multiplier = 1_000_000.0
+        text = text[:-1]
+    elif text.endswith("B"):
+        multiplier = 1_000_000_000.0
+        text = text[:-1]
+    try:
+        return float(text) * multiplier
+    except ValueError:
+        return None
+
+
+def format_hk_amount(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    if abs(value) >= 1_000_000_000:
+        return f"HK${value / 1_000_000_000:.2f}B"
+    if abs(value) >= 1_000_000:
+        return f"HK${value / 1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"HK${value / 1_000:.1f}K"
+    return f"HK${value:,.0f}"
+
+
+def format_share_amount(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    if abs(value) >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}B shares"
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M shares"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.0f}K shares"
+    return f"{value:,.0f} shares"
+
+
+def format_price(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    return f"HK${value:.4f}".rstrip("0").rstrip(".")
+
+
+def format_pct(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "-"
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.2f}%"
+
+
+def build_price_history_chart_data(price_history_table: pd.DataFrame, window: str = "1Y") -> pd.DataFrame:
+    if price_history_table is None or price_history_table.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, row in price_history_table.iterrows():
+        date = pd.to_datetime(row.get("Date"), errors="coerce")
+        close = numeric_amount(row.get("Close"))
+        turnover = numeric_amount(row.get("Turnover"))
+        volume = numeric_amount(row.get("Volume"))
+        vwap = numeric_amount(row.get("VWAP"))
+        if pd.isna(date) or close is None:
+            continue
+        rows.append(
+            {
+                "Date": date,
+                "Close": close,
+                "Turnover": turnover,
+                "Volume": volume,
+                "VWAP": vwap,
+            }
+        )
+    data = pd.DataFrame(rows)
+    if data.empty:
+        return data
+    latest = data["Date"].max()
+    window_days = {"1M": 31, "3M": 93, "6M": 186, "1Y": 365}.get(window)
+    if window_days:
+        data = data[data["Date"] >= latest - pd.Timedelta(days=window_days)]
+    data = data.sort_values("Date").reset_index(drop=True)
+    data["DailyChangePct"] = data["Close"].pct_change() * 100
+    data["CloseVsVWAPPct"] = ((data["Close"] - data["VWAP"]) / data["VWAP"]) * 100
+    data["GapDays"] = data["Date"].diff().dt.days.fillna(1)
+    data["Segment"] = (data["GapDays"] > 10).cumsum()
+    data["CloseLabel"] = data["Close"].map(format_price)
+    data["VWAPLabel"] = data["VWAP"].map(format_price)
+    data["TurnoverLabel"] = data["Turnover"].map(format_hk_amount)
+    data["VolumeLabel"] = data["Volume"].map(format_share_amount)
+    data["DailyChangeLabel"] = data["DailyChangePct"].map(format_pct)
+    data["CloseVsVWAPLabel"] = data["CloseVsVWAPPct"].map(format_pct)
+    return data
+
+
+def suspended_gap_data(chart_data: pd.DataFrame) -> pd.DataFrame:
+    if chart_data is None or chart_data.empty:
+        return pd.DataFrame(columns=["Start", "End", "Label"])
+    rows = []
+    ordered = chart_data.sort_values("Date")
+    previous_date = None
+    for _, row in ordered.iterrows():
+        current_date = row["Date"]
+        if previous_date is not None and (current_date - previous_date).days > 10:
+            rows.append({"Start": previous_date, "End": current_date, "Label": "Trading suspended / no price records"})
+        previous_date = current_date
+    return pd.DataFrame(rows)
+
+
+def price_history_stats(chart_data: pd.DataFrame, issued_securities: str = "") -> dict[str, str]:
+    if chart_data is None or chart_data.empty:
+        return {}
+    latest = chart_data.sort_values("Date").iloc[-1]
+    previous = chart_data.sort_values("Date").iloc[-2] if len(chart_data) >= 2 else None
+    daily_change = None
+    if previous is not None and previous.get("Close"):
+        daily_change = (latest["Close"] - previous["Close"]) / previous["Close"] * 100
+    turnover_avg = chart_data["Turnover"].dropna().tail(20).mean()
+    turnover_vs_avg = latest["Turnover"] / turnover_avg * 100 if turnover_avg and not pd.isna(turnover_avg) else None
+    issued = numeric_amount(issued_securities)
+    turnover_rate = latest["Volume"] / issued * 100 if issued and latest.get("Volume") else None
+    close_vs_vwap = latest.get("CloseVsVWAPPct")
+    latest_date = pd.to_datetime(latest["Date"]).strftime("%d %b %Y")
+    return {
+        "date": latest_date,
+        "close": format_price(latest.get("Close")),
+        "daily_change": format_pct(daily_change),
+        "daily_vwap": format_price(latest.get("VWAP")),
+        "close_vs_vwap": format_pct(close_vs_vwap),
+        "turnover": format_hk_amount(latest.get("Turnover")),
+        "turnover_vs_avg": f"{turnover_vs_avg:.0f}% of 20-day average" if turnover_vs_avg is not None else "-",
+        "volume": format_share_amount(latest.get("Volume")),
+        "turnover_rate": f"Estimated turnover rate {turnover_rate:.2f}%" if turnover_rate is not None else "Estimated turnover rate n/a",
+    }
+
+
+def parse_cost_lines(text: str) -> list[dict[str, object]]:
+    rows = []
+    for line in (text or "").splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        price = numeric_amount(parts[1])
+        if price is not None:
+            rows.append({"Label": parts[0] or "Cost line", "Price": price})
+    return rows
+
+
+def parse_event_markers(text: str) -> list[dict[str, object]]:
+    rows = []
+    for line in (text or "").splitlines():
+        parts = [part.strip() for part in line.split(",", 1)]
+        if len(parts) < 2:
+            continue
+        date = pd.to_datetime(parts[0], errors="coerce")
+        if not pd.isna(date):
+            rows.append({"Date": date, "Label": parts[1]})
+    return rows
+
+
+def price_turnover_chart(
+    chart_data: pd.DataFrame,
+    bar_mode: str = "Turnover",
+    height: int = 320,
+    cost_lines: list[dict[str, object]] | None = None,
+    event_markers: list[dict[str, object]] | None = None,
+):
+    if chart_data is None or chart_data.empty or alt is None:
+        return None
+    data = chart_data.copy()
+    if bar_mode == "Volume":
+        data["BarValue"] = data["Volume"] / 1_000_000
+        bar_title = "Volume (million shares)"
+    else:
+        data["BarValue"] = data["Turnover"] / 1_000_000
+        bar_title = "Turnover (HK$ million)"
+
+    line_rows = []
+    for _, row in data.iterrows():
+        line_rows.append({"Date": row["Date"], "Series": "Close Price", "Value": row["Close"], "Segment": row["Segment"]})
+        if not pd.isna(row.get("VWAP")):
+            line_rows.append({"Date": row["Date"], "Series": "Daily VWAP", "Value": row["VWAP"], "Segment": row["Segment"]})
+    if cost_lines:
+        min_date = data["Date"].min()
+        max_date = data["Date"].max()
+        for idx, item in enumerate(cost_lines, start=1):
+            label = str(item["Label"])
+            line_rows.append({"Date": min_date, "Series": label, "Value": item["Price"], "Segment": f"cost-{idx}"})
+            line_rows.append({"Date": max_date, "Series": label, "Value": item["Price"], "Segment": f"cost-{idx}"})
+    line_data = pd.DataFrame(line_rows)
+    gap_data = suspended_gap_data(data)
+    event_data = pd.DataFrame(event_markers or [])
+    series_domain = ["Close Price", "Daily VWAP"] + [str(item["Label"]) for item in (cost_lines or [])]
+    series_range = ["#2563eb", "#dc2626", "#7c3aed", "#059669", "#d97706", "#be123c", "#0891b2"][: len(series_domain)]
+    dash_range = [[1, 0], [6, 4]] + [[3, 3] for _ in (cost_lines or [])]
+
+    tooltip = [
+        alt.Tooltip("Date:T", title="Date", format="%d %b %Y"),
+        alt.Tooltip("CloseLabel:N", title="Close"),
+        alt.Tooltip("VWAPLabel:N", title="Daily VWAP"),
+        alt.Tooltip("CloseVsVWAPLabel:N", title="Close vs VWAP"),
+        alt.Tooltip("TurnoverLabel:N", title="Turnover"),
+        alt.Tooltip("VolumeLabel:N", title="Volume"),
+        alt.Tooltip("DailyChangeLabel:N", title="Daily change"),
+    ]
+    layers = []
+    if not gap_data.empty:
+        layers.append(
+            alt.Chart(gap_data)
+            .mark_rect(color="#e5e7eb", opacity=0.55)
+            .encode(
+                x=alt.X("Start:T"),
+                x2="End:T",
+                tooltip=[alt.Tooltip("Label:N", title="Status"), alt.Tooltip("Start:T", title="From", format="%d %b %Y"), alt.Tooltip("End:T", title="To", format="%d %b %Y")],
+            )
+        )
+
+    base = alt.Chart(data).encode(x=alt.X("Date:T", title="Date"))
+    layers.append(
+        base.mark_bar(opacity=0.28, color="#94a3b8").encode(
+            y=alt.Y("BarValue:Q", title=bar_title, axis=alt.Axis(format="~s")),
+            tooltip=tooltip,
+        )
+    )
+    layers.append(
+        alt.Chart(line_data)
+        .mark_line(strokeWidth=2)
+        .encode(
+            x=alt.X("Date:T", title="Date"),
+            y=alt.Y("Value:Q", title="Price (HK$)", scale=alt.Scale(zero=False)),
+            color=alt.Color(
+                "Series:N",
+                scale=alt.Scale(domain=series_domain, range=series_range),
+                legend=alt.Legend(orient="top", title=None),
+            ),
+            strokeDash=alt.StrokeDash(
+                "Series:N",
+                scale=alt.Scale(domain=series_domain, range=dash_range),
+                legend=None,
+            ),
+            detail="Segment:N",
+            tooltip=[
+                alt.Tooltip("Series:N", title="Line"),
+                alt.Tooltip("Value:Q", title="Price", format=".4f"),
+                alt.Tooltip("Date:T", title="Date", format="%d %b %Y"),
+            ],
+        )
+    )
+    if not event_data.empty:
+        layers.append(
+            alt.Chart(event_data)
+            .mark_rule(color="#111827", strokeDash=[2, 2], opacity=0.65)
+            .encode(
+                x=alt.X("Date:T"),
+                tooltip=[alt.Tooltip("Date:T", title="Event date", format="%d %b %Y"), alt.Tooltip("Label:N", title="Event")],
+            )
+        )
+    layers.append(base.mark_point(opacity=0, size=90).encode(tooltip=tooltip))
+    return alt.layer(*layers).resolve_scale(y="independent").properties(height=height)
+
+
+def render_price_history(parsed) -> None:
+    st.markdown("**Price & Turnover History**")
+    if alt is None:
+        st.warning("Altair is not installed, so the chart cannot be drawn. Install requirements.txt and rerun the app.")
+        return
+    control1, control2 = st.columns([1, 1])
+    window = control1.radio("Range", ["1M", "3M", "6M", "1Y", "Max"], index=3, horizontal=True)
+    bar_mode = control2.radio("Bars", ["Turnover", "Volume"], index=0, horizontal=True)
+    with st.expander("Cost / event lines", expanded=False):
+        st.caption("Optional manual overlays. Use one per line: label,price or YYYY-MM-DD,label.")
+        note1, note2 = st.columns(2)
+        cost_text = note1.text_area("Cost lines", placeholder="GO Price,0.365\nPlacing Price,0.520\nNew Controller Cost,0.610", height=110)
+        event_text = note2.text_area("Event markers", placeholder="2026-05-15,Trading resumed\n2026-06-03,CCASS transfer", height=110)
+    chart_data = build_price_history_chart_data(parsed.price_history_table, window or "1Y")
+    if chart_data.empty:
+        st.caption("Price history is not available. Webb-site hpu.asp may be blocked or the table format may have changed.")
+        return
+
+    stats = price_history_stats(chart_data, parsed.issued_securities)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Latest Close", stats.get("close", "-"), stats.get("daily_change", "-"))
+    col2.metric("Latest Daily VWAP", stats.get("daily_vwap", "-"), f"Close vs VWAP {stats.get('close_vs_vwap', '-')}")
+    col3.metric("Turnover", stats.get("turnover", "-"), stats.get("turnover_vs_avg", "-"))
+    col4.metric("Volume", stats.get("volume", "-"), stats.get("turnover_rate", "-"))
+
+    chart = price_turnover_chart(
+        chart_data,
+        bar_mode or "Turnover",
+        height=340,
+        cost_lines=parse_cost_lines(cost_text),
+        event_markers=parse_event_markers(event_text),
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.caption(f"Price history comes from Webb-site hpu.asp. Latest daily figures are as of {stats.get('date', '-')}. Grey bands mark long gaps with no price records.")
 
 
 def build_rainbow_chart_data(concentration_table: pd.DataFrame) -> pd.DataFrame:
@@ -456,10 +759,11 @@ def render_dt_participant_rainbow(parsed, timeout: int, headless: bool) -> None:
         st.caption("Concentration history dates are required before participant history can be sampled.")
         return
 
-    col1, col2, col3 = st.columns([1, 1, 2])
-    top_n = col1.number_input("顯示前 N 名參與者", min_value=3, max_value=20, value=8, step=1)
+    col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
+    top_n = col1.number_input("顯示前 N 名參與者", min_value=3, max_value=40, value=12, step=1)
     date_points = col2.number_input("歷史日期數量", min_value=6, max_value=80, value=26, step=2)
     build_clicked = col3.button("生成真正 DT 彩虹圖", type="primary", use_container_width=True)
+    align_price = col4.checkbox("合併 Price", value=True)
 
     participants = current_top_participants(parsed, int(top_n))
     dates = sampled_history_dates(parsed.concentration_table, int(date_points))
@@ -515,9 +819,33 @@ def render_dt_participant_rainbow(parsed, timeout: int, headless: bool) -> None:
         "#10b981",
         "#64748b",
         "#be123c",
+        "#7c2d12",
+        "#15803d",
+        "#1d4ed8",
+        "#c026d3",
+        "#ca8a04",
+        "#0f766e",
+        "#b91c1c",
+        "#4338ca",
+        "#ea580c",
+        "#16a34a",
+        "#0284c7",
+        "#c2185b",
+        "#a16207",
+        "#047857",
+        "#6d28d9",
+        "#991b1b",
+        "#0369a1",
+        "#4d7c0f",
+        "#9d174d",
+        "#115e59",
+        "#92400e",
+        "#1e40af",
+        "#86198f",
+        "#166534",
     ]
     domain = [item["label"] for item in participants]
-    chart = (
+    rainbow_chart = (
         alt.Chart(chart_data)
         .mark_area(interpolate="monotone")
         .encode(
@@ -540,7 +868,26 @@ def render_dt_participant_rainbow(parsed, timeout: int, headless: bool) -> None:
         )
         .properties(height=430, title="CCASS 中央結算持股分佈圖")
     )
-    st.altair_chart(chart, use_container_width=True)
+    if align_price:
+        price_data = build_price_history_chart_data(parsed.price_history_table, "Max")
+        if not price_data.empty:
+            rainbow_dates = pd.to_datetime(chart_data["Date"], errors="coerce").dropna()
+            if not rainbow_dates.empty:
+                date_min = rainbow_dates.min()
+                date_max = rainbow_dates.max()
+                price_data = price_data[(price_data["Date"] >= date_min) & (price_data["Date"] <= date_max)]
+            price_panel = price_turnover_chart(price_data, "Turnover", height=220)
+            if price_panel is not None:
+                price_panel = price_panel.properties(title="Price / Daily VWAP / Turnover aligned with CCASS rainbow")
+                combined = alt.vconcat(price_panel, rainbow_chart).resolve_scale(x="shared", y="independent")
+                st.altair_chart(combined, use_container_width=True)
+            else:
+                st.altair_chart(rainbow_chart, use_container_width=True)
+        else:
+            st.caption("Price history is not available, so only the CCASS rainbow is shown.")
+            st.altair_chart(rainbow_chart, use_container_width=True)
+    else:
+        st.altair_chart(rainbow_chart, use_container_width=True)
     latest_rows = (
         chart_data.sort_values("Date")
         .groupby("Participant", as_index=False)
@@ -695,7 +1042,7 @@ if fetch_clicked:
             status.update(label="Issue ID resolution complete", state="complete")
 
         if issue_id:
-            with st.status("Fetching Company / Holdings / Changes / Big Changes / Concentration...", expanded=True) as status:
+            with st.status("Fetching Company / Holdings / Changes / Big Changes / Concentration / Price History...", expanded=True) as status:
                 results = fetch_all(issue_id, stock_code=stock_code, timeout=int(timeout), headless=headless)
                 for section in SECTIONS:
                     result = results.get(section)
@@ -735,7 +1082,7 @@ if not results:
 manual_overrides = {}
 with st.expander("Advanced table selection", expanded=False):
     st.caption("Leave these on Auto select unless a parsed table is missing. Manual choices apply after the page reruns.")
-    columns = st.columns(5)
+    columns = st.columns(len(SECTIONS))
     for idx, section in enumerate(SECTIONS):
         result = results.get(section)
         option = columns[idx].selectbox(section, table_options(result), key=f"selector_v3_{section}")
@@ -759,6 +1106,18 @@ with meta_cols[1]:
     st.caption("Stock name")
     st.markdown(f"**{parsed.stock_name or '-'}**")
 
+st.divider()
+st.markdown('<div id="price-turnover"></div>', unsafe_allow_html=True)
+render_price_history(parsed)
+
+if parsed.stock_code:
+    hkex_code = str(int(parsed.stock_code)) if str(parsed.stock_code).isdigit() else parsed.stock_code
+    st.link_button(
+        "Open HKEX quote",
+        f"https://www.hkex.com.hk/Market-Data/Securities-Prices/Equities/Equities-Quote?sym={hkex_code}&sc_lang=zh-hk",
+    )
+
+st.divider()
 st.subheader("Download This Stock")
 st.caption("One CSV contains Holdings, Changes, Big Changes and Concentration with source URL, fetched time and data meaning.")
 top_dl1, top_dl2 = st.columns([2, 1])
@@ -790,8 +1149,9 @@ st.markdown(
     """
     **Jump to:** [Fetch Summary](#fetch-summary) | [All Tables](#all-tables) |
     [DT Rainbow](#dt-rainbow) | [HKEX Announcements](#hkex-announcements) |
+    [Price & Turnover](#price-turnover) |
     [Company](#company) | [Holdings](#holdings) | [Changes](#changes) |
-    [Big Changes](#big-changes) | [Concentration](#concentration) |
+    [Big Changes](#big-changes) | [Concentration](#concentration) | [Price History](#price-history) |
     [Raw Previews](#raw-table-previews) | [Copy for ChatGPT](#copy-for-chatgpt) |
     [Downloads](#download-files)
     """
@@ -886,6 +1246,24 @@ if parse and parse.status == "partial success":
 with st.expander("Show concentration band chart (not DT rainbow)", expanded=False):
     render_rainbow_chart(parsed)
 render_concentration_change(parsed)
+
+st.divider()
+st.markdown('<div id="price-history"></div>', unsafe_allow_html=True)
+section = "Price History"
+parse = parsed.section_parses.get(section)
+render_section(
+    section,
+    results.get(section),
+    parse.selected_table_index if parse else "",
+    parsed.price_history_table,
+    (
+        f"Latest date: {parsed.price_history_latest_date or 'not available'} | "
+        f"Close: {parsed.latest_price or 'not available'} | "
+        f"Volume: {parsed.latest_price_volume or 'not available'} | "
+        f"Turnover: {parsed.latest_price_turnover or 'not available'} | "
+        f"VWAP: {parsed.latest_price_vwap or 'not available'}"
+    ),
+)
 
 st.divider()
 st.markdown('<div id="raw-table-previews"></div>', unsafe_allow_html=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -17,6 +18,7 @@ from utils.report import build_report
 
 API_TITLE = "Webb-site CCASS Research API"
 API_VERSION = "1.0.0"
+PUBLIC_PATHS = {"/", "/health", "/openapi.json"}
 
 
 def json_safe(value: Any) -> Any:
@@ -61,6 +63,33 @@ def make_lookup_from_issue_id(issue_id: str, stock_code: str = "") -> IssueLooku
     )
 
 
+def required_api_token() -> str:
+    token = os.getenv("API_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("API_TOKEN is not set")
+    return token
+
+
+def is_public_path(path: str) -> bool:
+    return path in PUBLIC_PATHS
+
+
+def valid_api_auth(path: str, authorization: str = "", x_api_key: str = "") -> bool:
+    if is_public_path(path):
+        return True
+    if not path.startswith("/api/"):
+        return False
+
+    token = required_api_token()
+    prefix = "Bearer "
+    if authorization.startswith(prefix):
+        supplied = authorization[len(prefix) :].strip()
+        return secrets.compare_digest(supplied, token)
+    if x_api_key:
+        return secrets.compare_digest(x_api_key.strip(), token)
+    return False
+
+
 def fetch_stock_payload(params: dict[str, list[str]]) -> tuple[int, dict[str, Any]]:
     timeout = int_param(params, "timeout", default=60, minimum=10, maximum=120)
     headless = bool_param(params, "headless", default=True)
@@ -103,6 +132,13 @@ def openapi_schema(base_url: str) -> dict[str, Any]:
         },
         "servers": [{"url": base_url.rstrip("/")}],
         "paths": {
+            "/": {
+                "get": {
+                    "operationId": "apiRoot",
+                    "summary": "API root",
+                    "responses": {"200": {"description": "API metadata and links"}},
+                }
+            },
             "/health": {
                 "get": {
                     "operationId": "healthCheck",
@@ -150,6 +186,7 @@ def openapi_schema(base_url: str) -> dict[str, Any]:
                         "401": {"description": "Missing or invalid API token"},
                         "502": {"description": "Source lookup or fetch failed"},
                     },
+                    "security": [{"bearerAuth": []}, {"apiKeyAuth": []}],
                 }
             },
         },
@@ -158,11 +195,16 @@ def openapi_schema(base_url: str) -> dict[str, Any]:
                 "bearerAuth": {
                     "type": "http",
                     "scheme": "bearer",
-                    "description": "Optional. Set API_TOKEN on the server to require this token.",
-                }
+                    "description": "Use the API_TOKEN configured on the API server.",
+                },
+                "apiKeyAuth": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "X-API-Key",
+                    "description": "Fallback for clients that cannot send Bearer authentication.",
+                },
             }
         },
-        "security": [{"bearerAuth": []}],
     }
 
 
@@ -172,11 +214,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed_url = urlparse(self.path)
         params = parse_qs(parsed_url.query)
-        if not self.authorized():
-            self.send_json(401, {"error": "Unauthorized"})
+        if not self.authorized(parsed_url.path):
+            self.send_json(401, {"detail": "Unauthorized"})
             return
 
-        if parsed_url.path == "/health":
+        if parsed_url.path == "/":
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "service": API_TITLE,
+                    "version": API_VERSION,
+                    "links": {"health": "/health", "openapi": "/openapi.json", "stock": "/api/stock"},
+                },
+            )
+        elif parsed_url.path == "/health":
             self.send_json(200, {"ok": True, "service": API_TITLE, "version": API_VERSION})
         elif parsed_url.path == "/openapi.json":
             self.send_json(200, openapi_schema(self.base_url()))
@@ -186,12 +238,12 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json(404, {"error": "Not found", "paths": ["/health", "/openapi.json", "/api/stock"]})
 
-    def authorized(self) -> bool:
-        token = os.getenv("API_TOKEN", "").strip()
-        if not token:
-            return True
-        auth = self.headers.get("Authorization", "")
-        return auth == f"Bearer {token}"
+    def authorized(self, path: str) -> bool:
+        return valid_api_auth(
+            path=path,
+            authorization=self.headers.get("Authorization", ""),
+            x_api_key=self.headers.get("X-API-Key", ""),
+        )
 
     def base_url(self) -> str:
         forwarded_proto = self.headers.get("X-Forwarded-Proto")
@@ -218,6 +270,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    required_api_token()
     port = int(os.getenv("PORT", "8000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"{API_TITLE} listening on http://0.0.0.0:{port}")

@@ -15,18 +15,26 @@ Open:
 - `http://localhost:8000/api/stock?stock_code=01592`
 - `http://localhost:8000/api/stock?issue_id=26603`
 
-## Optional API Token
+## Required API Token
 
 Set this environment variable on the server:
 
 ```text
-API_TOKEN=your-secret-token
+API_TOKEN=<your-random-token>
 ```
 
-If `API_TOKEN` is set, callers must send:
+The API service will not start if `API_TOKEN` is missing.
+
+Protected `/api/*` endpoints must send:
 
 ```text
-Authorization: Bearer your-secret-token
+Authorization: Bearer <your-random-token>
+```
+
+Fallback for clients without Bearer support:
+
+```text
+X-API-Key: <your-random-token>
 ```
 
 ## Custom GPT Action

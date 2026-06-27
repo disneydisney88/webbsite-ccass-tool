@@ -11,7 +11,7 @@ It creates two services:
 - `webbsite-ccass-tool`: Streamlit UI
 - `webbsite-ccass-api`: JSON API for Custom GPT
 
-Set an `API_TOKEN` secret on the API service if you want private access.
+Set an `API_TOKEN` secret on the API service. The API service will not start without it.
 
 ## API URLs
 
@@ -50,6 +50,7 @@ https://your-api-service.onrender.com/openapi.json
 ```
 
 If `API_TOKEN` is set, configure authentication as Bearer token and paste the same token.
+If your GPT builder does not show a Bearer option, use custom header `X-API-Key` with the same token.
 
 ## Why This Is Separate From Streamlit
 

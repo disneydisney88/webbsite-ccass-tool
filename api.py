@@ -1,29 +1,86 @@
 from __future__ import annotations
 
+import copy
 import os
 import re
 import secrets
+import time
 from typing import Any
 
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
 
 from utils.exporters import parsed_to_json_ready
-from utils.fetcher import IssueLookup, clean_stock_code, fetch_all, resolve_issue_id_from_stock
-from utils.parser import parse_results
+from utils.fetcher import (
+    FetchResult,
+    IssueLookup,
+    clean_stock_code,
+    fetch_all,
+    fetch_with_requests,
+    issue_urls,
+    orgdata_url,
+    resolve_issue_id_from_stock,
+)
+from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
+CACHE_TTL_SECONDS = 600
+DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
+SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
 
 bearer_scheme = HTTPBearer(auto_error=False)
+_stock_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 app = FastAPI(
     title=API_TITLE,
     version=API_VERSION,
-    description="Read-only API for Webb-site CCASS research-ready summaries.",
+    description="Read-only compact API for Webb-site CCASS research-ready summaries.",
+    servers=[{"url": os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)}],
 )
+
+
+class RootResponse(BaseModel):
+    ok: bool
+    service: str
+    version: str
+    links: dict[str, str]
+
+
+class HealthResponse(BaseModel):
+    ok: bool
+    service: str
+    version: str
+
+
+class StockCompactResponse(BaseModel):
+    stock_code: str
+    stock_name: str
+    issue_id: str
+    holdings_latest_date: str
+    changes_trading_date: str
+    total_in_ccass_percent: str
+    top_5_percent: str
+    top_10_percent: str
+    largest_participant: str
+    holdings: list[dict[str, Any]]
+    changes: list[dict[str, Any]]
+    big_changes: list[dict[str, Any]]
+    concentration: list[dict[str, Any]]
+    fetch_summary: list[dict[str, Any]]
+    data_quality_warnings: list[str]
+    holdings_total_count: int = Field(ge=0)
+    holdings_returned_count: int = Field(ge=0)
+    changes_total_count: int = Field(ge=0)
+    changes_returned_count: int = Field(ge=0)
+    big_changes_total_count: int = Field(ge=0)
+    big_changes_returned_count: int = Field(ge=0)
+    concentration_total_count: int = Field(ge=0)
+    concentration_returned_count: int = Field(ge=0)
+    truncated: bool
 
 
 def json_safe(value: Any) -> Any:
@@ -67,60 +124,275 @@ def make_lookup_from_issue_id(issue_id: str, stock_code: str = "") -> IssueLooku
     )
 
 
-def build_stock_payload(stock_code: str, issue_id: str = "", timeout: int = 60, headless: bool = True) -> dict[str, Any]:
-    stock_code = clean_stock_code(stock_code)
-    issue_id = re.sub(r"\D", "", issue_id)
+def cache_get(stock_code: str) -> dict[str, Any] | None:
+    cached = _stock_cache.get(stock_code)
+    if not cached:
+        return None
+    cached_at, payload = cached
+    if time.monotonic() - cached_at > CACHE_TTL_SECONDS:
+        _stock_cache.pop(stock_code, None)
+        return None
+    return copy.deepcopy(payload)
 
-    if not stock_code and not issue_id:
-        raise HTTPException(status_code=400, detail="Provide stock_code or issue_id.")
 
-    if stock_code:
-        lookup = resolve_issue_id_from_stock(stock_code, timeout=timeout, headless=headless)
-        if lookup.status != "success" or not lookup.issue_id:
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "error": lookup.message or "Could not resolve Webb-site issue ID.",
-                    "lookup": lookup.__dict__,
-                },
-            )
-        issue_id = lookup.issue_id
-    else:
-        lookup = make_lookup_from_issue_id(issue_id)
+def cache_set(stock_code: str, payload: dict[str, Any]) -> None:
+    _stock_cache[stock_code] = (time.monotonic(), copy.deepcopy(payload))
 
-    results = fetch_all(issue_id, stock_code=stock_code, timeout=timeout, headless=headless)
-    parsed = parse_results(
-        issue_id,
-        results,
-        stock_code=lookup.stock_code or stock_code,
-        id_lookup_method=lookup.method,
-        id_lookup_status=lookup.status,
+
+def remaining_seconds(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def short_section_timeout(deadline: float, requested_timeout: int) -> int:
+    remaining = remaining_seconds(deadline)
+    if remaining <= 1:
+        return 1
+    return max(1, min(4, requested_timeout, int(remaining)))
+
+
+def failed_result(name: str, url: str, message: str) -> FetchResult:
+    return FetchResult(
+        name=name,
+        url=url,
+        fetched_time="",
+        method="api deadline",
+        ok=False,
+        error_type="TimeoutBudgetExceeded",
+        error_message=message,
     )
-    exported = parsed_to_json_ready(parsed, results)
+
+
+def resolve_lookup(stock_code: str, timeout: int, deadline: float, headless: bool) -> IssueLookup:
+    lookup_timeout = short_section_timeout(deadline, min(timeout, 8))
+    if lookup_timeout <= 1:
+        return IssueLookup(stock_code=stock_code, status="failed", message="Timeout budget exhausted before issue lookup.")
+    return resolve_issue_id_from_stock(stock_code, timeout=lookup_timeout, headless=headless)
+
+
+def fetch_compact_results(issue_id: str, stock_code: str, lookup: IssueLookup, timeout: int, deadline: float) -> dict[str, FetchResult]:
+    results: dict[str, FetchResult] = {}
+    if lookup.result:
+        results["Company / orgdata"] = lookup.result
+    elif stock_code:
+        results["Company / orgdata"] = failed_result(
+            "Company / orgdata",
+            orgdata_url(stock_code),
+            "Company lookup result was unavailable.",
+        )
+
+    for name, url in issue_urls(issue_id).items():
+        if name not in SECTION_NAMES:
+            continue
+        if remaining_seconds(deadline) <= 1:
+            results[name] = failed_result(name, url, "Timeout budget exhausted before this section was fetched.")
+            continue
+        section_timeout = short_section_timeout(deadline, timeout)
+        results[name] = fetch_with_requests(name, url, timeout=section_timeout)
+    return results
+
+
+def build_base_payload(stock_code: str, timeout: int, headless: bool = True) -> dict[str, Any]:
+    stock_code = clean_stock_code(stock_code)
+    if not stock_code:
+        raise HTTPException(status_code=400, detail="Provide stock_code.")
+
+    cached = cache_get(stock_code)
+    if cached:
+        return cached
+
+    deadline = time.monotonic() + timeout
+    lookup = resolve_lookup(stock_code, timeout=timeout, deadline=deadline, headless=headless)
+    warnings = []
+    if lookup.status != "success" or not lookup.issue_id:
+        warning = lookup.message or "Could not resolve Webb-site issue ID within the API timeout budget."
+        payload = minimal_base_payload(stock_code=stock_code, issue_id="", warnings=[f"Issue lookup failed: {warning}"])
+        cache_set(stock_code, payload)
+        return payload
+
+    results = fetch_compact_results(lookup.issue_id, stock_code, lookup, timeout=timeout, deadline=deadline)
+    try:
+        parsed = parse_results(
+            lookup.issue_id,
+            results,
+            stock_code=lookup.stock_code or stock_code,
+            id_lookup_method=lookup.method,
+            id_lookup_status=lookup.status,
+        )
+        exported = parsed_to_json_ready(parsed, results)
+    except Exception as exc:
+        warnings.append(f"Parsing failed: {type(exc).__name__}: {exc}")
+        exported = minimal_exported_payload(stock_code=stock_code, issue_id=lookup.issue_id, warnings=warnings, results=results)
+
+    payload = {"exported": exported, "issue_id": lookup.issue_id}
+    cache_set(stock_code, payload)
+    return copy.deepcopy(payload)
+
+
+def minimal_base_payload(stock_code: str, issue_id: str, warnings: list[str]) -> dict[str, Any]:
+    return {"exported": minimal_exported_payload(stock_code, issue_id, warnings, {}), "issue_id": issue_id}
+
+
+def minimal_exported_payload(
+    stock_code: str,
+    issue_id: str,
+    warnings: list[str],
+    results: dict[str, FetchResult],
+) -> dict[str, Any]:
+    return {
+        "metadata": {
+            "stock_code": stock_code,
+            "stock_name": "",
+            "issue_id": issue_id,
+            "holdings_data_date": "",
+            "changes_trading_date": "",
+            "total_in_ccass_pct": "",
+            "top5_cumulative_pct": "",
+            "top10_cumulative_pct": "",
+            "largest_participant": "",
+        },
+        "holdings": [],
+        "changes": [],
+        "bigchanges": [],
+        "concentration": [],
+        "fetch_summary": [result.to_log() for result in results.values()],
+        "analysis_warnings": warnings,
+    }
+
+
+def numeric_value(record: dict[str, Any], keys: list[str]) -> float:
+    for key in keys:
+        if key in record:
+            value = to_number(record.get(key))
+            if value is not None:
+                return value
+    return float("-inf")
+
+
+def date_value(record: dict[str, Any], keys: list[str]) -> pd.Timestamp:
+    for key in keys:
+        if key in record:
+            value = parse_date_value(record.get(key))
+            if value is not None:
+                return value
+    return pd.Timestamp.min
+
+
+def compact_records(records: list[dict[str, Any]], section: str, limit: int) -> list[dict[str, Any]]:
+    cleaned = [record for record in records if isinstance(record, dict)]
+    if section == "holdings":
+        sorted_records = sorted(
+            cleaned,
+            key=lambda item: numeric_value(item, ["Holding", "holding", "holding_percent", "Stake %", "stake_percent"]),
+            reverse=True,
+        )
+    elif section == "changes":
+        sorted_records = sorted(
+            cleaned,
+            key=lambda item: abs(numeric_value(item, ["Change", "change"])),
+            reverse=True,
+        )
+    else:
+        sorted_records = sorted(cleaned, key=lambda item: date_value(item, ["Date", "date", "Raw Date"]), reverse=True)
+    return sorted_records[:limit]
+
+
+def section_failure_warnings(fetch_summary: list[dict[str, Any]]) -> list[str]:
+    warnings = []
+    for row in fetch_summary:
+        section = row.get("Section") or row.get("section") or "Unknown section"
+        status_text = str(row.get("Status") or row.get("ok") or "").lower()
+        error = row.get("Error") or row.get("error_message") or ""
+        failed = status_text in {"failed", "false"} or bool(error)
+        if failed:
+            warnings.append(f"{section} failed or incomplete: {error or status_text}")
+    return warnings
+
+
+def build_stock_payload(
+    stock_code: str,
+    timeout: int = 30,
+    holdings_limit: int = 20,
+    changes_limit: int = 30,
+    big_changes_limit: int = 30,
+    concentration_limit: int = 30,
+    headless: bool = True,
+) -> dict[str, Any]:
+    base = build_base_payload(stock_code=stock_code, timeout=timeout, headless=headless)
+    exported = base.get("exported", {})
     metadata = exported.get("metadata", {})
+
+    holdings = exported.get("holdings", [])
+    changes = exported.get("changes", [])
+    big_changes = exported.get("bigchanges", [])
+    concentration = exported.get("concentration", [])
+
+    compact_holdings = compact_records(holdings, "holdings", holdings_limit)
+    compact_changes = compact_records(changes, "changes", changes_limit)
+    compact_big_changes = compact_records(big_changes, "big_changes", big_changes_limit)
+    compact_concentration = compact_records(concentration, "concentration", concentration_limit)
+
+    fetch_summary = exported.get("fetch_summary", [])
+    warnings = list(exported.get("analysis_warnings", []))
+    warnings.extend(warning for warning in section_failure_warnings(fetch_summary) if warning not in warnings)
+
+    truncated = any(
+        [
+            len(holdings) > len(compact_holdings),
+            len(changes) > len(compact_changes),
+            len(big_changes) > len(compact_big_changes),
+            len(concentration) > len(compact_concentration),
+        ]
+    )
 
     return json_safe(
         {
-            "stock_code": metadata.get("stock_code", ""),
+            "stock_code": metadata.get("stock_code", clean_stock_code(stock_code)),
             "stock_name": metadata.get("stock_name", ""),
-            "issue_id": metadata.get("issue_id", issue_id),
+            "issue_id": metadata.get("issue_id", base.get("issue_id", "")),
             "holdings_latest_date": metadata.get("holdings_data_date", ""),
             "changes_trading_date": metadata.get("changes_trading_date", ""),
             "total_in_ccass_percent": metadata.get("total_in_ccass_pct", ""),
             "top_5_percent": metadata.get("top5_cumulative_pct", ""),
             "top_10_percent": metadata.get("top10_cumulative_pct", ""),
             "largest_participant": metadata.get("largest_participant", ""),
-            "holdings": exported.get("holdings", []),
-            "changes": exported.get("changes", []),
-            "big_changes": exported.get("bigchanges", []),
-            "concentration": exported.get("concentration", []),
-            "fetch_summary": exported.get("fetch_summary", []),
-            "data_quality_warnings": exported.get("analysis_warnings", []),
+            "holdings": compact_holdings,
+            "changes": compact_changes,
+            "big_changes": compact_big_changes,
+            "concentration": compact_concentration,
+            "fetch_summary": fetch_summary,
+            "data_quality_warnings": warnings,
+            "holdings_total_count": len(holdings),
+            "holdings_returned_count": len(compact_holdings),
+            "changes_total_count": len(changes),
+            "changes_returned_count": len(compact_changes),
+            "big_changes_total_count": len(big_changes),
+            "big_changes_returned_count": len(compact_big_changes),
+            "concentration_total_count": len(concentration),
+            "concentration_returned_count": len(compact_concentration),
+            "truncated": truncated,
         }
     )
 
 
-@app.get("/")
+def build_full_stock_payload(stock_code: str, timeout: int = 60, headless: bool = True) -> dict[str, Any]:
+    stock_code = clean_stock_code(stock_code)
+    if not stock_code:
+        raise HTTPException(status_code=400, detail="Provide stock_code.")
+    lookup = resolve_issue_id_from_stock(stock_code, timeout=timeout, headless=headless)
+    if lookup.status != "success" or not lookup.issue_id:
+        raise HTTPException(status_code=502, detail=lookup.message or "Could not resolve Webb-site issue ID.")
+    results = fetch_all(lookup.issue_id, stock_code=stock_code, timeout=timeout, headless=headless)
+    parsed = parse_results(
+        lookup.issue_id,
+        results,
+        stock_code=lookup.stock_code or stock_code,
+        id_lookup_method=lookup.method,
+        id_lookup_status=lookup.status,
+    )
+    return json_safe(parsed_to_json_ready(parsed, results))
+
+
+@app.get("/", response_model=RootResponse)
 def root() -> dict[str, Any]:
     return {
         "ok": True,
@@ -130,14 +402,34 @@ def root() -> dict[str, Any]:
     }
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 def health() -> dict[str, Any]:
     return {"ok": True, "service": API_TITLE, "version": API_VERSION}
 
 
-@app.get("/api/stock", dependencies=[Depends(verify_bearer_token)])
+@app.get("/api/stock", response_model=StockCompactResponse, dependencies=[Depends(verify_bearer_token)])
 def get_stock(
+    stock_code: str = Query(..., description="HK stock code, e.g. 01592."),
+    timeout: int = Query(30, ge=10, le=35, description="Overall compact API timeout budget in seconds."),
+    holdings_limit: int = Query(20, ge=1, le=50, description="Maximum holdings rows returned."),
+    changes_limit: int = Query(30, ge=1, le=50, description="Maximum changes rows returned."),
+    big_changes_limit: int = Query(30, ge=1, le=50, description="Maximum big changes rows returned."),
+    concentration_limit: int = Query(30, ge=1, le=60, description="Maximum concentration rows returned."),
+) -> dict[str, Any]:
+    return build_stock_payload(
+        stock_code=stock_code,
+        timeout=timeout,
+        holdings_limit=holdings_limit,
+        changes_limit=changes_limit,
+        big_changes_limit=big_changes_limit,
+        concentration_limit=concentration_limit,
+        headless=True,
+    )
+
+
+@app.get("/api/stock/full", include_in_schema=False, dependencies=[Depends(verify_bearer_token)])
+def get_stock_full(
     stock_code: str = Query(..., description="HK stock code, e.g. 01592."),
     timeout: int = Query(60, ge=10, le=120, description="Timeout per source page in seconds."),
 ) -> dict[str, Any]:
-    return build_stock_payload(stock_code=stock_code, timeout=timeout, headless=True)
+    return build_full_stock_payload(stock_code=stock_code, timeout=timeout, headless=True)

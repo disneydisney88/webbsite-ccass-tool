@@ -34,7 +34,12 @@ def asgi_get(path: str, headers: dict[str, str] | None = None) -> tuple[int, dic
         await api.app(scope, receive, send)
         status = next(message["status"] for message in response_messages if message["type"] == "http.response.start")
         body = b"".join(message.get("body", b"") for message in response_messages if message["type"] == "http.response.body")
-        return status, json.loads(body.decode("utf-8"))
+        text = body.decode("utf-8")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = {"raw": text}
+        return status, payload
 
     return asyncio.run(run_request())
 
@@ -129,6 +134,12 @@ class ApiAuthTests(unittest.TestCase):
         self.assertEqual(bearer["type"], "http")
         self.assertEqual(bearer["scheme"], "bearer")
         self.assertNotIn("/api/stock/full", schema["paths"])
+
+    def test_robots_txt_allows_api_fetching(self) -> None:
+        status_code, payload = asgi_get("/robots.txt")
+        self.assertEqual(status_code, 200)
+        self.assertIn("Allow: /api/", payload["raw"])
+        self.assertNotIn("Disallow: /", payload["raw"])
 
     def test_stock_without_token_returns_401(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):

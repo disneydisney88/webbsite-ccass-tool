@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -447,6 +447,18 @@ def root() -> dict[str, Any]:
 @app.get("/health", response_model=HealthResponse)
 def health() -> dict[str, Any]:
     return {"ok": True, "service": API_TITLE, "version": API_VERSION}
+
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots_txt() -> Response:
+    return Response(
+        "User-agent: *\n"
+        "Allow: /api/\n"
+        "Allow: /health\n"
+        "Allow: /openapi.json\n"
+        "Disallow:\n",
+        media_type="text/plain",
+    )
 
 
 @app.get("/api/stock", response_model=StockCompactResponse, dependencies=[Depends(verify_api_token)])

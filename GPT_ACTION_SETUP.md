@@ -11,7 +11,7 @@ It creates two services:
 - `webbsite-ccass-tool`: Streamlit UI
 - `webbsite-ccass-api`: JSON API for Custom GPT
 
-Set an `API_TOKEN` secret on the API service. The API service will not start without it.
+Set an `API_TOKEN` secret on the API service only if you want to protect the API. If `API_TOKEN` is not set, `/api/stock` remains public and read-only.
 
 ## API URLs
 
@@ -20,7 +20,8 @@ After deployment, test:
 ```text
 https://your-api-service.onrender.com/health
 https://your-api-service.onrender.com/openapi.json
-https://your-api-service.onrender.com/api/stock?stock_code=01592
+https://your-api-service.onrender.com/api/stock?code=01592
+https://your-api-service.onrender.com/api/stock?code=01592&timeout=30&holdings_limit=20&changes_limit=30&big_changes_limit=20&concentration_limit=30
 ```
 
 ## Custom GPT Instructions
@@ -30,10 +31,9 @@ Paste this into your GPT instructions:
 ```text
 When the user asks for Hong Kong stock CCASS analysis, use the Webb-site CCASS API action.
 
-Call getWebbsiteCcassStock with stock_code when the user gives a HK stock code, for example 01592.
-Use issue_id only when the user gives a Webb-site internal issue ID.
+Call getWebbsiteCcassStock with code when the user gives a HK stock code, for example 01592.
 
-Use the returned holdings, changes, bigchanges, concentration, price_history, fetch_summary_compact and report_markdown.
+Use the returned metadata, holdings_summary, holdings, changes, big_changes, concentration, fetch_summary and data_quality_warnings.
 
 Always distinguish facts from inference.
 CCASS is T+2 data, so do not describe it as same-day holdings.
@@ -49,8 +49,8 @@ In the GPT builder, add an Action and import:
 https://your-api-service.onrender.com/openapi.json
 ```
 
-If `API_TOKEN` is set, configure authentication as Bearer token and paste the same token.
-If your GPT builder does not show a Bearer option, use custom header `X-API-Key` with the same token.
+If `API_TOKEN` is set and your client cannot send custom headers, include it in the URL as `key=<token>`.
+Bearer token and `X-API-Key` headers are also accepted for clients that support headers.
 
 ## Why This Is Separate From Streamlit
 

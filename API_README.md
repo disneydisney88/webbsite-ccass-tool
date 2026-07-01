@@ -12,28 +12,29 @@ Open:
 
 - `http://localhost:8000/health`
 - `http://localhost:8000/openapi.json`
-- `http://localhost:8000/api/stock?stock_code=01592`
-- `http://localhost:8000/api/stock?issue_id=26603`
+- `http://localhost:8000/api/stock?code=01592`
+- `http://localhost:8000/api/stock?code=01592&timeout=30&holdings_limit=20&changes_limit=30&big_changes_limit=20&concentration_limit=30`
 
-## Required API Token
+## Optional API Token
 
-Set this environment variable on the server:
+If you want to protect the API, set this environment variable on the server:
 
 ```text
 API_TOKEN=<your-random-token>
 ```
 
-The API service will not start if `API_TOKEN` is missing.
+If `API_TOKEN` is not set, the read-only stock endpoint is public.
 
-Protected `/api/*` endpoints must send:
+URL-only clients should pass the token as a query parameter:
+
+```text
+GET /api/stock?code=01592&key=<your-random-token>
+```
+
+Bearer and `X-API-Key` are still accepted for clients that support custom headers:
 
 ```text
 Authorization: Bearer <your-random-token>
-```
-
-Fallback for clients without Bearer support:
-
-```text
 X-API-Key: <your-random-token>
 ```
 
@@ -50,7 +51,31 @@ https://your-domain/openapi.json
 The main action endpoint is:
 
 ```text
-GET /api/stock?stock_code=01592
+GET /api/stock?code=01592
 ```
 
-It returns parsed Webb-site CCASS tables, price history, fetch summary, and a Markdown report suitable for analysis.
+It returns one pure JSON response from a single HTTP GET. The response includes:
+
+```json
+{
+  "metadata": {
+    "code": "01592",
+    "name": "...",
+    "issue_id": "...",
+    "holdings_date": "...",
+    "changes_date": "..."
+  },
+  "holdings_summary": {},
+  "holdings": [],
+  "changes": [],
+  "big_changes": [],
+  "concentration": {
+    "top5_pct": "...",
+    "top10_pct": "...",
+    "latest_date": "...",
+    "records": []
+  },
+  "fetch_summary": [],
+  "data_quality_warnings": []
+}
+```

@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -27,7 +27,7 @@ from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.1.0"
+API_VERSION = "1.2.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -56,22 +56,19 @@ class HealthResponse(BaseModel):
     version: str
 
 
-class StockCompactResponse(BaseModel):
-    stock_code: str
-    stock_name: str
+class StockMetadata(BaseModel):
+    code: str
+    name: str
     issue_id: str
-    holdings_latest_date: str
-    changes_trading_date: str
-    total_in_ccass_percent: str
-    top_5_percent: str
-    top_10_percent: str
+    holdings_date: str
+    changes_date: str
+
+
+class HoldingsSummary(BaseModel):
+    total_in_ccass: str
+    total_in_ccass_pct: str
+    securities_not_in_ccass: str
     largest_participant: str
-    holdings: list[dict[str, Any]]
-    changes: list[dict[str, Any]]
-    big_changes: list[dict[str, Any]]
-    concentration: list[dict[str, Any]]
-    fetch_summary: list[dict[str, Any]]
-    data_quality_warnings: list[str]
     holdings_total_count: int = Field(ge=0)
     holdings_returned_count: int = Field(ge=0)
     changes_total_count: int = Field(ge=0)
@@ -81,6 +78,24 @@ class StockCompactResponse(BaseModel):
     concentration_total_count: int = Field(ge=0)
     concentration_returned_count: int = Field(ge=0)
     truncated: bool
+
+
+class ConcentrationSummary(BaseModel):
+    top5_pct: str
+    top10_pct: str
+    latest_date: str
+    records: list[dict[str, Any]]
+
+
+class StockCompactResponse(BaseModel):
+    metadata: StockMetadata
+    holdings_summary: HoldingsSummary
+    holdings: list[dict[str, Any]]
+    changes: list[dict[str, Any]]
+    big_changes: list[dict[str, Any]]
+    concentration: ConcentrationSummary
+    fetch_summary: list[dict[str, Any]]
+    data_quality_warnings: list[str]
 
 
 def json_safe(value: Any) -> Any:
@@ -104,6 +119,24 @@ def json_safe(value: Any) -> Any:
 
 def unauthorized() -> HTTPException:
     return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+
+def verify_api_token(
+    request: Request,
+    key: str | None = Query(None, description="Optional API token for URL-only clients."),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> None:
+    expected_token = os.getenv("API_TOKEN", "")
+    if not expected_token:
+        return
+    if key and secrets.compare_digest(key, expected_token):
+        return
+    header_key = request.headers.get("X-API-Key", "")
+    if header_key and secrets.compare_digest(header_key, expected_token):
+        return
+    if credentials and credentials.scheme.lower() == "bearer" and secrets.compare_digest(credentials.credentials, expected_token):
+        return
+    raise unauthorized()
 
 
 def verify_bearer_token(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> None:
@@ -346,30 +379,39 @@ def build_stock_payload(
 
     return json_safe(
         {
-            "stock_code": metadata.get("stock_code", clean_stock_code(stock_code)),
-            "stock_name": metadata.get("stock_name", ""),
-            "issue_id": metadata.get("issue_id", base.get("issue_id", "")),
-            "holdings_latest_date": metadata.get("holdings_data_date", ""),
-            "changes_trading_date": metadata.get("changes_trading_date", ""),
-            "total_in_ccass_percent": metadata.get("total_in_ccass_pct", ""),
-            "top_5_percent": metadata.get("top5_cumulative_pct", ""),
-            "top_10_percent": metadata.get("top10_cumulative_pct", ""),
-            "largest_participant": metadata.get("largest_participant", ""),
+            "metadata": {
+                "code": metadata.get("stock_code", clean_stock_code(stock_code)),
+                "name": metadata.get("stock_name", ""),
+                "issue_id": metadata.get("issue_id", base.get("issue_id", "")),
+                "holdings_date": metadata.get("holdings_data_date", ""),
+                "changes_date": metadata.get("changes_trading_date", ""),
+            },
+            "holdings_summary": {
+                "total_in_ccass": metadata.get("total_in_ccass", ""),
+                "total_in_ccass_pct": metadata.get("total_in_ccass_pct", ""),
+                "securities_not_in_ccass": metadata.get("securities_not_in_ccass", ""),
+                "largest_participant": metadata.get("largest_participant", ""),
+                "holdings_total_count": len(holdings),
+                "holdings_returned_count": len(compact_holdings),
+                "changes_total_count": len(changes),
+                "changes_returned_count": len(compact_changes),
+                "big_changes_total_count": len(big_changes),
+                "big_changes_returned_count": len(compact_big_changes),
+                "concentration_total_count": len(concentration),
+                "concentration_returned_count": len(compact_concentration),
+                "truncated": truncated,
+            },
             "holdings": compact_holdings,
             "changes": compact_changes,
             "big_changes": compact_big_changes,
-            "concentration": compact_concentration,
+            "concentration": {
+                "top5_pct": metadata.get("top5_cumulative_pct", ""),
+                "top10_pct": metadata.get("top10_cumulative_pct", ""),
+                "latest_date": metadata.get("concentration_latest_date", ""),
+                "records": compact_concentration,
+            },
             "fetch_summary": fetch_summary,
             "data_quality_warnings": warnings,
-            "holdings_total_count": len(holdings),
-            "holdings_returned_count": len(compact_holdings),
-            "changes_total_count": len(changes),
-            "changes_returned_count": len(compact_changes),
-            "big_changes_total_count": len(big_changes),
-            "big_changes_returned_count": len(compact_big_changes),
-            "concentration_total_count": len(concentration),
-            "concentration_returned_count": len(compact_concentration),
-            "truncated": truncated,
         }
     )
 
@@ -407,17 +449,21 @@ def health() -> dict[str, Any]:
     return {"ok": True, "service": API_TITLE, "version": API_VERSION}
 
 
-@app.get("/api/stock", response_model=StockCompactResponse, dependencies=[Depends(verify_bearer_token)])
+@app.get("/api/stock", response_model=StockCompactResponse, dependencies=[Depends(verify_api_token)])
 def get_stock(
-    stock_code: str = Query(..., description="HK stock code, e.g. 01592."),
+    code: str | None = Query(None, description="HK stock code, e.g. 01592."),
+    stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
     timeout: int = Query(30, ge=10, le=35, description="Overall compact API timeout budget in seconds."),
     holdings_limit: int = Query(20, ge=1, le=50, description="Maximum holdings rows returned."),
     changes_limit: int = Query(30, ge=1, le=50, description="Maximum changes rows returned."),
-    big_changes_limit: int = Query(30, ge=1, le=50, description="Maximum big changes rows returned."),
+    big_changes_limit: int = Query(20, ge=1, le=50, description="Maximum big changes rows returned."),
     concentration_limit: int = Query(30, ge=1, le=60, description="Maximum concentration rows returned."),
 ) -> dict[str, Any]:
+    requested_code = code or stock_code or ""
+    if not requested_code:
+        raise HTTPException(status_code=400, detail="Provide code.")
     return build_stock_payload(
-        stock_code=stock_code,
+        stock_code=requested_code,
         timeout=timeout,
         holdings_limit=holdings_limit,
         changes_limit=changes_limit,

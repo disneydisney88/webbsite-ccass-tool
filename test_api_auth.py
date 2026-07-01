@@ -132,13 +132,13 @@ class ApiAuthTests(unittest.TestCase):
 
     def test_stock_without_token_returns_401(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
-            status_code, payload = asgi_get("/api/stock?stock_code=01592")
+            status_code, payload = asgi_get("/api/stock?code=01592")
         self.assertEqual(status_code, 401)
         self.assertEqual(payload, {"detail": "Unauthorized"})
 
     def test_stock_with_wrong_token_returns_401(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
-            status_code, payload = asgi_get("/api/stock?stock_code=01592", headers=auth_headers("wrong-token"))
+            status_code, payload = asgi_get("/api/stock?code=01592&key=wrong-token")
         self.assertEqual(status_code, 401)
         self.assertEqual(payload, {"detail": "Unauthorized"})
 
@@ -151,9 +151,23 @@ class ApiAuthTests(unittest.TestCase):
     def test_stock_with_correct_token_returns_200(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
             with patch.object(api, "build_base_payload", return_value=fake_base_payload()):
+                status_code, payload = asgi_get("/api/stock?code=01592&key=correct-token")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["metadata"]["code"], "01592")
+
+    def test_stock_with_bearer_token_still_returns_200(self) -> None:
+        with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
+            with patch.object(api, "build_base_payload", return_value=fake_base_payload()):
                 status_code, payload = asgi_get("/api/stock?stock_code=01592", headers=auth_headers())
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["stock_code"], "01592")
+        self.assertEqual(payload["metadata"]["code"], "01592")
+
+    def test_stock_without_configured_token_is_public_readonly(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(api, "build_base_payload", return_value=fake_base_payload()):
+                status_code, payload = asgi_get("/api/stock?code=01592")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["metadata"]["code"], "01592")
 
     def test_timeout_maximum_cannot_exceed_35(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
@@ -169,41 +183,30 @@ class ApiAuthTests(unittest.TestCase):
 
     def test_compact_response_contains_core_fields(self) -> None:
         required = {
-            "stock_code",
-            "stock_name",
-            "issue_id",
-            "holdings_latest_date",
-            "changes_trading_date",
-            "total_in_ccass_percent",
-            "top_5_percent",
-            "top_10_percent",
-            "largest_participant",
+            "metadata",
+            "holdings_summary",
             "holdings",
             "changes",
             "big_changes",
             "concentration",
             "fetch_summary",
             "data_quality_warnings",
-            "holdings_total_count",
-            "holdings_returned_count",
-            "changes_total_count",
-            "changes_returned_count",
-            "big_changes_total_count",
-            "big_changes_returned_count",
-            "concentration_total_count",
-            "concentration_returned_count",
-            "truncated",
         }
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
             with patch.object(api, "build_base_payload", return_value=fake_base_payload()):
-                status_code, payload = asgi_get("/api/stock?stock_code=01592", headers=auth_headers())
+                status_code, payload = asgi_get("/api/stock?code=01592&key=correct-token")
         self.assertEqual(status_code, 200)
         self.assertTrue(required.issubset(payload))
-        self.assertEqual(payload["holdings_returned_count"], 20)
-        self.assertEqual(payload["changes_returned_count"], 30)
-        self.assertEqual(payload["big_changes_returned_count"], 30)
-        self.assertEqual(payload["concentration_returned_count"], 30)
-        self.assertTrue(payload["truncated"])
+        self.assertEqual(payload["metadata"]["name"], "Mock Stock")
+        self.assertEqual(payload["metadata"]["holdings_date"], "2026-06-26")
+        self.assertEqual(payload["metadata"]["changes_date"], "2026-06-26")
+        self.assertEqual(payload["holdings_summary"]["holdings_returned_count"], 20)
+        self.assertEqual(payload["holdings_summary"]["changes_returned_count"], 30)
+        self.assertEqual(payload["holdings_summary"]["big_changes_returned_count"], 20)
+        self.assertEqual(payload["holdings_summary"]["concentration_returned_count"], 30)
+        self.assertEqual(payload["concentration"]["top5_pct"], "25.00%")
+        self.assertEqual(payload["concentration"]["top10_pct"], "35.00%")
+        self.assertTrue(payload["holdings_summary"]["truncated"])
 
     def test_json_serialized_length_is_less_than_90000_characters(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):

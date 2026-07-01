@@ -139,7 +139,24 @@ class ApiAuthTests(unittest.TestCase):
         status_code, payload = asgi_get("/robots.txt")
         self.assertEqual(status_code, 200)
         self.assertIn("Allow: /api/", payload["raw"])
+        self.assertIn("Allow: /mcp", payload["raw"])
         self.assertNotIn("Disallow: /", payload["raw"])
+
+    def test_mcp_route_is_mounted(self) -> None:
+        mounted_paths = {getattr(route, "path", "") for route in api.app.routes}
+        self.assertIn("/mcp", mounted_paths)
+
+    def test_mcp_tool_is_registered_with_limits(self) -> None:
+        async def list_tool_names() -> tuple[list[str], dict]:
+            tools = await api.mcp_server.list_tools()
+            tool = next(item for item in tools if item.name == "get_ccass_stock_data")
+            return [item.name for item in tools], tool.inputSchema
+
+        names, schema = asyncio.run(list_tool_names())
+        self.assertIn("get_ccass_stock_data", names)
+        self.assertEqual(schema["properties"]["code"]["pattern"], "^[0-9]{5}$")
+        self.assertEqual(schema["properties"]["holdings_limit"]["maximum"], 50)
+        self.assertEqual(schema["properties"]["concentration_limit"]["maximum"], 60)
 
     def test_stock_without_token_returns_401(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):

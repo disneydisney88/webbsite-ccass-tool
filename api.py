@@ -5,11 +5,13 @@ import os
 import re
 import secrets
 import time
-from typing import Any
+from typing import Annotated, Any
 
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import TransportSecuritySettings
 from pydantic import BaseModel, Field
 
 from utils.exporters import parsed_to_json_ready
@@ -27,19 +29,46 @@ from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.2.0"
+API_VERSION = "1.3.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
 
 bearer_scheme = HTTPBearer(auto_error=False)
 _stock_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_mcp_session_context: Any = None
 
 app = FastAPI(
     title=API_TITLE,
     version=API_VERSION,
     description="Read-only compact API for Webb-site CCASS research-ready summaries.",
     servers=[{"url": os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)}],
+)
+
+mcp_server = FastMCP(
+    "Webb-site CCASS Research Server",
+    instructions=(
+        "Use get_ccass_stock_data to retrieve Hong Kong stock CCASS holdings, changes, "
+        "big changes, concentration, fetch status and data quality warnings."
+    ),
+    stateless_http=True,
+    streamable_http_path="/",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "webbsite-ccass-api.onrender.com",
+            "localhost:*",
+            "127.0.0.1:*",
+            "[::1]:*",
+        ],
+        allowed_origins=[
+            "https://claude.ai",
+            "https://www.claude.ai",
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+            "http://[::1]:*",
+        ],
+    ),
 )
 
 
@@ -416,6 +445,32 @@ def build_stock_payload(
     )
 
 
+@mcp_server.tool(
+    name="get_ccass_stock_data",
+    description=(
+        "Fetch Webb-site CCASS research data for a Hong Kong listed stock. "
+        "Returns metadata, holdings_summary, holdings, changes, big_changes, "
+        "concentration, fetch_summary and data_quality_warnings as JSON."
+    ),
+)
+async def get_ccass_stock_data(
+    code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 01592.")],
+    holdings_limit: Annotated[int, Field(ge=1, le=50)] = 20,
+    changes_limit: Annotated[int, Field(ge=1, le=50)] = 30,
+    big_changes_limit: Annotated[int, Field(ge=1, le=50)] = 20,
+    concentration_limit: Annotated[int, Field(ge=1, le=60)] = 30,
+) -> dict[str, Any]:
+    return build_stock_payload(
+        stock_code=code,
+        timeout=30,
+        holdings_limit=holdings_limit,
+        changes_limit=changes_limit,
+        big_changes_limit=big_changes_limit,
+        concentration_limit=concentration_limit,
+        headless=True,
+    )
+
+
 def build_full_stock_payload(stock_code: str, timeout: int = 60, headless: bool = True) -> dict[str, Any]:
     stock_code = clean_stock_code(stock_code)
     if not stock_code:
@@ -449,11 +504,27 @@ def health() -> dict[str, Any]:
     return {"ok": True, "service": API_TITLE, "version": API_VERSION}
 
 
+@app.on_event("startup")
+async def start_mcp_session_manager() -> None:
+    global _mcp_session_context
+    _mcp_session_context = mcp_server.session_manager.run()
+    await _mcp_session_context.__aenter__()
+
+
+@app.on_event("shutdown")
+async def stop_mcp_session_manager() -> None:
+    global _mcp_session_context
+    if _mcp_session_context is not None:
+        await _mcp_session_context.__aexit__(None, None, None)
+        _mcp_session_context = None
+
+
 @app.get("/robots.txt", include_in_schema=False)
 def robots_txt() -> Response:
     return Response(
         "User-agent: *\n"
         "Allow: /api/\n"
+        "Allow: /mcp\n"
         "Allow: /health\n"
         "Allow: /openapi.json\n"
         "Disallow:\n",
@@ -491,3 +562,6 @@ def get_stock_full(
     timeout: int = Query(60, ge=10, le=120, description="Timeout per source page in seconds."),
 ) -> dict[str, Any]:
     return build_full_stock_payload(stock_code=stock_code, timeout=timeout, headless=True)
+
+
+app.mount("/mcp", mcp_server.streamable_http_app())

@@ -30,7 +30,7 @@ from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.4.0"
+API_VERSION = "1.5.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -359,6 +359,55 @@ def compact_records(records: list[dict[str, Any]], section: str, limit: int) -> 
     return sorted_records[:limit]
 
 
+def ratio_percent(numerator: Any, denominator: Any) -> float | None:
+    top = to_number(numerator)
+    bottom = to_number(denominator)
+    if top is None or bottom is None or bottom == 0:
+        return None
+    return round(top / bottom * 100, 4)
+
+
+def market_cap_value(close: Any, issued_securities: Any) -> float | None:
+    close_value = to_number(close)
+    shares = to_number(issued_securities)
+    if close_value is None or shares is None:
+        return None
+    return round(close_value * shares, 2)
+
+
+def enrich_price_history(records: list[dict[str, Any]], issued_securities: Any) -> list[dict[str, Any]]:
+    enriched = []
+    for record in records:
+        item = dict(record)
+        cap = market_cap_value(item.get("Close"), issued_securities)
+        if cap is not None:
+            item["Market Cap"] = cap
+            turnover_ratio = ratio_percent(item.get("Turnover"), cap)
+            if turnover_ratio is not None:
+                item["Turnover / Market Cap %"] = turnover_ratio
+        enriched.append(item)
+    return enriched
+
+
+def announcement_event_tags(row: dict[str, Any]) -> list[str]:
+    text = f"{row.get('Category', '')} {row.get('Title', '')}".lower()
+    patterns = [
+        ("share_consolidation", r"合股|股份合併|share consolidation|consolidation of shares|consolidat(?:e|ion)"),
+        ("share_subdivision", r"拆股|subdivision|share split|split of shares"),
+        ("rights_issue", r"供股|rights issue"),
+        ("open_offer", r"公開發售|open offer"),
+        ("placing", r"配售|placing|subscription"),
+        ("general_offer", r"全面要約|general offer|mandatory unconditional cash offer|go "),
+        ("inside_information", r"內幕消息|inside information"),
+        ("change_company_name", r"更改公司名稱|change of company name|change.*name"),
+        ("board_change", r"董事|director|board"),
+        ("trading_halt", r"停牌|暫停買賣|trading halt|suspension"),
+        ("resumption", r"復牌|恢復買賣|resumption"),
+        ("capital_reorganisation", r"股本重組|capital reorganisation|capital restructuring"),
+    ]
+    return [tag for tag, pattern in patterns if re.search(pattern, text, flags=re.I)]
+
+
 def section_failure_warnings(fetch_summary: list[dict[str, Any]]) -> list[str]:
     warnings = []
     for row in fetch_summary:
@@ -451,7 +500,8 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
     exported = base.get("exported", {})
     metadata = exported.get("metadata", {})
     price_history = exported.get("price_history", [])
-    compact_price_history = compact_records(price_history, "price_history", limit)
+    issued_securities = metadata.get("issued_securities", "")
+    compact_price_history = enrich_price_history(compact_records(price_history, "price_history", limit), issued_securities)
     fetch_summary = exported.get("fetch_summary", [])
     warnings = list(exported.get("analysis_warnings", []))
     warnings.extend(warning for warning in section_failure_warnings(fetch_summary) if warning not in warnings)
@@ -474,6 +524,12 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
                 "latest_volume": metadata.get("latest_price_volume", ""),
                 "latest_turnover": metadata.get("latest_price_turnover", ""),
                 "latest_vwap": metadata.get("latest_price_vwap", ""),
+                "issued_securities": issued_securities,
+                "latest_market_cap": market_cap_value(metadata.get("latest_price", ""), issued_securities),
+                "latest_turnover_to_market_cap_pct": ratio_percent(
+                    metadata.get("latest_price_turnover", ""),
+                    market_cap_value(metadata.get("latest_price", ""), issued_securities),
+                ),
                 "price_history_total_count": len(price_history),
                 "price_history_returned_count": len(compact_price_history),
                 "truncated": len(price_history) > len(compact_price_history),
@@ -493,6 +549,9 @@ def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, lim
         row_range=limit,
     )
     rows = [] if result.table is None or result.table.empty else result.table.to_dict(orient="records")
+    for row in rows:
+        row["Event tags"] = announcement_event_tags(row)
+    all_tags = sorted({tag for row in rows for tag in row.get("Event tags", [])})
     return json_safe(
         {
             "metadata": {
@@ -510,6 +569,7 @@ def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, lim
                 "returned_count": len(rows),
                 "truncated": result.total_count > len(rows),
                 "error": result.error,
+                "event_tags_found": all_tags,
             },
             "announcements": rows,
             "data_quality_warnings": [result.error] if result.error else [],

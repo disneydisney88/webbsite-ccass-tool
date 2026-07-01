@@ -170,17 +170,21 @@ class ApiAuthTests(unittest.TestCase):
                 "latest_price_volume": "1,000,000",
                 "latest_price_turnover": "500,000",
                 "latest_price_vwap": "0.500",
+                "issued_securities": "10,000,000",
             }
         )
         base["exported"]["price_history"] = [
-            {"Date": f"2026-06-{index:02d}", "Close": index / 10, "Volume": index * 1000}
+            {"Date": f"2026-06-{index:02d}", "Close": index / 10, "Volume": index * 1000, "Turnover": index * 100}
             for index in range(1, 6)
         ]
         with patch.object(api, "build_base_payload", return_value=base):
             payload = api.build_price_history_payload("01592", limit=2)
         self.assertEqual(payload["metadata"]["code"], "01592")
         self.assertEqual(payload["price_summary"]["latest_date"], "2026-06-30")
+        self.assertEqual(payload["price_summary"]["latest_market_cap"], 5000000.0)
+        self.assertEqual(payload["price_summary"]["latest_turnover_to_market_cap_pct"], 10.0)
         self.assertEqual(payload["price_summary"]["price_history_returned_count"], 2)
+        self.assertIn("Turnover / Market Cap %", payload["price_history"][0])
         self.assertTrue(payload["price_summary"]["truncated"])
 
     def test_hkex_announcements_payload_uses_fetcher(self) -> None:
@@ -190,8 +194,8 @@ class ApiAuthTests(unittest.TestCase):
                     "Publish time": "2026-06-30 12:00",
                     "Stock code": "03321",
                     "Stock name": "Mock",
-                    "Category": "Announcement",
-                    "Title": "Mock title",
+                    "Category": "公告及通告 - 股本重組",
+                    "Title": "建議股份合併及更改公司名稱",
                     "URL": "https://example.com/mock.pdf",
                     "News ID": "1",
                 }
@@ -214,7 +218,8 @@ class ApiAuthTests(unittest.TestCase):
             payload = api.build_hkex_announcements_payload("03321", period_years=1, limit=100)
         self.assertEqual(payload["metadata"]["code"], "03321")
         self.assertEqual(payload["announcements_summary"]["returned_count"], 1)
-        self.assertEqual(payload["announcements"][0]["Title"], "Mock title")
+        self.assertIn("share_consolidation", payload["announcements"][0]["Event tags"])
+        self.assertIn("change_company_name", payload["announcements_summary"]["event_tags_found"])
 
     def test_stock_without_token_returns_401(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):

@@ -76,6 +76,8 @@ Inputs:
 
 Returns metadata, latest price summary, recent price history rows, fetch summary, and data quality warnings.
 
+`price_summary` includes latest close, volume, turnover, VWAP, issued securities, estimated latest market cap, and turnover-to-market-cap percentage when the source data is available. Each price history row includes date, OHLC, volume, turnover, VWAP, and calculated market cap / turnover-to-market-cap fields where possible.
+
 ```text
 get_hkex_announcements
 ```
@@ -91,3 +93,5 @@ Inputs:
 ```
 
 Returns HKEX stock metadata, announcement summary, and announcement rows with publish time, category, title, file type, URL, and news ID.
+
+Announcement rows include `Event tags` for common finance-event workflow filters such as `share_consolidation`, `share_subdivision`, `rights_issue`, `open_offer`, `placing`, `general_offer`, `inside_information`, `change_company_name`, `board_change`, `trading_halt`, `resumption`, and `capital_reorganisation`.

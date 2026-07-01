@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -154,9 +155,66 @@ class ApiAuthTests(unittest.TestCase):
 
         names, schema = asyncio.run(list_tool_names())
         self.assertIn("get_ccass_stock_data", names)
+        self.assertIn("get_webbsite_price_history", names)
+        self.assertIn("get_hkex_announcements", names)
         self.assertEqual(schema["properties"]["code"]["pattern"], "^[0-9]{5}$")
         self.assertEqual(schema["properties"]["holdings_limit"]["maximum"], 50)
         self.assertEqual(schema["properties"]["concentration_limit"]["maximum"], 60)
+
+    def test_price_history_payload_is_compact(self) -> None:
+        base = fake_base_payload(row_count=5)
+        base["exported"]["metadata"].update(
+            {
+                "price_history_latest_date": "2026-06-30",
+                "latest_price": "0.500",
+                "latest_price_volume": "1,000,000",
+                "latest_price_turnover": "500,000",
+                "latest_price_vwap": "0.500",
+            }
+        )
+        base["exported"]["price_history"] = [
+            {"Date": f"2026-06-{index:02d}", "Close": index / 10, "Volume": index * 1000}
+            for index in range(1, 6)
+        ]
+        with patch.object(api, "build_base_payload", return_value=base):
+            payload = api.build_price_history_payload("01592", limit=2)
+        self.assertEqual(payload["metadata"]["code"], "01592")
+        self.assertEqual(payload["price_summary"]["latest_date"], "2026-06-30")
+        self.assertEqual(payload["price_summary"]["price_history_returned_count"], 2)
+        self.assertTrue(payload["price_summary"]["truncated"])
+
+    def test_hkex_announcements_payload_uses_fetcher(self) -> None:
+        table = api.pd.DataFrame(
+            [
+                {
+                    "Publish time": "2026-06-30 12:00",
+                    "Stock code": "03321",
+                    "Stock name": "Mock",
+                    "Category": "Announcement",
+                    "Title": "Mock title",
+                    "URL": "https://example.com/mock.pdf",
+                    "News ID": "1",
+                }
+            ]
+        )
+        result = SimpleNamespace(
+            stock_code="03321",
+            stock_name="Mock",
+            hkex_stock_id="123",
+            period_years=1,
+            from_date="2025-07-02",
+            to_date="2026-07-02",
+            url="https://example.com/search",
+            ok=True,
+            error="",
+            total_count=1,
+            table=table,
+        )
+        with patch.object(api, "fetch_announcements", return_value=result):
+            payload = api.build_hkex_announcements_payload("03321", period_years=1, limit=100)
+        self.assertEqual(payload["metadata"]["code"], "03321")
+        self.assertEqual(payload["announcements_summary"]["returned_count"], 1)
+        self.assertEqual(payload["announcements"][0]["Title"], "Mock title")
 
     def test_stock_without_token_returns_401(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):

@@ -25,11 +25,12 @@ from utils.fetcher import (
     orgdata_url,
     resolve_issue_id_from_stock,
 )
+from utils.hkexnews import fetch_announcements
 from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.3.0"
+API_VERSION = "1.4.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -445,6 +446,77 @@ def build_stock_payload(
     )
 
 
+def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int = 30, headless: bool = True) -> dict[str, Any]:
+    base = build_base_payload(stock_code=stock_code, timeout=timeout, headless=headless)
+    exported = base.get("exported", {})
+    metadata = exported.get("metadata", {})
+    price_history = exported.get("price_history", [])
+    compact_price_history = compact_records(price_history, "price_history", limit)
+    fetch_summary = exported.get("fetch_summary", [])
+    warnings = list(exported.get("analysis_warnings", []))
+    warnings.extend(warning for warning in section_failure_warnings(fetch_summary) if warning not in warnings)
+    price_fetch = [
+        row
+        for row in fetch_summary
+        if str(row.get("Section") or row.get("section") or "").lower() == "price history"
+    ]
+
+    return json_safe(
+        {
+            "metadata": {
+                "code": metadata.get("stock_code", clean_stock_code(stock_code)),
+                "name": metadata.get("stock_name", ""),
+                "issue_id": metadata.get("issue_id", base.get("issue_id", "")),
+            },
+            "price_summary": {
+                "latest_date": metadata.get("price_history_latest_date", ""),
+                "latest_close": metadata.get("latest_price", ""),
+                "latest_volume": metadata.get("latest_price_volume", ""),
+                "latest_turnover": metadata.get("latest_price_turnover", ""),
+                "latest_vwap": metadata.get("latest_price_vwap", ""),
+                "price_history_total_count": len(price_history),
+                "price_history_returned_count": len(compact_price_history),
+                "truncated": len(price_history) > len(compact_price_history),
+            },
+            "price_history": compact_price_history,
+            "fetch_summary": price_fetch,
+            "data_quality_warnings": warnings,
+        }
+    )
+
+
+def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, limit: int = 100, timeout: int = 30) -> dict[str, Any]:
+    result = fetch_announcements(
+        stock_code=stock_code,
+        period_years=period_years,
+        timeout=timeout,
+        row_range=limit,
+    )
+    rows = [] if result.table is None or result.table.empty else result.table.to_dict(orient="records")
+    return json_safe(
+        {
+            "metadata": {
+                "code": result.stock_code,
+                "name": result.stock_name,
+                "hkex_stock_id": result.hkex_stock_id,
+                "from_date": result.from_date,
+                "to_date": result.to_date,
+                "period_years": result.period_years,
+                "source_url": result.url,
+            },
+            "announcements_summary": {
+                "ok": result.ok,
+                "total_count": result.total_count,
+                "returned_count": len(rows),
+                "truncated": result.total_count > len(rows),
+                "error": result.error,
+            },
+            "announcements": rows,
+            "data_quality_warnings": [result.error] if result.error else [],
+        }
+    )
+
+
 @mcp_server.tool(
     name="get_ccass_stock_data",
     description=(
@@ -469,6 +541,35 @@ async def get_ccass_stock_data(
         concentration_limit=concentration_limit,
         headless=True,
     )
+
+
+@mcp_server.tool(
+    name="get_webbsite_price_history",
+    description=(
+        "Fetch Webb-site price history for a Hong Kong listed stock. "
+        "Returns latest close, volume, turnover, VWAP and recent price_history rows."
+    ),
+)
+async def get_webbsite_price_history(
+    code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 03321.")],
+    limit: Annotated[int, Field(ge=1, le=200)] = 80,
+) -> dict[str, Any]:
+    return build_price_history_payload(stock_code=code, limit=limit, timeout=30, headless=True)
+
+
+@mcp_server.tool(
+    name="get_hkex_announcements",
+    description=(
+        "Fetch HKEXnews announcement list for a Hong Kong listed stock. "
+        "Returns publish time, category, title, file type, URL and news ID rows."
+    ),
+)
+async def get_hkex_announcements(
+    code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 03321.")],
+    period_years: Annotated[int, Field(ge=1, le=2)] = 1,
+    limit: Annotated[int, Field(ge=1, le=200)] = 100,
+) -> dict[str, Any]:
+    return build_hkex_announcements_payload(stock_code=code, period_years=period_years, limit=limit, timeout=30)
 
 
 def build_full_stock_payload(stock_code: str, timeout: int = 60, headless: bool = True) -> dict[str, Any]:

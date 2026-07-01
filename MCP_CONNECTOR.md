@@ -58,3 +58,36 @@ http://127.0.0.1:8765/mcp
 ```
 
 The public `robots.txt` explicitly allows `/mcp`, `/api/`, `/health`, and `/openapi.json`.
+
+## Additional Tools
+
+```text
+get_webbsite_price_history
+```
+
+Inputs:
+
+```json
+{
+  "code": "03321",
+  "limit": 80
+}
+```
+
+Returns metadata, latest price summary, recent price history rows, fetch summary, and data quality warnings.
+
+```text
+get_hkex_announcements
+```
+
+Inputs:
+
+```json
+{
+  "code": "03321",
+  "period_years": 1,
+  "limit": 100
+}
+```
+
+Returns HKEX stock metadata, announcement summary, and announcement rows with publish time, category, title, file type, URL, and news ID.

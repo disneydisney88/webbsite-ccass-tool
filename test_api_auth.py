@@ -246,12 +246,24 @@ class ApiAuthTests(unittest.TestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["metadata"]["code"], "01592")
 
+    def test_stock_with_api_token_query_alias_returns_200(self) -> None:
+        with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
+            with patch.object(api, "build_base_payload", return_value=fake_base_payload()):
+                status_code, payload = asgi_get("/api/stock?code=01592&api_token=correct-token")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["metadata"]["code"], "01592")
+
     def test_stock_with_bearer_token_still_returns_200(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
             with patch.object(api, "build_base_payload", return_value=fake_base_payload()):
                 status_code, payload = asgi_get("/api/stock?stock_code=01592", headers=auth_headers())
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["metadata"]["code"], "01592")
+
+    def test_mask_secret_does_not_expose_full_token(self) -> None:
+        masked = api.mask_secret("33243e6e3580e484c8de165269ad3d7a")
+        self.assertEqual(masked, "3324...3d7a (len=32)")
+        self.assertNotIn("3e6e3580e484c8de165269ad", masked)
 
     def test_stock_without_configured_token_is_public_readonly(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

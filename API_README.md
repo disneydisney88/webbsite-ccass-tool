@@ -29,6 +29,7 @@ URL-only clients should pass the token as a query parameter:
 
 ```text
 GET /api/stock?code=01592&key=<your-random-token>
+GET /api/stock?code=01592&api_token=<your-random-token>
 ```
 
 Bearer and `X-API-Key` are still accepted for clients that support custom headers:

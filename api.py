@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import re
 import secrets
@@ -35,6 +36,7 @@ CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
 
+logger = logging.getLogger("webbsite_ccass_api")
 bearer_scheme = HTTPBearer(auto_error=False)
 _stock_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _mcp_session_context: Any = None
@@ -151,21 +153,41 @@ def unauthorized() -> HTTPException:
     return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
 
+def mask_secret(value: str | None) -> str:
+    if not value:
+        return "<empty>"
+    if len(value) <= 8:
+        return f"{value[:1]}...{value[-1:]} (len={len(value)})"
+    return f"{value[:4]}...{value[-4:]} (len={len(value)})"
+
+
 def verify_api_token(
     request: Request,
     key: str | None = Query(None, description="Optional API token for URL-only clients."),
+    api_token: str | None = Query(None, description="Alias for key; optional API token for URL-only clients."),
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> None:
     expected_token = os.getenv("API_TOKEN", "")
     if not expected_token:
         return
-    if key and secrets.compare_digest(key, expected_token):
+    query_token = api_token or key
+    if query_token and secrets.compare_digest(query_token, expected_token):
         return
     header_key = request.headers.get("X-API-Key", "")
     if header_key and secrets.compare_digest(header_key, expected_token):
         return
     if credentials and credentials.scheme.lower() == "bearer" and secrets.compare_digest(credentials.credentials, expected_token):
         return
+    supplied_token = query_token or header_key or (credentials.credentials if credentials else "")
+    logger.warning(
+        "API auth rejected: expected=%s supplied=%s has_key=%s has_api_token=%s has_x_api_key=%s has_bearer=%s",
+        mask_secret(expected_token),
+        mask_secret(supplied_token),
+        bool(key),
+        bool(api_token),
+        bool(header_key),
+        bool(credentials),
+    )
     raise unauthorized()
 
 
@@ -668,6 +690,7 @@ def health() -> dict[str, Any]:
 @app.on_event("startup")
 async def start_mcp_session_manager() -> None:
     global _mcp_session_context
+    logger.info("API auth config: API_TOKEN=%s", mask_secret(os.getenv("API_TOKEN", "")))
     _mcp_session_context = mcp_server.session_manager.run()
     await _mcp_session_context.__aenter__()
 

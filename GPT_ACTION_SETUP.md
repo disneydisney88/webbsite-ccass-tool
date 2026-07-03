@@ -49,7 +49,7 @@ In the GPT builder, add an Action and import:
 https://your-api-service.onrender.com/openapi.json
 ```
 
-If `API_TOKEN` is set and your client cannot send custom headers, include it in the URL as `key=<token>`.
+If `API_TOKEN` is set and your client cannot send custom headers, include it in the URL as `key=<token>` or `api_token=<token>`.
 Bearer token and `X-API-Key` headers are also accepted for clients that support headers.
 
 ## Why This Is Separate From Streamlit

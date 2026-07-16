@@ -471,6 +471,48 @@ def announcement_event_tags(row: dict[str, Any]) -> list[str]:
     return [tag for tag, pattern in patterns if re.search(pattern, text, flags=re.I)]
 
 
+def build_participant_id_map(holdings: list[dict[str, Any]]) -> dict[str, str]:
+    """Map participant display name -> CCASS ID using the Holdings table.
+
+    The Big Changes source page lists participants by name only, so this is the
+    only place a CCASS ID can be recovered for a big-change row.
+    """
+    mapping: dict[str, str] = {}
+    for row in holdings:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("Participant") or "").strip()
+        ccass_id = row.get("CCASS ID") or row.get("ccass_id") or ""
+        ccass_id = str(ccass_id).strip()
+        if name and ccass_id and name not in mapping:
+            mapping[name] = ccass_id
+    return mapping
+
+
+def enrich_big_changes(
+    records: list[dict[str, Any]], participant_id_map: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Add slim, explicitly-named fields to each big-change row.
+
+    Existing keys (Date, Participant, Change %, Change in shares) are kept for
+    backward compatibility; new snake_case keys are added alongside. participant_id
+    is null when the name cannot be matched to a Holdings row (never fabricated).
+    """
+    enriched = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        item = dict(record)
+        name = str(item.get("Participant") or "").strip()
+        shares = item.get("Change in shares")
+        item["participant_name"] = name or None
+        item["participant_id"] = participant_id_map.get(name)
+        item["change_shares"] = to_number(shares) if shares not in (None, "") else None
+        item["change_pct"] = to_number(item.get("Change %"))
+        enriched.append(item)
+    return enriched
+
+
 def section_failure_warnings(fetch_summary: list[dict[str, Any]]) -> list[str]:
     warnings = []
     for row in fetch_summary:
@@ -486,10 +528,10 @@ def section_failure_warnings(fetch_summary: list[dict[str, Any]]) -> list[str]:
 def build_stock_payload(
     stock_code: str,
     timeout: int = 30,
-    holdings_limit: int = 20,
-    changes_limit: int = 30,
-    big_changes_limit: int = 30,
-    concentration_limit: int = 30,
+    holdings_limit: int = 15,
+    changes_limit: int = 20,
+    big_changes_limit: int = 10,
+    concentration_limit: int = 15,
     headless: bool = True,
 ) -> dict[str, Any]:
     base = build_base_payload(stock_code=stock_code, timeout=timeout, headless=headless)
@@ -505,6 +547,10 @@ def build_stock_payload(
     compact_changes = compact_records(changes, "changes", changes_limit)
     compact_big_changes = compact_records(big_changes, "big_changes", big_changes_limit)
     compact_concentration = compact_records(concentration, "concentration", concentration_limit)
+
+    # Enrich big changes with participant_id (joined from Holdings) and slim,
+    # explicitly-named fields; existing keys are preserved for compatibility.
+    compact_big_changes = enrich_big_changes(compact_big_changes, build_participant_id_map(holdings))
 
     fetch_summary = exported.get("fetch_summary", [])
     warnings = list(exported.get("analysis_warnings", []))
@@ -650,10 +696,10 @@ def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, lim
 )
 async def get_ccass_stock_data(
     code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 01592.")],
-    holdings_limit: Annotated[int, Field(ge=1, le=50)] = 20,
-    changes_limit: Annotated[int, Field(ge=1, le=50)] = 30,
-    big_changes_limit: Annotated[int, Field(ge=1, le=50)] = 20,
-    concentration_limit: Annotated[int, Field(ge=1, le=60)] = 30,
+    holdings_limit: Annotated[int, Field(ge=1, le=50)] = 15,
+    changes_limit: Annotated[int, Field(ge=1, le=50)] = 20,
+    big_changes_limit: Annotated[int, Field(ge=1, le=50)] = 10,
+    concentration_limit: Annotated[int, Field(ge=1, le=60)] = 15,
 ) -> dict[str, Any]:
     return build_stock_payload(
         stock_code=code,
@@ -762,10 +808,10 @@ def get_stock(
     code: str | None = Query(None, description="HK stock code, e.g. 01592."),
     stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
     timeout: int = Query(30, ge=10, le=35, description="Overall compact API timeout budget in seconds."),
-    holdings_limit: int = Query(20, ge=1, le=50, description="Maximum holdings rows returned."),
-    changes_limit: int = Query(30, ge=1, le=50, description="Maximum changes rows returned."),
-    big_changes_limit: int = Query(20, ge=1, le=50, description="Maximum big changes rows returned."),
-    concentration_limit: int = Query(30, ge=1, le=60, description="Maximum concentration rows returned."),
+    holdings_limit: int = Query(15, ge=1, le=50, description="Maximum holdings rows returned."),
+    changes_limit: int = Query(20, ge=1, le=50, description="Maximum changes rows returned."),
+    big_changes_limit: int = Query(10, ge=1, le=50, description="Maximum big changes rows returned."),
+    concentration_limit: int = Query(15, ge=1, le=60, description="Maximum concentration rows returned."),
 ) -> dict[str, Any]:
     requested_code = code or stock_code or ""
     if not requested_code:

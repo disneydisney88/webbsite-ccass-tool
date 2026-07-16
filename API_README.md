@@ -13,7 +13,7 @@ Open:
 - `http://localhost:8000/health`
 - `http://localhost:8000/openapi.json`
 - `http://localhost:8000/api/stock?code=01592`
-- `http://localhost:8000/api/stock?code=01592&timeout=30&holdings_limit=20&changes_limit=30&big_changes_limit=20&concentration_limit=30`
+- `http://localhost:8000/api/stock?code=01592&timeout=30&holdings_limit=15&changes_limit=20&big_changes_limit=10&concentration_limit=15`
 
 ## Optional API Token
 
@@ -80,3 +80,27 @@ It returns one pure JSON response from a single HTTP GET. The response includes:
   "data_quality_warnings": []
 }
 ```
+
+## CHANGELOG
+
+Breaking or behavioural changes are recorded here. Existing field names are kept
+for at least one version when new fields are added, because downstream analysis
+flows depend on the current schema.
+
+### Unreleased
+
+- **Reliability:** CCASS sections (Holdings, Changes, Big Changes, Concentration,
+  Price History) are now fetched **concurrently** instead of serially. Previously
+  Price History — always fetched last — was frequently starved of the shared
+  timeout budget and returned `Timeout budget exhausted before this section was
+  fetched`. Concurrency removes that starvation and lowers warm-request latency.
+  Tune worker count with the `FETCH_MAX_WORKERS` env var (default = number of
+  sections).
+- **Lower default limits** (callers can still request more, up to the same maxima):
+  `holdings_limit` 20 → **15**, `changes_limit` 30 → **20**, `big_changes_limit`
+  20 → **10**, `concentration_limit` 30 → **15**.
+- **Big Changes enrichment (additive):** each big-change row now also carries
+  `participant_id` (joined from the Holdings table; `null` when the name cannot be
+  matched — never fabricated), `participant_name`, `change_shares` (numeric, `null`
+  when the source omits a share-count column) and `change_pct`. The original
+  `Date`, `Participant`, `Change %` and `Change in shares` keys are unchanged.

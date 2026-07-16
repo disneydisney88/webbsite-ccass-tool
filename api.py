@@ -36,6 +36,7 @@ from utils.f10_equity import (
     parse_f10_share_changes,
 )
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html, parse_f10_stock_name
+from utils.snapshot import diff_snapshots, parse_holdings_snapshot, snapshot_url
 from utils.hkexnews import fetch_announcements
 from utils.officers import (
     extract_org_id_from_html,
@@ -49,7 +50,7 @@ from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.8.0"
+API_VERSION = "1.9.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -942,6 +943,76 @@ def build_capital_payload(stock_code: str, changes_limit: int = 30, buybacks_lim
     )
 
 
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def build_diff_payload(stock_code: str, date_a: str, date_b: str, timeout: int = 30) -> dict[str, Any]:
+    """CCASS snapshot diff between two dates (handover 3.2).
+
+    Fetches the full participant table for each date and reports per-participant
+    share/stake changes, new/exited participants and net flow by category -
+    the before/after view for placements and warehouse moves.
+    """
+    code = clean_stock_code(stock_code)
+    if not code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    if not DATE_RE.match(date_a or "") or not DATE_RE.match(date_b or ""):
+        raise HTTPException(status_code=400, detail="Provide date_a and date_b as YYYY-MM-DD.")
+    if date_a >= date_b:
+        raise HTTPException(status_code=400, detail="date_a must be earlier than date_b.")
+
+    lookup = resolve_issue_id_from_stock(code, timeout=min(timeout, 12), headless=True)
+    if lookup.status != "success" or not lookup.issue_id:
+        return json_safe(
+            {
+                "metadata": {"code": code, "issue_id": "", "date_a": date_a, "date_b": date_b},
+                "diff": None,
+                "data_quality_warnings": [f"Issue lookup failed: {lookup.message or 'Webb-site issue ID not resolved.'}"],
+            }
+        )
+
+    urls = {"a": snapshot_url(lookup.issue_id, date_a), "b": snapshot_url(lookup.issue_id, date_b)}
+    warnings: list[str] = []
+    snapshot_timeout = parallel_section_timeout(time.monotonic() + timeout, timeout)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            key: executor.submit(fetch_with_requests, f"Holdings {key}", url, snapshot_timeout)
+            for key, url in urls.items()
+        }
+        results = {key: future.result() for key, future in futures.items()}
+
+    snapshots: dict[str, list[dict[str, Any]]] = {}
+    for key, label in (("a", date_a), ("b", date_b)):
+        result = results[key]
+        rows = parse_holdings_snapshot(result.tables) if result.ok else []
+        if not rows:
+            warnings.append(
+                f"Snapshot for {label} could not be parsed"
+                + (f" ({result.error_type}: {result.error_message})" if not result.ok else " (no participant rows; the date may have no data)")
+            )
+        snapshots[key] = rows
+
+    diff = None
+    if snapshots["a"] and snapshots["b"]:
+        diff = diff_snapshots(snapshots["a"], snapshots["b"], date_a, date_b)
+
+    return json_safe(
+        {
+            "metadata": {
+                "code": code,
+                "issue_id": lookup.issue_id,
+                "date_a": date_a,
+                "date_b": date_b,
+                "source_url_a": urls["a"],
+                "source_url_b": urls["b"],
+                "settlement_note": SETTLEMENT_NOTE,
+            },
+            "diff": diff,
+            "data_quality_warnings": warnings,
+        }
+    )
+
+
 def build_officers_payload(
     stock_code: str, snapshot_date: str | None = None, timeout: int = 30, headless: bool = True
 ) -> dict[str, Any]:
@@ -1009,10 +1080,10 @@ def build_officers_payload(
 )
 async def get_ccass_stock_data(
     code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 01592.")],
-    holdings_limit: Annotated[int, Field(ge=1, le=50)] = 15,
-    changes_limit: Annotated[int, Field(ge=1, le=50)] = 20,
-    big_changes_limit: Annotated[int, Field(ge=1, le=50)] = 10,
-    concentration_limit: Annotated[int, Field(ge=1, le=60)] = 15,
+    holdings_limit: Annotated[int, Field(ge=1, le=100)] = 15,
+    changes_limit: Annotated[int, Field(ge=1, le=100)] = 20,
+    big_changes_limit: Annotated[int, Field(ge=1, le=100)] = 10,
+    concentration_limit: Annotated[int, Field(ge=1, le=100)] = 15,
 ) -> dict[str, Any]:
     return build_stock_payload(
         stock_code=code,
@@ -1103,6 +1174,24 @@ async def get_stock_capital(
     return build_capital_payload(stock_code=code, changes_limit=changes_limit, buybacks_limit=buybacks_limit, timeout=30)
 
 
+@mcp_server.tool(
+    name="get_ccass_diff",
+    description=(
+        "Compare CCASS holdings snapshots between two dates for a Hong Kong listed "
+        "stock: per-participant share and stake changes, new and exited participants, "
+        "Top5/Top10 stake on both dates, and net flow aggregated by participant "
+        "category (retail / bank / boutique / intl_broker). The before/after view for "
+        "placements (配售) and warehouse transfers."
+    ),
+)
+async def get_ccass_diff(
+    code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 02028.")],
+    date_a: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="Earlier date, YYYY-MM-DD.")],
+    date_b: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="Later date, YYYY-MM-DD.")],
+) -> dict[str, Any]:
+    return build_diff_payload(stock_code=code, date_a=date_a, date_b=date_b, timeout=30)
+
+
 def build_full_stock_payload(stock_code: str, timeout: int = 60, headless: bool = True) -> dict[str, Any]:
     stock_code = clean_stock_code(stock_code)
     if not stock_code:
@@ -1175,10 +1264,10 @@ def get_stock(
     code: str | None = Query(None, description="HK stock code, e.g. 01592."),
     stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
     timeout: int = Query(30, ge=10, le=35, description="Overall compact API timeout budget in seconds."),
-    holdings_limit: int = Query(15, ge=1, le=50, description="Maximum holdings rows returned."),
-    changes_limit: int = Query(20, ge=1, le=50, description="Maximum changes rows returned."),
-    big_changes_limit: int = Query(10, ge=1, le=50, description="Maximum big changes rows returned."),
-    concentration_limit: int = Query(15, ge=1, le=60, description="Maximum concentration rows returned."),
+    holdings_limit: int = Query(15, ge=1, le=100, description="Maximum holdings rows returned."),
+    changes_limit: int = Query(20, ge=1, le=100, description="Maximum changes rows returned."),
+    big_changes_limit: int = Query(10, ge=1, le=100, description="Maximum big changes rows returned."),
+    concentration_limit: int = Query(15, ge=1, le=100, description="Maximum concentration rows returned."),
 ) -> dict[str, Any]:
     requested_code = code or stock_code or ""
     if not requested_code:
@@ -1220,6 +1309,47 @@ def get_stock_officers_endpoint(
     return build_officers_payload(
         stock_code=requested_code, snapshot_date=snapshot_date, timeout=timeout, headless=True
     )
+
+
+@app.get("/api/stock/price", operation_id="getStockPriceHistory", dependencies=[Depends(verify_api_token)])
+def get_stock_price_endpoint(
+    code: str | None = Query(None, description="HK stock code, e.g. 02028."),
+    stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
+    limit: int = Query(80, ge=1, le=200, description="Maximum price-history rows returned."),
+    timeout: int = Query(30, ge=10, le=35, description="Fetch timeout budget in seconds."),
+) -> dict[str, Any]:
+    requested_code = code or stock_code or ""
+    if not requested_code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    return build_price_history_payload(stock_code=requested_code, limit=limit, timeout=timeout, headless=True)
+
+
+@app.get("/api/stock/announcements", operation_id="getStockAnnouncements", dependencies=[Depends(verify_api_token)])
+def get_stock_announcements_endpoint(
+    code: str | None = Query(None, description="HK stock code, e.g. 02028."),
+    stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
+    period_years: int = Query(1, ge=1, le=2, description="Announcement lookback period in years."),
+    limit: int = Query(100, ge=1, le=200, description="Maximum announcement rows returned."),
+    timeout: int = Query(30, ge=10, le=35, description="Fetch timeout budget in seconds."),
+) -> dict[str, Any]:
+    requested_code = code or stock_code or ""
+    if not requested_code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    return build_hkex_announcements_payload(stock_code=requested_code, period_years=period_years, limit=limit, timeout=timeout)
+
+
+@app.get("/api/stock/diff", operation_id="getCCASSDiff", dependencies=[Depends(verify_api_token)])
+def get_ccass_diff_endpoint(
+    code: str | None = Query(None, description="HK stock code, e.g. 02028."),
+    stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
+    date_a: str = Query(..., description="Earlier date, YYYY-MM-DD."),
+    date_b: str = Query(..., description="Later date, YYYY-MM-DD."),
+    timeout: int = Query(30, ge=10, le=35, description="Fetch timeout budget in seconds."),
+) -> dict[str, Any]:
+    requested_code = code or stock_code or ""
+    if not requested_code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    return build_diff_payload(stock_code=requested_code, date_a=date_a, date_b=date_b, timeout=timeout)
 
 
 @app.get("/api/stock/capital", operation_id="getStockCapital", dependencies=[Depends(verify_api_token)])

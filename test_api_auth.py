@@ -158,8 +158,8 @@ class ApiAuthTests(unittest.TestCase):
         self.assertIn("get_webbsite_price_history", names)
         self.assertIn("get_hkex_announcements", names)
         self.assertEqual(schema["properties"]["code"]["pattern"], "^[0-9]{5}$")
-        self.assertEqual(schema["properties"]["holdings_limit"]["maximum"], 50)
-        self.assertEqual(schema["properties"]["concentration_limit"]["maximum"], 60)
+        self.assertEqual(schema["properties"]["holdings_limit"]["maximum"], 100)
+        self.assertEqual(schema["properties"]["concentration_limit"]["maximum"], 100)
 
     def test_price_history_payload_is_compact(self) -> None:
         base = fake_base_payload(row_count=5)
@@ -280,7 +280,7 @@ class ApiAuthTests(unittest.TestCase):
 
     def test_limit_over_range_returns_422(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
-            status_code, payload = asgi_get("/api/stock?stock_code=01592&holdings_limit=51", headers=auth_headers())
+            status_code, payload = asgi_get("/api/stock?stock_code=01592&holdings_limit=101", headers=auth_headers())
         self.assertEqual(status_code, 422)
         self.assertIn("detail", payload)
 

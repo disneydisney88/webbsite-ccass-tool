@@ -58,7 +58,35 @@ def csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
-def combined_stock_csv(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> bytes:
+# (section, row_meaning, extras key, source key in extras)
+EXTRA_SECTIONS = [
+    ("Corporate Events", "Webb-site entitlement events (dividends, splits, rights)", "events", "events_url"),
+    ("Share Capital Changes", "Issued-share history: placements, option exercises, buyback cancellations (10jqka F10)", "share_changes", "equity_url"),
+    ("Buybacks", "Per-day share buyback records (10jqka F10)", "buybacks", "equity_url"),
+    ("Managers F10", "Current management with tenure, salary and biography (10jqka F10)", "managers_f10", "managers_url"),
+]
+
+
+def extras_frames(parsed: ParsedCCASS, extras: dict | None) -> list[pd.DataFrame]:
+    frames = []
+    for section, description, key, url_key in EXTRA_SECTIONS:
+        records = (extras or {}).get(key) or []
+        if not records:
+            continue
+        out = pd.DataFrame(records)
+        out.insert(0, "section", section)
+        out.insert(1, "row_meaning", description)
+        out.insert(2, "stock_code", parsed.stock_code)
+        out.insert(3, "stock_name", parsed.stock_name)
+        out.insert(4, "webbsite_issue_id", parsed.issue_id)
+        out.insert(5, "fetched_time", parsed.fetched_time)
+        out.insert(6, "data_date_or_latest_date", "")
+        out.insert(7, "source_url", (extras or {}).get(url_key, ""))
+        frames.append(out)
+    return frames
+
+
+def combined_stock_csv(parsed: ParsedCCASS, results: dict[str, FetchResult], extras: dict | None = None) -> bytes:
     sections = [
         (
             "Holdings",
@@ -106,6 +134,7 @@ def combined_stock_csv(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> 
         out.insert(6, "data_date_or_latest_date", data_date)
         out.insert(7, "source_url", result.final_url or result.url if result else "")
         frames.append(out)
+    frames.extend(extras_frames(parsed, extras))
     if not frames:
         return pd.DataFrame(
             [
@@ -137,7 +166,7 @@ def raw_preview_dataframe(results: dict[str, FetchResult]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def excel_bytes(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> bytes:
+def excel_bytes(parsed: ParsedCCASS, results: dict[str, FetchResult], extras: dict | None = None) -> bytes:
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         pd.DataFrame([metadata_dict(parsed)]).to_excel(writer, sheet_name="metadata", index=False)
@@ -151,5 +180,15 @@ def excel_bytes(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> bytes:
         parsed.big_changes_table.to_excel(writer, sheet_name="bigchanges", index=False)
         parsed.concentration_table.to_excel(writer, sheet_name="concentration", index=False)
         parsed.price_history_table.to_excel(writer, sheet_name="price_history", index=False)
+        extra_sheets = [
+            ("events", "events"),
+            ("share_capital", "share_changes"),
+            ("buybacks", "buybacks"),
+            ("managers_f10", "managers_f10"),
+        ]
+        for sheet_name, key in extra_sheets:
+            records = (extras or {}).get(key) or []
+            if records:
+                pd.DataFrame(records).to_excel(writer, sheet_name=sheet_name, index=False)
         raw_preview_dataframe(results).to_excel(writer, sheet_name="raw_table_previews", index=False)
     return buffer.getvalue()

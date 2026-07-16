@@ -160,9 +160,9 @@ def get_download_base(parsed) -> str:
     return parsed.stock_code or parsed.issue_id or "ccass"
 
 
-def render_download_buttons(parsed, results, report: str, key_prefix: str) -> None:
+def render_download_buttons(parsed, results, report: str, key_prefix: str, extras: dict | None = None) -> None:
     base = get_download_base(parsed)
-    all_csv = combined_stock_csv(parsed, results)
+    all_csv = combined_stock_csv(parsed, results, extras)
     st.caption("The main CSV combines all sections and labels what each row represents.")
     st.download_button(
         "Download All Data CSV",
@@ -187,7 +187,7 @@ def render_download_buttons(parsed, results, report: str, key_prefix: str) -> No
     col5.download_button("Markdown Report", report.encode("utf-8"), f"{base}_report.md", "text/markdown", key=f"{key_prefix}_{base}_report_md")
     col6.download_button(
         "Excel - All Sections",
-        excel_bytes(parsed, results),
+        excel_bytes(parsed, results, extras),
         f"{base}_all_sections.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"{key_prefix}_{base}_all_sections_xlsx",
@@ -1462,7 +1462,16 @@ parsed = parse_results(
     id_lookup_status=lookup.status,
     selected_indices=manual_overrides,
 )
-report = build_report(parsed, results, hkex_announcements=hkex_announcements)
+export_extras = {
+    "events": st.session_state.get("events", {}).get("records", []),
+    "events_url": events_url(lookup.issue_id) if lookup.issue_id else "",
+    "share_changes": st.session_state.get("capital", {}).get("share_changes", []),
+    "buybacks": st.session_state.get("capital", {}).get("buybacks", []),
+    "equity_url": f10_equity_url(lookup.stock_code or "") if lookup.stock_code else "",
+    "managers_f10": st.session_state.get("officers", {}).get("managers_f10", []),
+    "managers_url": f10_managers_url(lookup.stock_code or "") if lookup.stock_code else "",
+}
+report = build_report(parsed, results, hkex_announcements=hkex_announcements, extras=export_extras)
 fetch_summary = build_fetch_summary(parsed, results)
 json_ready = parsed_to_json_ready(parsed, results)
 
@@ -1502,7 +1511,7 @@ st.divider()
 st.subheader("Download This Stock")
 st.caption("One CSV contains Holdings, Changes, Big Changes and Concentration with source URL, fetched time and data meaning.")
 top_dl1, top_dl2 = st.columns([2, 1])
-top_csv = combined_stock_csv(parsed, results)
+top_csv = combined_stock_csv(parsed, results, export_extras)
 with top_dl1:
     st.download_button(
         "Download All CCASS Data CSV",
@@ -1515,7 +1524,7 @@ with top_dl1:
 with top_dl2:
     st.download_button(
         "Download Excel",
-        excel_bytes(parsed, results),
+        excel_bytes(parsed, results, export_extras),
         f"{get_download_base(parsed)}_all_sections.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"top_{get_download_base(parsed)}_all_sections_xlsx",
@@ -1682,4 +1691,4 @@ render_copy_report(report)
 st.divider()
 st.markdown('<div id="download-files"></div>', unsafe_allow_html=True)
 st.subheader("Download Files")
-render_download_buttons(parsed, results, report, "bottom")
+render_download_buttons(parsed, results, report, "bottom", export_extras)

@@ -73,7 +73,56 @@ def concentration_change_lines(parsed: ParsedCCASS) -> str:
     return "\n".join(f"* {labels.get(key, key)}: {value}" for key, value in parsed.concentration_5day_change.items())
 
 
-def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_announcements=None) -> str:
+def extras_report_sections(extras: dict | None) -> str:
+    """Markdown sections for the newer data sources (events / capital / managers)."""
+    extras = extras or {}
+    parts: list[str] = []
+
+    events = extras.get("events") or []
+    parts.append("## Corporate Events (Webb-site 權益事件)\n")
+    if events:
+        keep = ["announced", "type", "new_old", "ex_date", "amount", "year_end", "notes"]
+        df = pd.DataFrame(events)
+        parts.append(markdown_table(df[[c for c in keep if c in df.columns]]))
+    else:
+        parts.append("* not available")
+
+    share_changes = extras.get("share_changes") or []
+    parts.append("\n## Share Capital Changes (股本變化,10jqka)\n")
+    if share_changes:
+        keep = ["announce_date", "shares_million", "reason", "reason_tags", "change_date"]
+        df = pd.DataFrame(share_changes)
+        if "reason_tags" in df.columns:
+            df = df.assign(reason_tags=df["reason_tags"].apply(lambda tags: ",".join(tags) if isinstance(tags, list) else tags))
+        parts.append(markdown_table(df[[c for c in keep if c in df.columns]]))
+    else:
+        parts.append("* not available")
+
+    buybacks = extras.get("buybacks") or []
+    parts.append("\n## Buybacks (股份回購,10jqka)\n")
+    if buybacks:
+        parts.append(f"* Total buyback records: {len(buybacks)} (most recent 20 shown)\n")
+        parts.append(markdown_table(pd.DataFrame(buybacks[:20])))
+    else:
+        parts.append("* not available")
+
+    managers = extras.get("managers_f10") or []
+    parts.append("\n## Current Management (現任高管,10jqka)\n")
+    if managers:
+        keep = ["name", "positions", "tenure_from", "tenure_to", "sex", "age", "education", "salary"]
+        df = pd.DataFrame(managers)
+        parts.append(markdown_table(df[[c for c in keep if c in df.columns]]))
+        parts.append("\n### 高管背景簡介\n")
+        for manager in managers:
+            if manager.get("biography"):
+                parts.append(f"* **{manager.get('name', '-')}**({manager.get('positions', '-')}): {manager['biography']}")
+    else:
+        parts.append("* not available")
+
+    return "\n".join(parts) + "\n\n"
+
+
+def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_announcements=None, extras: dict | None = None) -> str:
     fetch_summary = build_fetch_summary(parsed, results)
     fetch_summary_report = fetch_summary[
         ["Section", "Status", "Tables found", "Selected table index", "Latest date / data date", "Error"]
@@ -175,6 +224,8 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
     if parsed.transfer_flags:
         report += "Possible large custody transfer / warehouse transfer flags:\n"
         report += bullet_list(parsed.transfer_flags) + "\n\n"
+
+    report += extras_report_sections(extras)
 
     report += f"""## Concentration
 

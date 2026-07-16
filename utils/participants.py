@@ -38,8 +38,9 @@ def _load_mapping() -> tuple[dict[str, str], tuple[tuple[str, str], ...]]:
 
 def categorize(ccass_id: str | None = None, name: str | None = None) -> str:
     by_id, by_keyword = _load_mapping()
-    if ccass_id:
-        category = by_id.get(str(ccass_id).strip().upper())
+    cleaned_id = str(ccass_id).strip().upper() if ccass_id else ""
+    if cleaned_id:
+        category = by_id.get(cleaned_id)
         if category:
             return category
     if name:
@@ -47,4 +48,9 @@ def categorize(ccass_id: str | None = None, name: str | None = None) -> str:
         for keyword, category in by_keyword:
             if keyword and keyword in upper_name:
                 return category
+    # CCASS ID prefix fallback: C-prefixed participants are custodians (banks);
+    # explicit ID/keyword mappings above take precedence (e.g. Citibank ->
+    # intl_broker).
+    if cleaned_id.startswith("C"):
+        return "bank"
     return "unknown"

@@ -135,6 +135,25 @@ flows depend on the current schema.
 
 ### Unreleased
 
+- **REST parity with MCP:** new REST endpoints `GET /api/stock/price`
+  (`getStockPriceHistory`) and `GET /api/stock/announcements`
+  (`getStockAnnouncements`) expose the price-history and HKEX-announcement
+  payloads that were previously MCP-only, so GPT Actions can use them too.
+- **CCASS snapshot diff:** `GET /api/stock/diff?code=...&date_a=...&date_b=...`
+  (`getCCASSDiff`) and MCP tool `get_ccass_diff` compare full holdings
+  snapshots between two dates: per-participant share/stake changes with
+  status (new / exited / increased / decreased), Top5/Top10 stake on both
+  dates, and net share flow aggregated by participant category — the
+  before/after view for placements and warehouse transfers.
+- **Higher limit caps:** `holdings_limit` / `changes_limit` /
+  `big_changes_limit` / `concentration_limit` maxima raised from 50/60 to 100
+  (defaults unchanged).
+- **Copy report / CSV / Excel now carry the new data:** the Streamlit
+  Copy-for-ChatGPT report, combined CSV and Excel export include corporate
+  events, share-capital changes, buybacks and F10 current management (with
+  biographies in the report).
+- **Participant categories:** C-prefixed CCASS IDs (custodians) now default to
+  `bank` when no explicit mapping matches.
 - **Explicit response schema:** `holdings`, `changes`, `big_changes` and
   `concentration.records` items are now typed models in `/openapi.json`, so the
   normalized fields (`participant_id`, `change_shares`, `change_pct`, `category`

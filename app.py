@@ -837,6 +837,21 @@ def parse_historical_holdings_table(table: pd.DataFrame, participants: list[dict
     return rows
 
 
+def count_holdings_participants(table: pd.DataFrame) -> int:
+    """Count CCASS participants in one date's holdings table (DT's 券商數目).
+
+    Participant rows carry an ID like B01955 / C00019 / A00001; aggregate rows
+    (Total in CCASS, Issued securities, ...) have no ID and are excluded.
+    """
+    if table is None or table.empty:
+        return 0
+    id_col = pick_history_column(table, ["CCASS ID", "Participant ID", "ID"])
+    if not id_col:
+        return 0
+    ids = table[id_col].astype(str).str.strip()
+    return int(ids.str.match(r"^[A-Ca-c]\d{5}$").sum())
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_participant_history(issue_id: str, dates: tuple[str, ...], participants: tuple[tuple[str, str, str, int], ...], timeout: int, headless: bool) -> pd.DataFrame:
     from playwright.sync_api import sync_playwright
@@ -855,10 +870,14 @@ def fetch_participant_history(issue_id: str, dates: tuple[str, ...], participant
             browser_jobs.append((date, url))
             continue
         best_rows = []
+        best_count = 0
         for table in result.tables:
             parsed_rows = parse_historical_holdings_table(table, participant_rows, date)
             if len(parsed_rows) > len(best_rows):
                 best_rows = parsed_rows
+                best_count = count_holdings_participants(table)
+        for row in best_rows:
+            row["BrokerCount"] = best_count
         rows.extend(best_rows)
 
     if browser_jobs:
@@ -885,10 +904,14 @@ def fetch_participant_history(issue_id: str, dates: tuple[str, ...], participant
                 except Exception:
                     continue
                 best_rows = []
+                best_count = 0
                 for table in tables:
                     parsed_rows = parse_historical_holdings_table(table, participant_rows, date)
                     if len(parsed_rows) > len(best_rows):
                         best_rows = parsed_rows
+                        best_count = count_holdings_participants(table)
+                for row in best_rows:
+                    row["BrokerCount"] = best_count
                 rows.extend(best_rows)
             browser.close()
     return pd.DataFrame(rows)
@@ -1062,6 +1085,31 @@ def render_dt_participant_rainbow(parsed, timeout: int, headless: bool) -> None:
             st.altair_chart(rainbow_chart, use_container_width=True)
     else:
         st.altair_chart(rainbow_chart, use_container_width=True)
+    # DT-style broker count (券商數目), derived from the same per-date holdings
+    # snapshots the rainbow already fetched - no extra requests.
+    if "BrokerCount" in chart_data.columns:
+        count_data = (
+            chart_data.groupby("Date", as_index=False)["BrokerCount"].max().sort_values("Date")
+        )
+        count_data = count_data[count_data["BrokerCount"] > 0]
+        if not count_data.empty:
+            latest_count = int(count_data.iloc[-1]["BrokerCount"])
+            st.markdown(f"**CCASS 券商數目**　{latest_count}")
+            count_chart = (
+                alt.Chart(count_data)
+                .mark_line(strokeWidth=2, color="#15803d")
+                .encode(
+                    x=alt.X("Date:T", title="Date"),
+                    y=alt.Y("BrokerCount:Q", title="CCASS 券商數目", scale=alt.Scale(zero=False)),
+                    tooltip=[
+                        alt.Tooltip("Date:T", title="Date", format="%Y-%m-%d"),
+                        alt.Tooltip("BrokerCount:Q", title="券商數目"),
+                    ],
+                )
+                .properties(height=140)
+            )
+            st.altair_chart(count_chart, use_container_width=True)
+
     latest_rows = (
         chart_data.sort_values("Date")
         .groupby("Participant", as_index=False)

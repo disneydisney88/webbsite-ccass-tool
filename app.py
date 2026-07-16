@@ -28,13 +28,6 @@ from utils.fetcher import (
 from utils.parser import SECTIONS, build_fetch_summary, parse_results, table_preview_records
 from utils.report import build_report
 from utils.events import events_url, parse_events_html, parse_events_name
-from utils.officers import (
-    extract_org_id_from_html,
-    officers_url,
-    parse_officers_html,
-    parse_officers_name,
-    parse_shutdown_notice,
-)
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html
 from utils.f10_equity import f10_equity_url, parse_f10_buybacks, parse_f10_share_changes
 
@@ -1180,34 +1173,28 @@ def render_events(events: list, name: str, warnings: list, capital: dict | None 
 
 
 def render_officers(officers: list, name: str, warnings: list, managers_f10: list | None = None) -> None:
-    st.markdown("**董事高管 / Directors & officers (Webb-site)**")
-    if officers:
-        df = pd.DataFrame(officers)
-        current_count = int(df["is_current"].sum()) if "is_current" in df.columns else 0
-        st.caption(f"共 {len(officers)} 筆記錄 · 現任 {current_count} 人。")
-        preferred = ["table_group", "name", "position_code", "position", "from_date", "until_date", "is_current", "age", "sex"]
-        cols = [c for c in preferred if c in df.columns] or list(df.columns)
-        if "is_current" in df.columns:
-            show_current = st.toggle("只顯示現任", value=True, key="officers_current_only")
-            if show_current:
-                df = df[df["is_current"] == True]  # noqa: E712
-        st.dataframe(df[cols], use_container_width=True, hide_index=True)
-    else:
-        st.info("暫無董事高管資料(或 Webb-site officers 頁抓取失敗)。")
-
     st.markdown("**現任高管(同花順 F10)**")
-    st.caption("Webb-site 董事資料 2025-03-31 起凍結;呢部分用同花順 F10 補返現任名單、任期、報酬同背景簡介。")
+    st.caption("跟公告更新嘅現任名單、任期、報酬;背景簡介喺最右一欄,向右拉先睇到。")
     if managers_f10:
         mdf = pd.DataFrame(managers_f10)
-        preferred = ["name", "positions", "tenure_from", "is_current", "sex", "age", "education", "salary"]
+        preferred = ["name", "positions", "tenure_from", "tenure_to", "sex", "age", "education", "salary", "biography"]
         cols = [c for c in preferred if c in mdf.columns] or list(mdf.columns)
-        st.dataframe(mdf[cols], use_container_width=True, hide_index=True)
-        with st.expander("高管背景簡介", expanded=False):
-            for manager in managers_f10:
-                if manager.get("biography"):
-                    st.markdown(f"**{manager.get('name', '-')}**({manager.get('positions', '-')})")
-                    st.write(manager["biography"])
-                    st.divider()
+        st.dataframe(
+            mdf[cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "name": st.column_config.TextColumn("姓名"),
+                "positions": st.column_config.TextColumn("職務", width="medium"),
+                "tenure_from": st.column_config.TextColumn("上任"),
+                "tenure_to": st.column_config.TextColumn("離任"),
+                "sex": st.column_config.TextColumn("性別", width="small"),
+                "age": st.column_config.NumberColumn("年齡", width="small"),
+                "education": st.column_config.TextColumn("學歷", width="small"),
+                "salary": st.column_config.TextColumn("報酬"),
+                "biography": st.column_config.TextColumn("背景簡介(右拉查看/點格放大)", width="large"),
+            },
+        )
     else:
         st.info("暫無同花順 F10 高管資料(或抓取失敗)。")
 
@@ -1398,25 +1385,9 @@ if fetch_clicked:
                 except Exception as exc:  # pragma: no cover - defensive
                     events_warn.append(f"Events error: {type(exc).__name__}: {exc}")
 
+                # Webb-site officers are no longer shown on the page (data frozen
+                # 2025-03-31); the F10 managers below are the live source.
                 officers_records, officers_name, officers_warn = [], "", []
-                org_result = results.get("Company / orgdata")
-                org_id = extract_org_id_from_html(org_result.html if org_result else "")
-                if org_id:
-                    try:
-                        off = fetch_with_requests("Officers", officers_url(org_id), timeout=min(int(timeout), 20))
-                        if off.html:
-                            officers_records = parse_officers_html(off.html)
-                            officers_name = parse_officers_name(off.html)
-                            notice = parse_shutdown_notice(off.html)
-                            if notice:
-                                officers_warn.append(notice)
-                            st.write(f"Officers: {len(officers_records)} rows")
-                        else:
-                            officers_warn.append(f"Officers fetch failed: {off.error_type}: {off.error_message}")
-                    except Exception as exc:  # pragma: no cover - defensive
-                        officers_warn.append(f"Officers error: {type(exc).__name__}: {exc}")
-                else:
-                    officers_warn.append("Could not resolve the Webb-site organisation id for officers.")
 
                 managers_records = []
                 try:

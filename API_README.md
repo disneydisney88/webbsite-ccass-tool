@@ -112,8 +112,20 @@ The same response also carries `managers_f10`: current management sourced from
 the Webb-site freeze. `managers_f10_source` documents the provider and URL.
 Fields the source omits are null.
 
-MCP tools: `get_stock_events`, `get_stock_officers` (in addition to
-`get_ccass_stock_data`, `get_webbsite_price_history`, `get_hkex_announcements`).
+### Share capital & buybacks — `GET /api/stock/capital?code=02028`
+
+同花順 F10 supply-side history: `share_capital_changes` (announce/change date,
+issued shares in millions + approximate absolute count, reason and canonical
+`reason_tags`: `placement` / `option_exercise` / `buyback_cancellation` /
+`rights_issue` / `consolidation` / ...) and `buybacks` (per-day amount, share
+count, price range). `capital_summary.latest_share_capital` gives the newest
+issued-share base — use it to cross-check stale bases flagged by
+`issued_shares_may_be_stale` in concentration. Optional: `changes_limit`
+(default 30), `buybacks_limit` (default 20).
+
+MCP tools: `get_stock_events`, `get_stock_officers`, `get_stock_capital` (in
+addition to `get_ccass_stock_data`, `get_webbsite_price_history`,
+`get_hkex_announcements`).
 
 ## CHANGELOG
 

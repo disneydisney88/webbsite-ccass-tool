@@ -36,6 +36,7 @@ from utils.officers import (
     parse_shutdown_notice,
 )
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html
+from utils.f10_equity import f10_equity_url, parse_f10_buybacks, parse_f10_share_changes
 
 exporters = importlib.reload(exporters)
 combined_stock_csv = exporters.combined_stock_csv
@@ -1146,9 +1147,9 @@ def compact_fetch_summary(fetch_summary):
     ].rename(columns={"Selected table index": "Selected table", "Latest date / data date": "Latest date"})
 
 
-def render_events(events: list, name: str, warnings: list) -> None:
+def render_events(events: list, name: str, warnings: list, capital: dict | None = None) -> None:
     st.markdown("**財技事件 / Corporate events (Webb-site)**")
-    st.caption("派息、拆股/合股、送股、供股等資本行動,含比例(new:old)同除淨日。")
+    st.caption("派息、拆股/合股、送股、供股等權益事件,含比例(new:old)同除淨日。")
     if events:
         df = pd.DataFrame(events)
         preferred = ["announced", "type", "new_old", "ex_date", "amount", "year_end", "notes"]
@@ -1157,6 +1158,24 @@ def render_events(events: list, name: str, warnings: list) -> None:
     else:
         st.info("暫無公司事件(或 Webb-site events 頁抓取失敗)。")
     for warning in warnings or []:
+        st.warning(warning)
+
+    capital = capital or {}
+    share_changes = capital.get("share_changes", [])
+    buyback_rows = capital.get("buybacks", [])
+    st.markdown("**股本變化 / Share capital changes(同花順 F10)**")
+    st.caption("配售新股、行使期權、註銷回購等供給事件,連每個時點嘅已發行股本(百萬股)。配售偵測同股本基數核對用呢個表。")
+    if share_changes:
+        sdf = pd.DataFrame(share_changes)
+        preferred = ["announce_date", "shares_million", "reason", "reason_tags", "change_date"]
+        cols = [c for c in preferred if c in sdf.columns] or list(sdf.columns)
+        st.dataframe(sdf[cols], use_container_width=True, hide_index=True)
+    else:
+        st.info("暫無股本變化資料(或 10jqka equity 頁抓取失敗)。")
+    if buyback_rows:
+        with st.expander(f"股份回購記錄({len(buyback_rows)} 條)", expanded=False):
+            st.dataframe(pd.DataFrame(buyback_rows), use_container_width=True, hide_index=True)
+    for warning in capital.get("warnings", []):
         st.warning(warning)
 
 
@@ -1302,6 +1321,8 @@ if "events" not in st.session_state:
     st.session_state.events = {"records": [], "name": "", "warnings": []}
 if "officers" not in st.session_state:
     st.session_state.officers = {"records": [], "name": "", "warnings": []}
+if "capital" not in st.session_state:
+    st.session_state.capital = {"share_changes": [], "buybacks": [], "warnings": []}
 
 if fetch_clicked:
     raw_input = user_input.strip()
@@ -1310,6 +1331,7 @@ if fetch_clicked:
     st.session_state.hkex_announcements = empty_announcements(period_years=int(announcement_years))
     st.session_state.events = {"records": [], "name": "", "warnings": []}
     st.session_state.officers = {"records": [], "name": "", "warnings": []}
+    st.session_state.capital = {"share_changes": [], "buybacks": [], "warnings": []}
 
     if not raw_input:
         st.error("Please enter a Stock Code or Webb-site Issue ID.")
@@ -1406,6 +1428,19 @@ if fetch_clicked:
                         officers_warn.append(f"10jqka managers fetch failed: {f10.error_type}: {f10.error_message}")
                 except Exception as exc:  # pragma: no cover - defensive
                     officers_warn.append(f"10jqka managers error: {type(exc).__name__}: {exc}")
+
+                share_changes, buyback_rows, capital_warn = [], [], []
+                try:
+                    eq = fetch_with_requests("F10 Equity", f10_equity_url(stock_code or ""), timeout=min(int(timeout), 20)) if stock_code else None
+                    if eq is not None and eq.html:
+                        share_changes = parse_f10_share_changes(eq.html)
+                        buyback_rows = parse_f10_buybacks(eq.html)
+                        st.write(f"10jqka 股本變化: {len(share_changes)} 條 · 回購: {len(buyback_rows)} 條")
+                    elif eq is not None:
+                        capital_warn.append(f"10jqka equity fetch failed: {eq.error_type}: {eq.error_message}")
+                except Exception as exc:  # pragma: no cover - defensive
+                    capital_warn.append(f"10jqka equity error: {type(exc).__name__}: {exc}")
+                st.session_state.capital = {"share_changes": share_changes, "buybacks": buyback_rows, "warnings": capital_warn}
 
                 st.session_state.events = {"records": events_records, "name": events_name, "warnings": events_warn}
                 st.session_state.officers = {
@@ -1543,7 +1578,12 @@ render_hkex_announcements(hkex_announcements)
 
 st.divider()
 st.markdown('<div id="corporate-events"></div>', unsafe_allow_html=True)
-render_events(events_state.get("records", []), events_state.get("name", ""), events_state.get("warnings", []))
+render_events(
+    events_state.get("records", []),
+    events_state.get("name", ""),
+    events_state.get("warnings", []),
+    st.session_state.get("capital", {}),
+)
 
 st.divider()
 st.markdown('<div id="officers"></div>', unsafe_allow_html=True)

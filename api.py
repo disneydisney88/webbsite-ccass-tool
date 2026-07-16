@@ -29,6 +29,12 @@ from utils.fetcher import (
     resolve_issue_id_from_stock,
 )
 from utils.events import events_url, parse_events_html, parse_events_name
+from utils.f10_equity import (
+    f10_equity_url,
+    latest_share_capital,
+    parse_f10_buybacks,
+    parse_f10_share_changes,
+)
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html, parse_f10_stock_name
 from utils.hkexnews import fetch_announcements
 from utils.officers import (
@@ -43,7 +49,7 @@ from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.7.0"
+API_VERSION = "1.8.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -890,6 +896,52 @@ def fetch_f10_managers(code: str, timeout: int) -> tuple[list[dict[str, Any]], s
     return managers, name, warnings
 
 
+def build_capital_payload(stock_code: str, changes_limit: int = 30, buybacks_limit: int = 20, timeout: int = 30) -> dict[str, Any]:
+    """Share-capital history and buybacks from 同花順 F10 equity page.
+
+    The share-change rows carry placements (配售新股) with dates and the issued
+    share base at each point - the supply-side half of placement-settlement
+    analysis, and a cross-check for stale issued-share bases in concentration.
+    """
+    code = clean_stock_code(stock_code)
+    if not code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    url = f10_equity_url(code)
+    warnings: list[str] = []
+    changes: list[dict[str, Any]] = []
+    buybacks: list[dict[str, Any]] = []
+    if not url:
+        warnings.append("10jqka equity URL could not be derived from the stock code.")
+    else:
+        result = fetch_with_requests("F10 Equity", url, timeout=min(timeout, 20))
+        if not result.html:
+            warnings.append(f"10jqka equity fetch failed: {result.error_type or 'error'}: {result.error_message}")
+        else:
+            changes = parse_f10_share_changes(result.html)
+            buybacks = parse_f10_buybacks(result.html)
+            if not changes and not buybacks:
+                warnings.append("10jqka equity page returned no tables (format change or unsupported stock).")
+
+    limited_changes = changes[:changes_limit]
+    limited_buybacks = buybacks[:buybacks_limit]
+    return json_safe(
+        {
+            "metadata": {"code": code, "source_url": url, "provider": "10jqka F10"},
+            "capital_summary": {
+                "latest_share_capital": latest_share_capital(changes),
+                "share_changes_total_count": len(changes),
+                "share_changes_returned_count": len(limited_changes),
+                "buybacks_total_count": len(buybacks),
+                "buybacks_returned_count": len(limited_buybacks),
+                "truncated": len(changes) > len(limited_changes) or len(buybacks) > len(limited_buybacks),
+            },
+            "share_capital_changes": limited_changes,
+            "buybacks": limited_buybacks,
+            "data_quality_warnings": warnings,
+        }
+    )
+
+
 def build_officers_payload(
     stock_code: str, snapshot_date: str | None = None, timeout: int = 30, headless: bool = True
 ) -> dict[str, Any]:
@@ -1033,6 +1085,24 @@ async def get_stock_officers(
     return build_officers_payload(stock_code=code, snapshot_date=snapshot_date, timeout=30, headless=True)
 
 
+@mcp_server.tool(
+    name="get_stock_capital",
+    description=(
+        "Fetch share-capital history and buybacks for a Hong Kong listed stock from "
+        "同花順 F10: every issued-share change with date, share count and tagged reason "
+        "(placement / option_exercise / buyback_cancellation / rights_issue / ...), plus "
+        "per-day buyback records. Key source for placement (配售) detection and the "
+        "issued-share base at any point in time."
+    ),
+)
+async def get_stock_capital(
+    code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 02028.")],
+    changes_limit: Annotated[int, Field(ge=1, le=200)] = 30,
+    buybacks_limit: Annotated[int, Field(ge=1, le=200)] = 20,
+) -> dict[str, Any]:
+    return build_capital_payload(stock_code=code, changes_limit=changes_limit, buybacks_limit=buybacks_limit, timeout=30)
+
+
 def build_full_stock_payload(stock_code: str, timeout: int = 60, headless: bool = True) -> dict[str, Any]:
     stock_code = clean_stock_code(stock_code)
     if not stock_code:
@@ -1149,6 +1219,22 @@ def get_stock_officers_endpoint(
         raise HTTPException(status_code=400, detail="Provide code.")
     return build_officers_payload(
         stock_code=requested_code, snapshot_date=snapshot_date, timeout=timeout, headless=True
+    )
+
+
+@app.get("/api/stock/capital", operation_id="getStockCapital", dependencies=[Depends(verify_api_token)])
+def get_stock_capital_endpoint(
+    code: str | None = Query(None, description="HK stock code, e.g. 02028."),
+    stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
+    changes_limit: int = Query(30, ge=1, le=200, description="Maximum share-change rows returned."),
+    buybacks_limit: int = Query(20, ge=1, le=200, description="Maximum buyback rows returned."),
+    timeout: int = Query(30, ge=10, le=35, description="Fetch timeout budget in seconds."),
+) -> dict[str, Any]:
+    requested_code = code or stock_code or ""
+    if not requested_code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    return build_capital_payload(
+        stock_code=requested_code, changes_limit=changes_limit, buybacks_limit=buybacks_limit, timeout=timeout
     )
 
 

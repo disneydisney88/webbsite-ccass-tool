@@ -2,20 +2,17 @@ name: Keep API awake
 
 # Render free tier spins the service down after ~15 minutes without EXTERNAL
 # traffic (Render's own internal health checks do not count). This pings the
-# public /health endpoint every 10 minutes during Hong Kong waking hours
-# (08:00-23:50 HKT) so MCP/API calls don't hit a cold start.
-#
-# Why not 24/7: the free tier includes 750 instance-hours/month; keeping one
-# service awake around the clock (~730h) leaves no headroom. ~16h/day uses
-# ~480h/month. Widen the cron if you upgrade the plan.
+# public /health endpoint every 10 minutes during 08:00-12:00 HKT so MCP/API
+# calls in that window don't hit a cold start. ~4h/day uses ~120h/month of the
+# free tier's 750 instance-hours. Widen the cron if usage hours change.
 #
 # Note: GitHub disables scheduled workflows after 60 days without repo
 # activity - a push or a manual "Run workflow" re-enables it.
 
 on:
   schedule:
-    # UTC times; 00:00-15:50 UTC = 08:00-23:50 HKT
-    - cron: "*/10 0-15 * * *"
+    # UTC times; 00:00-03:50 UTC = 08:00-11:50 HKT
+    - cron: "*/10 0-3 * * *"
   workflow_dispatch: {}
 
 jobs:

@@ -854,66 +854,80 @@ def count_holdings_participants(table: pd.DataFrame) -> int:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_participant_history(issue_id: str, dates: tuple[str, ...], participants: tuple[tuple[str, str, str, int], ...], timeout: int, headless: bool) -> pd.DataFrame:
-    from playwright.sync_api import sync_playwright
+    import time as _time
 
     participant_rows = [
         {"ccass_id": ccass_id, "name": name, "label": label, "order": order}
         for ccass_id, name, label, order in participants
     ]
-    rows = []
-    base_url = issue_urls(issue_id)["Holdings"]
-    browser_jobs = []
-    for date in dates:
-        url = base_url.replace(f"?i={issue_id}", f"?d={date}&i={issue_id}")
-        result = fetch_with_requests(f"Holdings {date}", url, timeout=timeout)
-        if not result.ok:
-            browser_jobs.append((date, url))
-            continue
-        best_rows = []
+
+    def best_rows_from_tables(tables, date: str) -> list[dict[str, object]]:
+        best_rows: list[dict[str, object]] = []
         best_count = 0
-        for table in result.tables:
+        for table in tables:
             parsed_rows = parse_historical_holdings_table(table, participant_rows, date)
             if len(parsed_rows) > len(best_rows):
                 best_rows = parsed_rows
                 best_count = count_holdings_participants(table)
         for row in best_rows:
             row["BrokerCount"] = best_count
-        rows.extend(best_rows)
+        return best_rows
+
+    rows = []
+    base_url = issue_urls(issue_id)["Holdings"]
+    failed_jobs = []
+    for date in dates:
+        url = base_url.replace(f"?i={issue_id}", f"?d={date}&i={issue_id}")
+        result = fetch_with_requests(f"Holdings {date}", url, timeout=timeout)
+        if result.ok:
+            rows.extend(best_rows_from_tables(result.tables, date))
+        else:
+            failed_jobs.append((date, url))
+
+    # Second chance over plain HTTP with a pause and longer timeout - covers
+    # transient failures / rate limiting without needing a browser.
+    browser_jobs = []
+    for date, url in failed_jobs:
+        _time.sleep(0.5)
+        result = fetch_with_requests(f"Holdings {date} (retry)", url, timeout=max(timeout, 30))
+        if result.ok:
+            rows.extend(best_rows_from_tables(result.tables, date))
+        else:
+            browser_jobs.append((date, url))
 
     if browser_jobs:
-        with sync_playwright() as p:
-            try:
-                browser = p.chromium.launch(headless=headless)
-            except Exception as launch_exc:
-                message = str(launch_exc).lower()
-                missing_headless_shell = "chromium_headless_shell" in message or "chrome-headless-shell" in message
-                if not headless or not missing_headless_shell:
-                    raise
-                browser = p.chromium.launch(headless=False)
-            context = browser.new_context(
-                user_agent=USER_AGENT,
-                viewport={"width": 1440, "height": 1000},
-                locale="en-US",
-            )
-            page = context.new_page()
-            for date, url in browser_jobs:
+        # Playwright is a best-effort fallback: on hosts without installed
+        # browsers (e.g. Streamlit Cloud) launching raises - skip those dates
+        # and render the chart from whatever was fetched instead of crashing.
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as p:
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
-                    page.wait_for_timeout(500)
-                    tables = extract_tables_from_html(page.content())
-                except Exception:
-                    continue
-                best_rows = []
-                best_count = 0
-                for table in tables:
-                    parsed_rows = parse_historical_holdings_table(table, participant_rows, date)
-                    if len(parsed_rows) > len(best_rows):
-                        best_rows = parsed_rows
-                        best_count = count_holdings_participants(table)
-                for row in best_rows:
-                    row["BrokerCount"] = best_count
-                rows.extend(best_rows)
-            browser.close()
+                    browser = p.chromium.launch(headless=headless)
+                except Exception as launch_exc:
+                    message = str(launch_exc).lower()
+                    missing_headless_shell = "chromium_headless_shell" in message or "chrome-headless-shell" in message
+                    if not headless or not missing_headless_shell:
+                        raise
+                    browser = p.chromium.launch(headless=False)
+                context = browser.new_context(
+                    user_agent=USER_AGENT,
+                    viewport={"width": 1440, "height": 1000},
+                    locale="en-US",
+                )
+                page = context.new_page()
+                for date, url in browser_jobs:
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                        page.wait_for_timeout(500)
+                        tables = extract_tables_from_html(page.content())
+                    except Exception:
+                        continue
+                    rows.extend(best_rows_from_tables(tables, date))
+                browser.close()
+        except Exception:
+            pass
     return pd.DataFrame(rows)
 
 
@@ -1117,7 +1131,10 @@ def render_dt_participant_rainbow(parsed, timeout: int, headless: bool) -> None:
         .sort_values("ParticipantOrder")
         [["Participant", "Stake", "Holding"]]
     )
-    st.caption(f"Fetched {chart_data['Date'].nunique()} dates. Missing participant rows are treated as 0%.")
+    fetched_dates = chart_data["Date"].nunique()
+    st.caption(f"Fetched {fetched_dates} / {len(dates)} dates. Missing participant rows are treated as 0%.")
+    if fetched_dates < len(dates):
+        st.info("部分歷史日期抓取失敗已被跳過(來源慢或暫時擋請求)。想補齊可以再撳一次「生成真正 DT 彩虹圖」。")
     with st.expander("Latest legend values", expanded=True):
         st.dataframe(latest_rows, use_container_width=True, hide_index=True)
 

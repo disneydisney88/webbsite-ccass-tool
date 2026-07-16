@@ -659,7 +659,9 @@ def render_price_history(parsed) -> None:
     )
     st.altair_chart(chart, use_container_width=True)
     st.caption(f"Price history comes from Webb-site hpu.asp. Latest daily figures are as of {stats.get('date', '-')}. Grey bands mark long gaps with no price records.")
-    render_ccass_concentration_summary(parsed, window or "1Y")
+    # Concentration chart intentionally NOT rendered here: the DT rainbow
+    # section below has its own CCASS 股權集中度 chart (matching DT's layout of
+    # distribution chart -> concentration), so rendering it here duplicated it.
 
 
 def build_rainbow_chart_data(concentration_table: pd.DataFrame) -> pd.DataFrame:

@@ -116,6 +116,15 @@ flows depend on the current schema.
 
 ### Unreleased
 
+- **Participant categories:** every holdings, changes and big-changes row now
+  carries a `category` (`retail` / `bank` / `boutique` / `intl_broker` /
+  `unknown`) to make collecting vs distributing flows readable at a glance. The
+  mapping lives in `config/participant_categories.json` — add a CCASS ID under
+  `by_ccass_id` (most reliable) or a distinctive name fragment under
+  `by_name_keyword` to classify a new broker; no code change needed.
+- **Settlement metadata:** `metadata` now includes `data_as_of_trading_date`
+  and `settlement_note` (CCASS is T+2), so consumers do not have to reason about
+  the settlement lag themselves.
 - **Concentration dual-basis:** the `concentration` block and every record now
   carry both `top5_pct_of_ccass` / `top10_pct_of_ccass` (the source page's basis,
   % of shares in CCASS) and `top5_pct_of_issued` / `top10_pct_of_issued` (% of

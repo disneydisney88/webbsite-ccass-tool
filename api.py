@@ -37,6 +37,7 @@ from utils.officers import (
     parse_officers_name,
     parse_shutdown_notice,
 )
+from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
 
 
@@ -49,6 +50,10 @@ SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price H
 # "Price History", which is always last) cannot be starved of the shared
 # timeout budget by the sections ahead of it. One worker per section.
 MAX_FETCH_WORKERS = max(1, int(os.getenv("FETCH_MAX_WORKERS", str(len(SECTION_NAMES)))))
+SETTLEMENT_NOTE = (
+    "CCASS holdings are settlement (T+2) balances; trades in the last ~2 trading "
+    "days may not yet be reflected in these positions."
+)
 
 logger = logging.getLogger("webbsite_ccass_api")
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -108,6 +113,8 @@ class StockMetadata(BaseModel):
     issue_id: str
     holdings_date: str
     changes_date: str
+    data_as_of_trading_date: str = ""
+    settlement_note: str = ""
 
 
 class HoldingsSummary(BaseModel):
@@ -531,6 +538,24 @@ def enrich_big_changes(
     return enriched
 
 
+def annotate_categories(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add a participant `category` to each record (retail/bank/boutique/...).
+
+    Uses CCASS ID when the row has one (holdings, enriched big changes) and falls
+    back to the participant name (daily changes have no ID column).
+    """
+    annotated = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        item = dict(record)
+        ccass_id = item.get("CCASS ID") or item.get("participant_id") or item.get("ccass_id")
+        name = item.get("Participant") or item.get("participant_name")
+        item["category"] = categorize(ccass_id, name)
+        annotated.append(item)
+    return annotated
+
+
 def enrich_concentration_records(
     records: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], bool]:
@@ -607,6 +632,11 @@ def build_stock_payload(
     # explicitly-named fields; existing keys are preserved for compatibility.
     compact_big_changes = enrich_big_changes(compact_big_changes, build_participant_id_map(holdings))
 
+    # Tag every participant with a flow category (retail/bank/boutique/...).
+    compact_holdings = annotate_categories(compact_holdings)
+    compact_changes = annotate_categories(compact_changes)
+    compact_big_changes = annotate_categories(compact_big_changes)
+
     # Concentration dual-basis (of CCASS vs of issued) + stale-base detection.
     compact_concentration, concentration_stale = enrich_concentration_records(compact_concentration)
     latest_concentration = compact_concentration[0] if compact_concentration else {}
@@ -640,6 +670,8 @@ def build_stock_payload(
                 "issue_id": metadata.get("issue_id", base.get("issue_id", "")),
                 "holdings_date": metadata.get("holdings_data_date", ""),
                 "changes_date": metadata.get("changes_trading_date", ""),
+                "data_as_of_trading_date": metadata.get("holdings_data_date", ""),
+                "settlement_note": SETTLEMENT_NOTE,
             },
             "holdings_summary": {
                 "total_in_ccass": metadata.get("total_in_ccass", ""),

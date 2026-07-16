@@ -1365,7 +1365,7 @@ with meta_cols[1]:
 
 st.divider()
 
-# KPI band
+# KPI summary strip (DT-style)
 kpi = st.columns(5)
 kpi[0].metric("Stock", parsed.stock_code or "-")
 kpi[1].metric("CCASS %", parsed.total_in_ccass_pct or "-")
@@ -1376,167 +1376,189 @@ kpi[4].metric("Largest participant", parsed.largest_participant or "-")
 events_state = st.session_state.get("events", {"records": [], "name": "", "warnings": []})
 officers_state = st.session_state.get("officers", {"records": [], "name": "", "warnings": []})
 
-tab_price, tab_dist, tab_tables, tab_news, tab_people, tab_export = st.tabs([
-    "📈 價格 & 集中度",
-    "🌈 CCASS 分佈",
-    "📋 持股 · 變動 · 集中度",
-    "📅 公告 · 事件",
-    "👔 董事高管",
-    "📥 下載 · Copy · 診斷",
-])
+st.divider()
+st.markdown('<div id="price-turnover"></div>', unsafe_allow_html=True)
+render_price_history(parsed)
 
-with tab_price:
-    render_price_history(parsed)
-    if parsed.stock_code:
-        hkex_code = str(int(parsed.stock_code)) if str(parsed.stock_code).isdigit() else parsed.stock_code
-        st.link_button(
-            "Open HKEX quote",
-            f"https://www.hkex.com.hk/Market-Data/Securities-Prices/Equities/Equities-Quote?sym={hkex_code}&sc_lang=zh-hk",
-        )
-
-with tab_dist:
-    render_dt_participant_rainbow(parsed, timeout, headless)
-
-with tab_tables:
-    section = "Company / orgdata"
-    parse = parsed.section_parses.get(section)
-    render_section(section, results.get(section), parse.selected_table_index if parse else "", parsed.company_table)
-
-    st.divider()
-    section = "Holdings"
-    parse = parsed.section_parses.get(section)
-    summary = (
-        f"Data date: {parsed.holdings_data_date or 'not available'} | "
-        f"Largest participant: {parsed.largest_participant or 'not available'} | "
-        f"Top 5: {parsed.top5_cumulative_pct or 'not available'} | Top 10: {parsed.top10_cumulative_pct or 'not available'}"
-    )
-    render_section(section, results.get(section), parse.selected_table_index if parse else "", parsed.holdings_table, summary)
-
-    st.divider()
-    section = "Changes"
-    parse = parsed.section_parses.get(section)
-    summary = (
-        f"Date range: {parsed.changes_date_range or 'not available'} | "
-        f"Trading date: {parsed.changes_trading_date or 'not available'} | "
-        f"Volume: {parsed.volume or 'not available'} | Turnover: {parsed.turnover or 'not available'}"
-    )
-    render_section(section, results.get(section), parse.selected_table_index if parse else "", parsed.changes_table, summary)
-    if parsed.major_increases:
-        st.markdown("**Major increases**")
-        st.dataframe(major_items_to_table(parsed.major_increases), use_container_width=True)
-    if parsed.major_decreases:
-        st.markdown("**Major decreases**")
-        st.dataframe(major_items_to_table(parsed.major_decreases), use_container_width=True)
-    if parsed.changes_flags:
-        st.markdown("**Changes auto flags**")
-        for flag in parsed.changes_flags:
-            st.info(flag)
-
-    st.divider()
-    section = "Big Changes"
-    parse = parsed.section_parses.get(section)
-    render_section(
-        section,
-        results.get(section),
-        parse.selected_table_index if parse else "",
-        parsed.big_changes_table,
-        f"Latest date: {parsed.big_changes_latest_date or 'not available'}",
-    )
-    for flag in parsed.transfer_flags:
-        st.warning(flag)
-
-    st.divider()
-    section = "Concentration"
-    parse = parsed.section_parses.get(section)
-    render_section(
-        section,
-        results.get(section),
-        parse.selected_table_index if parse else "",
-        parsed.concentration_table,
-        f"Latest date: {parsed.concentration_latest_date or 'not available'}",
-    )
-    if parse and parse.status == "partial success":
-        st.warning(parse.error)
-    with st.expander("Show concentration band chart (not DT rainbow)", expanded=False):
-        render_rainbow_chart(parsed)
-    render_concentration_change(parsed)
-
-    st.divider()
-    section = "Price History"
-    parse = parsed.section_parses.get(section)
-    render_section(
-        section,
-        results.get(section),
-        parse.selected_table_index if parse else "",
-        parsed.price_history_table,
-        (
-            f"Latest date: {parsed.price_history_latest_date or 'not available'} | "
-            f"Close: {parsed.latest_price or 'not available'} | "
-            f"Volume: {parsed.latest_price_volume or 'not available'} | "
-            f"Turnover: {parsed.latest_price_turnover or 'not available'} | "
-            f"VWAP: {parsed.latest_price_vwap or 'not available'}"
-        ),
+if parsed.stock_code:
+    hkex_code = str(int(parsed.stock_code)) if str(parsed.stock_code).isdigit() else parsed.stock_code
+    st.link_button(
+        "Open HKEX quote",
+        f"https://www.hkex.com.hk/Market-Data/Securities-Prices/Equities/Equities-Quote?sym={hkex_code}&sc_lang=zh-hk",
     )
 
-    with st.expander("All parsed tables", expanded=False):
-        render_all_parsed_tables(parsed)
+st.divider()
+st.subheader("Download This Stock")
+st.caption("One CSV contains Holdings, Changes, Big Changes and Concentration with source URL, fetched time and data meaning.")
+top_dl1, top_dl2 = st.columns([2, 1])
+top_csv = combined_stock_csv(parsed, results)
+with top_dl1:
+    st.download_button(
+        "Download All CCASS Data CSV",
+        top_csv,
+        f"{get_download_base(parsed)}_all_ccass_data.csv",
+        "text/csv",
+        key=f"top_{get_download_base(parsed)}_all_ccass_data_csv",
+        use_container_width=True,
+    )
+with top_dl2:
+    st.download_button(
+        "Download Excel",
+        excel_bytes(parsed, results),
+        f"{get_download_base(parsed)}_all_sections.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"top_{get_download_base(parsed)}_all_sections_xlsx",
+        use_container_width=True,
+    )
+with st.expander("CSV content preview", expanded=False):
+    csv_text = top_csv.decode("utf-8-sig", errors="replace")
+    preview_lines = "\n".join(csv_text.splitlines()[:80])
+    st.text_area("First 80 CSV lines", preview_lines, height=260, key=f"top_{get_download_base(parsed)}_csv_preview")
 
-with tab_news:
-    render_hkex_announcements(hkex_announcements)
-    st.divider()
-    render_events(events_state.get("records", []), events_state.get("name", ""), events_state.get("warnings", []))
+st.markdown(
+    """
+    **Jump to:** [Fetch Summary](#fetch-summary) | [All Tables](#all-tables) |
+    [DT Rainbow](#dt-rainbow) | [HKEX Announcements](#hkex-announcements) |
+    [財技事件 Events](#corporate-events) | [董事高管 Officers](#officers) |
+    [Price & Turnover](#price-turnover) |
+    [Company](#company) | [Holdings](#holdings) | [Changes](#changes) |
+    [Big Changes](#big-changes) | [Concentration](#concentration) | [Price History](#price-history) |
+    [Raw Previews](#raw-table-previews) | [Copy for ChatGPT](#copy-for-chatgpt) |
+    [Downloads](#download-files)
+    """
+)
 
-with tab_people:
-    render_officers(officers_state.get("records", []), officers_state.get("name", ""), officers_state.get("warnings", []))
+st.divider()
+st.markdown('<div id="dt-rainbow"></div>', unsafe_allow_html=True)
+render_dt_participant_rainbow(parsed, timeout, headless)
 
-with tab_export:
-    st.subheader("Download This Stock")
-    st.caption("One CSV contains Holdings, Changes, Big Changes and Concentration with source URL, fetched time and data meaning.")
-    top_dl1, top_dl2 = st.columns([2, 1])
-    top_csv = combined_stock_csv(parsed, results)
-    with top_dl1:
-        st.download_button(
-            "Download All CCASS Data CSV",
-            top_csv,
-            f"{get_download_base(parsed)}_all_ccass_data.csv",
-            "text/csv",
-            key=f"top_{get_download_base(parsed)}_all_ccass_data_csv",
-            use_container_width=True,
-        )
-    with top_dl2:
-        st.download_button(
-            "Download Excel",
-            excel_bytes(parsed, results),
-            f"{get_download_base(parsed)}_all_sections.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"top_{get_download_base(parsed)}_all_sections_xlsx",
-            use_container_width=True,
-        )
-    with st.expander("CSV content preview", expanded=False):
-        csv_text = top_csv.decode("utf-8-sig", errors="replace")
-        preview_lines = "\n".join(csv_text.splitlines()[:80])
-        st.text_area("First 80 CSV lines", preview_lines, height=260, key=f"top_{get_download_base(parsed)}_csv_preview")
+st.divider()
+st.markdown('<div id="hkex-announcements"></div>', unsafe_allow_html=True)
+render_hkex_announcements(hkex_announcements)
 
-    st.divider()
-    st.subheader("Copy for ChatGPT")
-    render_copy_report(report)
+st.divider()
+st.markdown('<div id="corporate-events"></div>', unsafe_allow_html=True)
+render_events(events_state.get("records", []), events_state.get("name", ""), events_state.get("warnings", []))
 
-    st.divider()
-    st.subheader("Fetch Summary")
-    st.dataframe(compact_fetch_summary(fetch_summary), use_container_width=True)
-    with st.expander("Source URLs", expanded=False):
-        st.dataframe(fetch_summary[["Section", "URL"]], use_container_width=True)
-    if parsed.analysis_warnings:
-        for warning in parsed.analysis_warnings:
-            st.warning(warning)
+st.divider()
+st.markdown('<div id="officers"></div>', unsafe_allow_html=True)
+render_officers(officers_state.get("records", []), officers_state.get("name", ""), officers_state.get("warnings", []))
 
-    st.divider()
-    st.subheader("Raw Table Previews")
-    for record in table_preview_records(results):
-        with st.expander(f"{record['section']} | table {record['table_index']} | {record['shape']}", expanded=False):
-            st.caption("Columns: " + ", ".join(record["columns"]))
-            st.json(record["preview"])
+st.markdown('<div id="fetch-summary"></div>', unsafe_allow_html=True)
+st.subheader("Fetch Summary")
+st.dataframe(compact_fetch_summary(fetch_summary), use_container_width=True)
+with st.expander("Source URLs", expanded=False):
+    st.dataframe(fetch_summary[["Section", "URL"]], use_container_width=True)
+if parsed.analysis_warnings:
+    for warning in parsed.analysis_warnings:
+        st.warning(warning)
 
-    st.divider()
-    st.subheader("Download Files")
-    render_download_buttons(parsed, results, report, "bottom")
+st.divider()
+st.markdown('<div id="all-tables"></div>', unsafe_allow_html=True)
+render_all_parsed_tables(parsed)
+
+st.divider()
+st.markdown('<div id="company"></div>', unsafe_allow_html=True)
+section = "Company / orgdata"
+parse = parsed.section_parses.get(section)
+render_section(section, results.get(section), parse.selected_table_index if parse else "", parsed.company_table)
+
+st.divider()
+st.markdown('<div id="holdings"></div>', unsafe_allow_html=True)
+section = "Holdings"
+parse = parsed.section_parses.get(section)
+summary = (
+    f"Data date: {parsed.holdings_data_date or 'not available'} | "
+    f"Largest participant: {parsed.largest_participant or 'not available'} | "
+    f"Top 5: {parsed.top5_cumulative_pct or 'not available'} | Top 10: {parsed.top10_cumulative_pct or 'not available'}"
+)
+render_section(section, results.get(section), parse.selected_table_index if parse else "", parsed.holdings_table, summary)
+
+st.divider()
+st.markdown('<div id="changes"></div>', unsafe_allow_html=True)
+section = "Changes"
+parse = parsed.section_parses.get(section)
+summary = (
+    f"Date range: {parsed.changes_date_range or 'not available'} | "
+    f"Trading date: {parsed.changes_trading_date or 'not available'} | "
+    f"Volume: {parsed.volume or 'not available'} | Turnover: {parsed.turnover or 'not available'}"
+)
+render_section(section, results.get(section), parse.selected_table_index if parse else "", parsed.changes_table, summary)
+if parsed.major_increases:
+    st.markdown("**Major increases**")
+    st.dataframe(major_items_to_table(parsed.major_increases), use_container_width=True)
+if parsed.major_decreases:
+    st.markdown("**Major decreases**")
+    st.dataframe(major_items_to_table(parsed.major_decreases), use_container_width=True)
+if parsed.changes_flags:
+    st.markdown("**Changes auto flags**")
+    for flag in parsed.changes_flags:
+        st.info(flag)
+
+st.divider()
+st.markdown('<div id="big-changes"></div>', unsafe_allow_html=True)
+section = "Big Changes"
+parse = parsed.section_parses.get(section)
+render_section(
+    section,
+    results.get(section),
+    parse.selected_table_index if parse else "",
+    parsed.big_changes_table,
+    f"Latest date: {parsed.big_changes_latest_date or 'not available'}",
+)
+for flag in parsed.transfer_flags:
+    st.warning(flag)
+
+st.divider()
+st.markdown('<div id="concentration"></div>', unsafe_allow_html=True)
+section = "Concentration"
+parse = parsed.section_parses.get(section)
+render_section(
+    section,
+    results.get(section),
+    parse.selected_table_index if parse else "",
+    parsed.concentration_table,
+    f"Latest date: {parsed.concentration_latest_date or 'not available'}",
+)
+if parse and parse.status == "partial success":
+    st.warning(parse.error)
+with st.expander("Show concentration band chart (not DT rainbow)", expanded=False):
+    render_rainbow_chart(parsed)
+render_concentration_change(parsed)
+
+st.divider()
+st.markdown('<div id="price-history"></div>', unsafe_allow_html=True)
+section = "Price History"
+parse = parsed.section_parses.get(section)
+render_section(
+    section,
+    results.get(section),
+    parse.selected_table_index if parse else "",
+    parsed.price_history_table,
+    (
+        f"Latest date: {parsed.price_history_latest_date or 'not available'} | "
+        f"Close: {parsed.latest_price or 'not available'} | "
+        f"Volume: {parsed.latest_price_volume or 'not available'} | "
+        f"Turnover: {parsed.latest_price_turnover or 'not available'} | "
+        f"VWAP: {parsed.latest_price_vwap or 'not available'}"
+    ),
+)
+
+st.divider()
+st.markdown('<div id="raw-table-previews"></div>', unsafe_allow_html=True)
+st.subheader("Raw Table Previews")
+for record in table_preview_records(results):
+    with st.expander(f"{record['section']} | table {record['table_index']} | {record['shape']}", expanded=False):
+        st.caption("Columns: " + ", ".join(record["columns"]))
+        st.json(record["preview"])
+
+st.divider()
+st.markdown('<div id="copy-for-chatgpt"></div>', unsafe_allow_html=True)
+st.markdown('<div id="copy-for-chat-gpt"></div>', unsafe_allow_html=True)
+st.subheader("Copy for ChatGPT")
+render_copy_report(report)
+
+st.divider()
+st.markdown('<div id="download-files"></div>', unsafe_allow_html=True)
+st.subheader("Download Files")
+render_download_buttons(parsed, results, report, "bottom")

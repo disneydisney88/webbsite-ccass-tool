@@ -6,6 +6,8 @@ import os
 import re
 import secrets
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Annotated, Any
 
 import pandas as pd
@@ -35,6 +37,10 @@ API_VERSION = "1.5.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
+# Fetch the CCASS sections concurrently so a slow or late section (notably
+# "Price History", which is always last) cannot be starved of the shared
+# timeout budget by the sections ahead of it. One worker per section.
+MAX_FETCH_WORKERS = max(1, int(os.getenv("FETCH_MAX_WORKERS", str(len(SECTION_NAMES)))))
 
 logger = logging.getLogger("webbsite_ccass_api")
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -235,6 +241,15 @@ def short_section_timeout(deadline: float, requested_timeout: int) -> int:
     return max(1, min(4, requested_timeout, int(remaining)))
 
 
+def parallel_section_timeout(deadline: float, requested_timeout: int) -> int:
+    # Sections are fetched concurrently, so each may use up to the whole
+    # remaining budget rather than a small per-section slice.
+    remaining = remaining_seconds(deadline)
+    if remaining <= 1:
+        return 1
+    return max(1, min(requested_timeout, int(remaining)))
+
+
 def failed_result(name: str, url: str, message: str) -> FetchResult:
     return FetchResult(
         name=name,
@@ -254,7 +269,14 @@ def resolve_lookup(stock_code: str, timeout: int, deadline: float, headless: boo
     return resolve_issue_id_from_stock(stock_code, timeout=lookup_timeout, headless=headless)
 
 
-def fetch_compact_results(issue_id: str, stock_code: str, lookup: IssueLookup, timeout: int, deadline: float) -> dict[str, FetchResult]:
+def fetch_compact_results(
+    issue_id: str,
+    stock_code: str,
+    lookup: IssueLookup,
+    timeout: int,
+    deadline: float,
+    fetch_fn: Callable[[str, str, int], FetchResult] = fetch_with_requests,
+) -> dict[str, FetchResult]:
     results: dict[str, FetchResult] = {}
     if lookup.result:
         results["Company / orgdata"] = lookup.result
@@ -265,14 +287,33 @@ def fetch_compact_results(issue_id: str, stock_code: str, lookup: IssueLookup, t
             "Company lookup result was unavailable.",
         )
 
-    for name, url in issue_urls(issue_id).items():
-        if name not in SECTION_NAMES:
-            continue
-        if remaining_seconds(deadline) <= 1:
+    section_targets = [(name, url) for name, url in issue_urls(issue_id).items() if name in SECTION_NAMES]
+
+    # No budget left: fail every section uniformly instead of fetching none in
+    # order (which used to starve whichever section came last).
+    if remaining_seconds(deadline) <= 1:
+        for name, url in section_targets:
             results[name] = failed_result(name, url, "Timeout budget exhausted before this section was fetched.")
-            continue
-        section_timeout = short_section_timeout(deadline, timeout)
-        results[name] = fetch_with_requests(name, url, timeout=section_timeout)
+        return results
+
+    section_timeout = parallel_section_timeout(deadline, timeout)
+    max_workers = min(len(section_targets), MAX_FETCH_WORKERS)
+    section_results: dict[str, FetchResult] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(fetch_fn, name, url, section_timeout): (name, url)
+            for name, url in section_targets
+        }
+        for future in as_completed(future_map):
+            name, url = future_map[future]
+            try:
+                section_results[name] = future.result()
+            except Exception as exc:  # pragma: no cover - fetch_fn already traps its own errors
+                section_results[name] = failed_result(name, url, f"Section fetch raised {type(exc).__name__}: {exc}")
+
+    # Re-assemble in canonical order so fetch_summary stays stable for callers.
+    for name, url in section_targets:
+        results[name] = section_results.get(name) or failed_result(name, url, "Section fetch produced no result.")
     return results
 
 

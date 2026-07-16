@@ -24,6 +24,8 @@ KNOWN_ISSUE_ID_BY_STOCK = {
     "01953": "29176",
     "01682": "6191",
     "00524": "1061",
+    "01592": "26603",
+    "06162": "27470",
 }
 
 
@@ -247,8 +249,19 @@ def extract_issue_id_from_html(html: str) -> tuple[str, str]:
 
 def resolve_issue_id_from_stock(stock_code: str, timeout: int = 60, headless: bool = True) -> IssueLookup:
     code = clean_stock_code(stock_code)
+    # The orgdata fetch is the gateway to everything else, so give it a couple
+    # of plain-HTTP retries with backoff before giving up - the source
+    # intermittently rate-limits bursts (e.g. right after a rainbow build).
     result = fetch_page("Company / orgdata", orgdata_url(code), timeout=timeout, headless=headless)
     issue_id, method = extract_issue_id_from_html(result.html)
+    for delay in (1.5, 3.0):
+        if issue_id:
+            break
+        time.sleep(delay)
+        retry = fetch_with_requests("Company / orgdata", orgdata_url(code), timeout=timeout)
+        if retry.html:
+            result = retry
+            issue_id, method = extract_issue_id_from_html(retry.html)
     if issue_id:
         return IssueLookup(stock_code=code, issue_id=issue_id, method=method, status="success", result=result)
 

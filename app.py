@@ -40,7 +40,57 @@ def csv_bytes(df):
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
-st.set_page_config(page_title="Webb-site CCASS Extractor", layout="wide")
+st.set_page_config(page_title="Webb-site CCASS Extractor", layout="wide", initial_sidebar_state="expanded")
+
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 1.4rem; max-width: 1400px; }
+
+    /* Hero */
+    .ccass-hero {
+        border-radius: 16px;
+        padding: 22px 28px;
+        margin-bottom: 14px;
+        background:
+            radial-gradient(1100px 320px at 88% -20%, rgba(45, 212, 191, 0.28), transparent 60%),
+            linear-gradient(135deg, #0b2545 0%, #13315c 55%, #134e4a 100%);
+        color: #f8fafc;
+        box-shadow: 0 14px 34px rgba(11, 37, 69, 0.30);
+    }
+    .ccass-hero h1 { margin: 0; font-size: 1.6rem; font-weight: 700; letter-spacing: .2px; }
+    .ccass-hero p { margin: 6px 0 0 0; font-size: .86rem; color: #cbd5e1; }
+
+    /* KPI metric cards */
+    [data-testid="stMetric"] {
+        background: var(--secondary-background-color, #f8fafc);
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        border-radius: 12px;
+        padding: 12px 14px;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+    }
+    [data-testid="stMetricLabel"] { opacity: .75; font-size: .74rem; }
+
+    /* Tabs -> pill / panel feel */
+    .stTabs [data-baseweb="tab-list"] { gap: 6px; flex-wrap: wrap; }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 10px 10px 0 0;
+        padding: 8px 16px;
+        font-weight: 600;
+        font-size: .92rem;
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #0b2545, #134e4a);
+        color: #fff !important;
+    }
+
+    /* Dataframes + dividers */
+    [data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
+    hr { margin: 0.8rem 0; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -397,7 +447,11 @@ def build_ccass_concentration_line_data(concentration_table: pd.DataFrame, windo
             ("Top10 + 非流通股票", top10_ncip),
         ]
         for label, value in series:
-            if value is not None:
+            # Drop out-of-range artifacts (e.g. a stale issued-share base can
+            # yield >100% concentration). A single such point would blow up the
+            # auto-scaled y-axis and flatten the real 0-100% band into a line at
+            # the bottom. These bad points are already flagged in the warnings.
+            if value is not None and 0 <= value <= 100.5:
                 rows.append({"Date": date, "Metric": label, "Percent": value, "PercentLabel": f"{value:.2f}%"})
     data = pd.DataFrame(rows)
     if data.empty:
@@ -1069,8 +1123,15 @@ def major_items_to_table(items: list[str]):
     return rows
 
 
-st.title("Webb-site CCASS Extractor")
-st.caption("Public CCASS data extraction for research only. This is not investment advice. Please avoid high-frequency fetching.")
+st.markdown(
+    """
+    <div class="ccass-hero">
+        <h1>📊 Webb-site CCASS Extractor</h1>
+        <p>香港股票 CCASS 持股 / 異動 / 集中度 · 公司事件 · 董事高管 — 研究用途,非投資建議,請避免高頻抓取。</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
     st.header("Input")

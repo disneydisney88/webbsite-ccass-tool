@@ -29,6 +29,7 @@ from utils.fetcher import (
     resolve_issue_id_from_stock,
 )
 from utils.events import events_url, parse_events_html, parse_events_name
+from utils.f10_managers import f10_managers_url, parse_f10_managers_html, parse_f10_stock_name
 from utils.hkexnews import fetch_announcements
 from utils.officers import (
     extract_org_id_from_html,
@@ -871,6 +872,24 @@ def build_events_payload(stock_code: str, limit: int = 30, timeout: int = 30, he
     )
 
 
+def fetch_f10_managers(code: str, timeout: int) -> tuple[list[dict[str, Any]], str, list[str]]:
+    """Fetch current management from 同花順 F10 (second source; bios included).
+
+    Complements Webb-site officers, whose updates froze on 2025-03-31.
+    Returns (managers, source_name, warnings); failures degrade to a warning.
+    """
+    url = f10_managers_url(code)
+    if not url:
+        return [], "", ["10jqka managers URL could not be derived from the stock code."]
+    result = fetch_with_requests("F10 Managers", url, timeout=min(timeout, 20))
+    if not result.html:
+        return [], "", [f"10jqka managers fetch failed: {result.error_type or 'error'}: {result.error_message}"]
+    managers = parse_f10_managers_html(result.html)
+    name = parse_f10_stock_name(result.html)
+    warnings = [] if managers else ["10jqka managers page returned no manager tables (format change or unsupported stock)."]
+    return managers, name, warnings
+
+
 def build_officers_payload(
     stock_code: str, snapshot_date: str | None = None, timeout: int = 30, headless: bool = True
 ) -> dict[str, Any]:
@@ -880,41 +899,49 @@ def build_officers_payload(
     lookup = resolve_issue_id_from_stock(code, timeout=min(timeout, 12), headless=headless)
     warnings: list[str] = []
     org_id = extract_org_id_from_html(lookup.result.html if lookup.result else "")
-    if not org_id:
-        return json_safe(
-            {
-                "metadata": {"code": code, "name": "", "org_id": "", "source_url": ""},
-                "officers_summary": {"total_count": 0, "current_count": 0, "snapshot_date": snapshot_date or ""},
-                "officers": [],
-                "data_quality_warnings": ["Could not resolve the Webb-site organisation id for this stock."],
-            }
-        )
 
-    url = officers_url(org_id, snapshot_date)
-    result = fetch_with_requests("Officers", url, timeout=min(timeout, 20))
     officers: list[dict[str, Any]] = []
     name = ""
-    if not result.html:
-        warnings.append(f"Officers fetch failed: {result.error_type or 'error'}: {result.error_message}")
+    url = ""
+    if not org_id:
+        warnings.append("Could not resolve the Webb-site organisation id for this stock; Webb-site officers skipped.")
     else:
-        officers = parse_officers_html(result.html)
-        name = parse_officers_name(result.html)
-        notice = parse_shutdown_notice(result.html)
-        if notice:
-            warnings.append(f"Webb-site officer data notice: {notice}")
-        if not officers:
-            warnings.append("No officers were found for this stock (source table missing or empty).")
+        url = officers_url(org_id, snapshot_date)
+        result = fetch_with_requests("Officers", url, timeout=min(timeout, 20))
+        if not result.html:
+            warnings.append(f"Officers fetch failed: {result.error_type or 'error'}: {result.error_message}")
+        else:
+            officers = parse_officers_html(result.html)
+            name = parse_officers_name(result.html)
+            notice = parse_shutdown_notice(result.html)
+            if notice:
+                warnings.append(f"Webb-site officer data notice: {notice}")
+            if not officers:
+                warnings.append("No officers were found for this stock (source table missing or empty).")
+
+    managers, f10_name, f10_warnings = fetch_f10_managers(code, timeout)
+    warnings.extend(f10_warnings)
 
     current = [officer for officer in officers if officer.get("is_current")]
     return json_safe(
         {
-            "metadata": {"code": code, "name": name, "org_id": org_id, "source_url": url},
+            "metadata": {"code": code, "name": name or f10_name, "org_id": org_id, "source_url": url},
             "officers_summary": {
                 "total_count": len(officers),
                 "current_count": len(current),
                 "snapshot_date": snapshot_date or "",
+                "managers_f10_count": len(managers),
             },
             "officers": officers,
+            "managers_f10": managers,
+            "managers_f10_source": {
+                "provider": "10jqka F10",
+                "url": f10_managers_url(code),
+                "note": (
+                    "Webb-site officer data is frozen at 2025-03-31; managers_f10 carries "
+                    "current management (with biographies) sourced from 同花順 F10."
+                ),
+            },
             "data_quality_warnings": warnings,
         }
     )
@@ -993,9 +1020,10 @@ async def get_stock_events(
 @mcp_server.tool(
     name="get_stock_officers",
     description=(
-        "Fetch Webb-site directors and officers for a Hong Kong listed stock: name, "
-        "sex, age, position (code and full title), appointment and resignation dates, "
-        "and whether the person is currently serving."
+        "Fetch directors and officers for a Hong Kong listed stock from two sources: "
+        "Webb-site historical officers (name, sex, age, position, tenure; frozen at "
+        "2025-03-31) in `officers`, and current management from 同花順 F10 (positions, "
+        "tenure, salary, and full biographies) in `managers_f10`."
     ),
 )
 async def get_stock_officers(

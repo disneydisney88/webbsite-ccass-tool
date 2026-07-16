@@ -35,6 +35,7 @@ from utils.officers import (
     parse_officers_name,
     parse_shutdown_notice,
 )
+from utils.f10_managers import f10_managers_url, parse_f10_managers_html
 
 exporters = importlib.reload(exporters)
 combined_stock_csv = exporters.combined_stock_csv
@@ -1159,7 +1160,7 @@ def render_events(events: list, name: str, warnings: list) -> None:
         st.warning(warning)
 
 
-def render_officers(officers: list, name: str, warnings: list) -> None:
+def render_officers(officers: list, name: str, warnings: list, managers_f10: list | None = None) -> None:
     st.markdown("**董事高管 / Directors & officers (Webb-site)**")
     if officers:
         df = pd.DataFrame(officers)
@@ -1174,6 +1175,23 @@ def render_officers(officers: list, name: str, warnings: list) -> None:
         st.dataframe(df[cols], use_container_width=True, hide_index=True)
     else:
         st.info("暫無董事高管資料(或 Webb-site officers 頁抓取失敗)。")
+
+    st.markdown("**現任高管(同花順 F10)**")
+    st.caption("Webb-site 董事資料 2025-03-31 起凍結;呢部分用同花順 F10 補返現任名單、任期、報酬同背景簡介。")
+    if managers_f10:
+        mdf = pd.DataFrame(managers_f10)
+        preferred = ["name", "positions", "tenure_from", "is_current", "sex", "age", "education", "salary"]
+        cols = [c for c in preferred if c in mdf.columns] or list(mdf.columns)
+        st.dataframe(mdf[cols], use_container_width=True, hide_index=True)
+        with st.expander("高管背景簡介", expanded=False):
+            for manager in managers_f10:
+                if manager.get("biography"):
+                    st.markdown(f"**{manager.get('name', '-')}**({manager.get('positions', '-')})")
+                    st.write(manager["biography"])
+                    st.divider()
+    else:
+        st.info("暫無同花順 F10 高管資料(或抓取失敗)。")
+
     for warning in warnings or []:
         st.warning(warning)
 
@@ -1378,8 +1396,24 @@ if fetch_clicked:
                 else:
                     officers_warn.append("Could not resolve the Webb-site organisation id for officers.")
 
+                managers_records = []
+                try:
+                    f10 = fetch_with_requests("F10 Managers", f10_managers_url(stock_code or ""), timeout=min(int(timeout), 20)) if stock_code else None
+                    if f10 is not None and f10.html:
+                        managers_records = parse_f10_managers_html(f10.html)
+                        st.write(f"10jqka 高管: {len(managers_records)} 人")
+                    elif f10 is not None:
+                        officers_warn.append(f"10jqka managers fetch failed: {f10.error_type}: {f10.error_message}")
+                except Exception as exc:  # pragma: no cover - defensive
+                    officers_warn.append(f"10jqka managers error: {type(exc).__name__}: {exc}")
+
                 st.session_state.events = {"records": events_records, "name": events_name, "warnings": events_warn}
-                st.session_state.officers = {"records": officers_records, "name": officers_name, "warnings": officers_warn}
+                st.session_state.officers = {
+                    "records": officers_records,
+                    "name": officers_name,
+                    "warnings": officers_warn,
+                    "managers_f10": managers_records,
+                }
                 status.update(label="Events & officers fetch complete", state="complete")
 
             st.session_state.results = results
@@ -1513,7 +1547,12 @@ render_events(events_state.get("records", []), events_state.get("name", ""), eve
 
 st.divider()
 st.markdown('<div id="officers"></div>', unsafe_allow_html=True)
-render_officers(officers_state.get("records", []), officers_state.get("name", ""), officers_state.get("warnings", []))
+render_officers(
+    officers_state.get("records", []),
+    officers_state.get("name", ""),
+    officers_state.get("warnings", []),
+    officers_state.get("managers_f10", []),
+)
 
 st.markdown('<div id="fetch-summary"></div>', unsafe_allow_html=True)
 st.subheader("Fetch Summary")

@@ -105,6 +105,13 @@ Optional: `snapshot_date` (`YYYY-MM-DD`). Note: Webb-site stopped updating
 officer data after 2025-03-31; that source notice is echoed in
 `data_quality_warnings`.
 
+The same response also carries `managers_f10`: current management sourced from
+同花順 F10 (`basic.10jqka.com.cn/HK<code>/manager.html`) with `name`,
+`positions`, `tenure_from`/`tenure_to`, `is_current`, `sex`, `age`,
+`education`, `salary` and the full `biography` — this covers appointments after
+the Webb-site freeze. `managers_f10_source` documents the provider and URL.
+Fields the source omits are null.
+
 MCP tools: `get_stock_events`, `get_stock_officers` (in addition to
 `get_ccass_stock_data`, `get_webbsite_price_history`, `get_hkex_announcements`).
 

@@ -116,6 +116,13 @@ flows depend on the current schema.
 
 ### Unreleased
 
+- **Explicit response schema:** `holdings`, `changes`, `big_changes` and
+  `concentration.records` items are now typed models in `/openapi.json`, so the
+  normalized fields (`participant_id`, `change_shares`, `change_pct`, `category`
+  and the concentration dual-basis fields) are discoverable by GPT/Claude
+  Actions instead of relying on `additionalProperties`. Arbitrary source columns
+  (e.g. `Stake %`, `CCASS ID`) still pass through unchanged. Re-import
+  `/openapi.json` to pick up the fuller schema.
 - **Participant categories:** every holdings, changes and big-changes row now
   carries a `category` (`retail` / `bank` / `boutique` / `intl_broker` /
   `unknown`) to make collecting vs distributing flows readable at a glance. The

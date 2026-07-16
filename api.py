@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from utils.exporters import parsed_to_json_ready
 from utils.fetcher import (
@@ -42,7 +42,7 @@ from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.6.0"
+API_VERSION = "1.7.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -133,6 +133,42 @@ class HoldingsSummary(BaseModel):
     truncated: bool
 
 
+_NUMISH = float | int | str | None
+
+
+class RecordModel(BaseModel):
+    """Base for source-table rows: declared fields are documented in the schema,
+    but arbitrary source columns (e.g. "Stake %", "CCASS ID") still pass through."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+class HoldingRecord(RecordModel):
+    Participant: str | None = None
+    category: str | None = None
+
+
+class ChangeRecord(RecordModel):
+    Participant: str | None = None
+    category: str | None = None
+
+
+class BigChangeRecord(RecordModel):
+    participant_id: str | None = None
+    participant_name: str | None = None
+    change_shares: _NUMISH = None
+    change_pct: float | str | None = None
+    category: str | None = None
+
+
+class ConcentrationRecord(RecordModel):
+    top5_pct_of_ccass: float | str | None = None
+    top10_pct_of_ccass: float | str | None = None
+    top5_pct_of_issued: float | str | None = None
+    top10_pct_of_issued: float | str | None = None
+    issued_shares_may_be_stale: bool | None = None
+
+
 class ConcentrationSummary(BaseModel):
     top5_pct: str
     top10_pct: str
@@ -147,15 +183,15 @@ class ConcentrationSummary(BaseModel):
     issued_shares: str = ""
     issued_shares_as_of: str = ""
     issued_shares_may_be_stale: bool = False
-    records: list[dict[str, Any]]
+    records: list[ConcentrationRecord]
 
 
 class StockCompactResponse(BaseModel):
     metadata: StockMetadata
     holdings_summary: HoldingsSummary
-    holdings: list[dict[str, Any]]
-    changes: list[dict[str, Any]]
-    big_changes: list[dict[str, Any]]
+    holdings: list[HoldingRecord]
+    changes: list[ChangeRecord]
+    big_changes: list[BigChangeRecord]
     concentration: ConcentrationSummary
     fetch_summary: list[dict[str, Any]]
     data_quality_warnings: list[str]

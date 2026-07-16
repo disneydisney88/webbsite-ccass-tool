@@ -1067,7 +1067,12 @@ def robots_txt() -> Response:
     )
 
 
-@app.get("/api/stock", response_model=StockCompactResponse, dependencies=[Depends(verify_api_token)])
+@app.get(
+    "/api/stock",
+    response_model=StockCompactResponse,
+    operation_id="getCCASSStockData",
+    dependencies=[Depends(verify_api_token)],
+)
 def get_stock(
     code: str | None = Query(None, description="HK stock code, e.g. 01592."),
     stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
@@ -1091,7 +1096,7 @@ def get_stock(
     )
 
 
-@app.get("/api/stock/events", dependencies=[Depends(verify_api_token)])
+@app.get("/api/stock/events", operation_id="getStockEvents", dependencies=[Depends(verify_api_token)])
 def get_stock_events_endpoint(
     code: str | None = Query(None, description="HK stock code, e.g. 03321."),
     stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
@@ -1104,7 +1109,7 @@ def get_stock_events_endpoint(
     return build_events_payload(stock_code=requested_code, limit=limit, timeout=timeout, headless=True)
 
 
-@app.get("/api/stock/officers", dependencies=[Depends(verify_api_token)])
+@app.get("/api/stock/officers", operation_id="getStockOfficers", dependencies=[Depends(verify_api_token)])
 def get_stock_officers_endpoint(
     code: str | None = Query(None, description="HK stock code, e.g. 03321."),
     stock_code: str | None = Query(None, description="Backward-compatible alias for code."),

@@ -130,6 +130,16 @@ class ConcentrationSummary(BaseModel):
     top5_pct: str
     top10_pct: str
     latest_date: str
+    # Dual-basis concentration for the latest date. *_of_ccass is the source
+    # page's basis (% of shares in CCASS); *_of_issued is the same holding as a
+    # percentage of total issued shares (matches Holdings cumulative %).
+    top5_pct_of_ccass: float | None = None
+    top10_pct_of_ccass: float | None = None
+    top5_pct_of_issued: float | None = None
+    top10_pct_of_issued: float | None = None
+    issued_shares: str = ""
+    issued_shares_as_of: str = ""
+    issued_shares_may_be_stale: bool = False
     records: list[dict[str, Any]]
 
 
@@ -521,6 +531,43 @@ def enrich_big_changes(
     return enriched
 
 
+def enrich_concentration_records(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Add both concentration bases to each record and flag stale issued-share bases.
+
+    The source page reports Top 5 / Top 10 as a percentage of shares *in CCASS*.
+    Analysis usually also wants the percentage of *issued* shares, which equals
+    the CCASS-basis figure scaled by "Stake in CCASS %". When a resulting
+    of-issued figure exceeds 100% (typically after a placement/consolidation the
+    old issued-share base no longer reflects), the record is flagged stale.
+    """
+    enriched: list[dict[str, Any]] = []
+    any_stale = False
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        item = dict(record)
+        top5_ccass = to_number(item.get("Top 5 %"))
+        top10_ccass = to_number(item.get("Top 10 %"))
+        stake = to_number(item.get("Stake in CCASS %"))
+        top5_issued = round(top5_ccass * stake / 100, 4) if top5_ccass is not None and stake is not None else None
+        top10_issued = round(top10_ccass * stake / 100, 4) if top10_ccass is not None and stake is not None else None
+        item["top5_pct_of_ccass"] = top5_ccass
+        item["top10_pct_of_ccass"] = top10_ccass
+        item["top5_pct_of_issued"] = top5_issued
+        item["top10_pct_of_issued"] = top10_issued
+        stale = bool(
+            (stake is not None and stake > 100)
+            or (top5_issued is not None and top5_issued > 100)
+            or (top10_issued is not None and top10_issued > 100)
+        )
+        item["issued_shares_may_be_stale"] = stale
+        any_stale = any_stale or stale
+        enriched.append(item)
+    return enriched, any_stale
+
+
 def section_failure_warnings(fetch_summary: list[dict[str, Any]]) -> list[str]:
     warnings = []
     for row in fetch_summary:
@@ -560,9 +607,21 @@ def build_stock_payload(
     # explicitly-named fields; existing keys are preserved for compatibility.
     compact_big_changes = enrich_big_changes(compact_big_changes, build_participant_id_map(holdings))
 
+    # Concentration dual-basis (of CCASS vs of issued) + stale-base detection.
+    compact_concentration, concentration_stale = enrich_concentration_records(compact_concentration)
+    latest_concentration = compact_concentration[0] if compact_concentration else {}
+
     fetch_summary = exported.get("fetch_summary", [])
     warnings = list(exported.get("analysis_warnings", []))
     warnings.extend(warning for warning in section_failure_warnings(fetch_summary) if warning not in warnings)
+    if concentration_stale:
+        stale_warning = (
+            "Concentration % of issued shares exceeds 100% on at least one date; "
+            "the issued-share base may be stale (not yet reflecting a recent "
+            "placement/consolidation). issued_shares_may_be_stale is set."
+        )
+        if stale_warning not in warnings:
+            warnings.append(stale_warning)
 
     truncated = any(
         [
@@ -604,6 +663,13 @@ def build_stock_payload(
                 "top5_pct": metadata.get("top5_cumulative_pct", ""),
                 "top10_pct": metadata.get("top10_cumulative_pct", ""),
                 "latest_date": metadata.get("concentration_latest_date", ""),
+                "top5_pct_of_ccass": latest_concentration.get("top5_pct_of_ccass"),
+                "top10_pct_of_ccass": latest_concentration.get("top10_pct_of_ccass"),
+                "top5_pct_of_issued": latest_concentration.get("top5_pct_of_issued"),
+                "top10_pct_of_issued": latest_concentration.get("top10_pct_of_issued"),
+                "issued_shares": metadata.get("issued_securities", ""),
+                "issued_shares_as_of": metadata.get("holdings_data_date", ""),
+                "issued_shares_may_be_stale": concentration_stale,
                 "records": compact_concentration,
             },
             "fetch_summary": fetch_summary,

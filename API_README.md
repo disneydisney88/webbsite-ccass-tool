@@ -116,6 +116,14 @@ flows depend on the current schema.
 
 ### Unreleased
 
+- **Concentration dual-basis:** the `concentration` block and every record now
+  carry both `top5_pct_of_ccass` / `top10_pct_of_ccass` (the source page's basis,
+  % of shares in CCASS) and `top5_pct_of_issued` / `top10_pct_of_issued` (% of
+  total issued shares), plus `issued_shares` and `issued_shares_as_of`. When a
+  % of issued exceeds 100% (stale issued-share base after a placement/
+  consolidation) the record and the summary set `issued_shares_may_be_stale` and
+  a warning is added. The legacy `top5_pct` / `top10_pct` (of issued) are
+  unchanged.
 - **New data — Corporate events** (`GET /api/stock/events`, MCP `get_stock_events`):
   Webb-site dividends, splits/consolidations, bonus, rights and other capital
   actions, keyed by issue id.

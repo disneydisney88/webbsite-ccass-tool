@@ -79,5 +79,34 @@ class EnrichBigChangesTest(unittest.TestCase):
         self.assertEqual(enriched["participant_id"], "B01955")
 
 
+class ConcentrationDualBasisTest(unittest.TestCase):
+    def test_of_issued_derived_from_of_ccass_and_stake(self):
+        # Real 06162 figures for 2026-07-15: Top5 of CCASS 66.72%, stake 74.23%
+        # -> Top5 of issued 49.53%.
+        records = [{"Date": "2026-07-15", "Top 5 %": 66.72, "Top 10 %": 81.64, "Stake in CCASS %": 74.23}]
+        enriched, stale = api.enrich_concentration_records(records)
+        row = enriched[0]
+        self.assertEqual(row["top5_pct_of_ccass"], 66.72)
+        self.assertEqual(row["top10_pct_of_ccass"], 81.64)
+        self.assertAlmostEqual(row["top5_pct_of_issued"], 49.53, places=1)
+        self.assertAlmostEqual(row["top10_pct_of_issued"], 60.60, places=1)
+        self.assertFalse(row["issued_shares_may_be_stale"])
+        self.assertFalse(stale)
+
+    def test_stale_flag_when_stake_exceeds_100(self):
+        # Post-placement artifact: CCASS stake > 100% of the (stale) issued base.
+        records = [{"Date": "2025-10-24", "Top 5 %": 90.0, "Top 10 %": 98.0, "Stake in CCASS %": 741.23}]
+        enriched, stale = api.enrich_concentration_records(records)
+        self.assertTrue(stale)
+        self.assertTrue(enriched[0]["issued_shares_may_be_stale"])
+        self.assertGreater(enriched[0]["top5_pct_of_issued"], 100)
+
+    def test_missing_stake_yields_null_of_issued(self):
+        records = [{"Date": "2026-07-15", "Top 5 %": 66.72, "Top 10 %": 81.64}]
+        enriched, _ = api.enrich_concentration_records(records)
+        self.assertEqual(enriched[0]["top5_pct_of_ccass"], 66.72)
+        self.assertIsNone(enriched[0]["top5_pct_of_issued"])
+
+
 if __name__ == "__main__":
     unittest.main()

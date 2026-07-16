@@ -81,6 +81,33 @@ It returns one pure JSON response from a single HTTP GET. The response includes:
 }
 ```
 
+## Additional endpoints
+
+Same auth as `/api/stock` (`?key=`, `?api_token=`, Bearer or `X-API-Key`).
+
+### Corporate events — `GET /api/stock/events?code=03321`
+
+Webb-site capital actions and distributions: dividends, splits/consolidations,
+bonus issues, rights, etc. Each event carries `announced`, `year_end`, `type`,
+`amount`, `new_old` (e.g. `1:10` for a 10-into-1 consolidation), `ex_date`,
+`distribution`, `notes`, plus `event_id` and `event_details_url`.
+
+Optional: `limit` (default 30, max 200).
+
+### Directors & officers — `GET /api/stock/officers?code=03321`
+
+Webb-site board and management: `name`, `person_id`, `person_url`, `sex`, `age`,
+`position_code` (e.g. `ED`, `INED`, `NED`, `CoSec`, `CFO`), `position` (full
+title), `from_date`, `until_date`, `is_current` and `table_group` (e.g.
+`Main board` vs `Manager/adviser/other`).
+
+Optional: `snapshot_date` (`YYYY-MM-DD`). Note: Webb-site stopped updating
+officer data after 2025-03-31; that source notice is echoed in
+`data_quality_warnings`.
+
+MCP tools: `get_stock_events`, `get_stock_officers` (in addition to
+`get_ccass_stock_data`, `get_webbsite_price_history`, `get_hkex_announcements`).
+
 ## CHANGELOG
 
 Breaking or behavioural changes are recorded here. Existing field names are kept
@@ -89,6 +116,13 @@ flows depend on the current schema.
 
 ### Unreleased
 
+- **New data — Corporate events** (`GET /api/stock/events`, MCP `get_stock_events`):
+  Webb-site dividends, splits/consolidations, bonus, rights and other capital
+  actions, keyed by issue id.
+- **New data — Directors & officers** (`GET /api/stock/officers`, MCP
+  `get_stock_officers`): Webb-site board and management with positions and tenure,
+  keyed by the Webb-site organisation id. Includes the source's post-2025-03-31
+  update-freeze notice as a data-quality warning.
 - **Reliability:** CCASS sections (Holdings, Changes, Big Changes, Concentration,
   Price History) are now fetched **concurrently** instead of serially. Previously
   Price History — always fetched last — was frequently starved of the shared

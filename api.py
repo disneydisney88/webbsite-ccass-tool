@@ -28,12 +28,20 @@ from utils.fetcher import (
     orgdata_url,
     resolve_issue_id_from_stock,
 )
+from utils.events import events_url, parse_events_html, parse_events_name
 from utils.hkexnews import fetch_announcements
+from utils.officers import (
+    extract_org_id_from_html,
+    officers_url,
+    parse_officers_html,
+    parse_officers_name,
+    parse_shutdown_notice,
+)
 from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.5.0"
+API_VERSION = "1.6.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -686,6 +694,98 @@ def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, lim
     )
 
 
+def build_events_payload(stock_code: str, limit: int = 30, timeout: int = 30, headless: bool = True) -> dict[str, Any]:
+    code = clean_stock_code(stock_code)
+    if not code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    lookup = resolve_issue_id_from_stock(code, timeout=min(timeout, 12), headless=headless)
+    warnings: list[str] = []
+    if lookup.status != "success" or not lookup.issue_id:
+        return json_safe(
+            {
+                "metadata": {"code": code, "name": "", "issue_id": "", "source_url": ""},
+                "events_summary": {"total_count": 0, "returned_count": 0, "truncated": False},
+                "events": [],
+                "data_quality_warnings": [f"Issue lookup failed: {lookup.message or 'Webb-site issue ID not resolved.'}"],
+            }
+        )
+
+    url = events_url(lookup.issue_id)
+    result = fetch_with_requests("Events", url, timeout=min(timeout, 20))
+    records: list[dict[str, Any]] = []
+    name = ""
+    if not result.html:
+        warnings.append(f"Events fetch failed: {result.error_type or 'error'}: {result.error_message}")
+    else:
+        records = parse_events_html(result.html)
+        name = parse_events_name(result.html)
+        if not records:
+            warnings.append("No events were found for this stock (source table missing or empty).")
+
+    limited = records[:limit]
+    return json_safe(
+        {
+            "metadata": {"code": code, "name": name, "issue_id": lookup.issue_id, "source_url": url},
+            "events_summary": {
+                "total_count": len(records),
+                "returned_count": len(limited),
+                "truncated": len(records) > len(limited),
+            },
+            "events": limited,
+            "data_quality_warnings": warnings,
+        }
+    )
+
+
+def build_officers_payload(
+    stock_code: str, snapshot_date: str | None = None, timeout: int = 30, headless: bool = True
+) -> dict[str, Any]:
+    code = clean_stock_code(stock_code)
+    if not code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    lookup = resolve_issue_id_from_stock(code, timeout=min(timeout, 12), headless=headless)
+    warnings: list[str] = []
+    org_id = extract_org_id_from_html(lookup.result.html if lookup.result else "")
+    if not org_id:
+        return json_safe(
+            {
+                "metadata": {"code": code, "name": "", "org_id": "", "source_url": ""},
+                "officers_summary": {"total_count": 0, "current_count": 0, "snapshot_date": snapshot_date or ""},
+                "officers": [],
+                "data_quality_warnings": ["Could not resolve the Webb-site organisation id for this stock."],
+            }
+        )
+
+    url = officers_url(org_id, snapshot_date)
+    result = fetch_with_requests("Officers", url, timeout=min(timeout, 20))
+    officers: list[dict[str, Any]] = []
+    name = ""
+    if not result.html:
+        warnings.append(f"Officers fetch failed: {result.error_type or 'error'}: {result.error_message}")
+    else:
+        officers = parse_officers_html(result.html)
+        name = parse_officers_name(result.html)
+        notice = parse_shutdown_notice(result.html)
+        if notice:
+            warnings.append(f"Webb-site officer data notice: {notice}")
+        if not officers:
+            warnings.append("No officers were found for this stock (source table missing or empty).")
+
+    current = [officer for officer in officers if officer.get("is_current")]
+    return json_safe(
+        {
+            "metadata": {"code": code, "name": name, "org_id": org_id, "source_url": url},
+            "officers_summary": {
+                "total_count": len(officers),
+                "current_count": len(current),
+                "snapshot_date": snapshot_date or "",
+            },
+            "officers": officers,
+            "data_quality_warnings": warnings,
+        }
+    )
+
+
 @mcp_server.tool(
     name="get_ccass_stock_data",
     description=(
@@ -739,6 +839,36 @@ async def get_hkex_announcements(
     limit: Annotated[int, Field(ge=1, le=200)] = 100,
 ) -> dict[str, Any]:
     return build_hkex_announcements_payload(stock_code=code, period_years=period_years, limit=limit, timeout=30)
+
+
+@mcp_server.tool(
+    name="get_stock_events",
+    description=(
+        "Fetch Webb-site corporate events for a Hong Kong listed stock: dividends, "
+        "splits/consolidations, bonus issues, rights and other capital actions, with "
+        "announce/ex dates and new:old ratios."
+    ),
+)
+async def get_stock_events(
+    code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 03321.")],
+    limit: Annotated[int, Field(ge=1, le=200)] = 30,
+) -> dict[str, Any]:
+    return build_events_payload(stock_code=code, limit=limit, timeout=30, headless=True)
+
+
+@mcp_server.tool(
+    name="get_stock_officers",
+    description=(
+        "Fetch Webb-site directors and officers for a Hong Kong listed stock: name, "
+        "sex, age, position (code and full title), appointment and resignation dates, "
+        "and whether the person is currently serving."
+    ),
+)
+async def get_stock_officers(
+    code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 03321.")],
+    snapshot_date: Annotated[str | None, Field(description="Optional YYYY-MM-DD snapshot date.")] = None,
+) -> dict[str, Any]:
+    return build_officers_payload(stock_code=code, snapshot_date=snapshot_date, timeout=30, headless=True)
 
 
 def build_full_stock_payload(stock_code: str, timeout: int = 60, headless: bool = True) -> dict[str, Any]:
@@ -824,6 +954,34 @@ def get_stock(
         big_changes_limit=big_changes_limit,
         concentration_limit=concentration_limit,
         headless=True,
+    )
+
+
+@app.get("/api/stock/events", dependencies=[Depends(verify_api_token)])
+def get_stock_events_endpoint(
+    code: str | None = Query(None, description="HK stock code, e.g. 03321."),
+    stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
+    limit: int = Query(30, ge=1, le=200, description="Maximum event rows returned."),
+    timeout: int = Query(30, ge=10, le=35, description="Fetch timeout budget in seconds."),
+) -> dict[str, Any]:
+    requested_code = code or stock_code or ""
+    if not requested_code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    return build_events_payload(stock_code=requested_code, limit=limit, timeout=timeout, headless=True)
+
+
+@app.get("/api/stock/officers", dependencies=[Depends(verify_api_token)])
+def get_stock_officers_endpoint(
+    code: str | None = Query(None, description="HK stock code, e.g. 03321."),
+    stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
+    snapshot_date: str | None = Query(None, description="Optional YYYY-MM-DD snapshot date."),
+    timeout: int = Query(30, ge=10, le=35, description="Fetch timeout budget in seconds."),
+) -> dict[str, Any]:
+    requested_code = code or stock_code or ""
+    if not requested_code:
+        raise HTTPException(status_code=400, detail="Provide code.")
+    return build_officers_payload(
+        stock_code=requested_code, snapshot_date=snapshot_date, timeout=timeout, headless=True
     )
 
 

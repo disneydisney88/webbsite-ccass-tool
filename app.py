@@ -1372,6 +1372,10 @@ kpi[1].metric("CCASS %", parsed.total_in_ccass_pct or "-")
 kpi[2].metric("Top 5 (of issued)", parsed.top5_cumulative_pct or "-")
 kpi[3].metric("Top 10 (of issued)", parsed.top10_cumulative_pct or "-")
 kpi[4].metric("Largest participant", parsed.largest_participant or "-")
+st.caption(
+    f"📅 數據截至:Holdings {parsed.holdings_data_date or '-'} · Changes(交易日){parsed.changes_trading_date or '-'} · "
+    "CCASS 係 T+2 結算數據 — 某日嘅買賣要兩個交易日後先反映落持倉;最近兩個交易日嘅變動未必已包含在內。"
+)
 
 events_state = st.session_state.get("events", {"records": [], "name": "", "warnings": []})
 officers_state = st.session_state.get("officers", {"records": [], "name": "", "warnings": []})

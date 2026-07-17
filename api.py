@@ -37,6 +37,7 @@ from utils.f10_equity import (
 )
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html, parse_f10_stock_name
 from utils.snapshot import diff_snapshots, parse_holdings_snapshot, snapshot_url
+from utils.errors import errors_from_fetch_summary, errors_from_warnings, structured_error
 from utils.hkexnews import fetch_announcements
 from utils.officers import (
     extract_org_id_from_html,
@@ -203,6 +204,7 @@ class StockCompactResponse(BaseModel):
     concentration: ConcentrationSummary
     fetch_summary: list[dict[str, Any]]
     data_quality_warnings: list[str]
+    errors: list[dict[str, Any]] = []
 
 
 def json_safe(value: Any) -> Any:
@@ -225,7 +227,23 @@ def json_safe(value: Any) -> Any:
 
 
 def unauthorized() -> HTTPException:
-    return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=structured_error("AUTH_FAILED", "Missing or invalid API token."),
+    )
+
+
+def collect_structured_errors(fetch_summary: list[dict[str, Any]], warnings: list[str]) -> list[dict[str, Any]]:
+    """Merge fetch-summary failures and analysis warnings into deduped errors."""
+    errors = errors_from_fetch_summary(fetch_summary) + errors_from_warnings(warnings)
+    seen = set()
+    deduped = []
+    for error in errors:
+        key = (error["error_code"], error["message"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(error)
+    return deduped
 
 
 def mask_secret(value: str | None) -> str:
@@ -750,6 +768,7 @@ def build_stock_payload(
             },
             "fetch_summary": fetch_summary,
             "data_quality_warnings": warnings,
+            "errors": collect_structured_errors(fetch_summary, warnings),
         }
     )
 

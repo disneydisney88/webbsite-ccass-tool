@@ -225,19 +225,22 @@ class ApiAuthTests(unittest.TestCase):
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
             status_code, payload = asgi_get("/api/stock?code=01592")
         self.assertEqual(status_code, 401)
-        self.assertEqual(payload, {"detail": "Unauthorized"})
+        self.assertEqual(payload["detail"]["error_code"], "AUTH_FAILED")
+        self.assertFalse(payload["detail"]["retry_recommended"])
 
     def test_stock_with_wrong_token_returns_401(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
             status_code, payload = asgi_get("/api/stock?code=01592&key=wrong-token")
         self.assertEqual(status_code, 401)
-        self.assertEqual(payload, {"detail": "Unauthorized"})
+        self.assertEqual(payload["detail"]["error_code"], "AUTH_FAILED")
+        self.assertFalse(payload["detail"]["retry_recommended"])
 
     def test_stock_with_malformed_authorization_returns_401(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
             status_code, payload = asgi_get("/api/stock?stock_code=01592", headers={"Authorization": "Token correct-token"})
         self.assertEqual(status_code, 401)
-        self.assertEqual(payload, {"detail": "Unauthorized"})
+        self.assertEqual(payload["detail"]["error_code"], "AUTH_FAILED")
+        self.assertFalse(payload["detail"]["retry_recommended"])
 
     def test_stock_with_correct_token_returns_200(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):

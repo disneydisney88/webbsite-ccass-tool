@@ -50,7 +50,7 @@ from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.9.0"
+API_VERSION = "1.10.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -754,6 +754,118 @@ def build_stock_payload(
     )
 
 
+MAX_SCREEN_CODES = 20
+MAX_SCREEN_WORKERS = max(1, int(os.getenv("SCREEN_MAX_WORKERS", "4")))
+
+
+def largest_participant_summary(holdings: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Top holder (name, category, stake %) from the compact holdings, skipping
+    aggregate rows (Total in CCASS, Issued securities, ...) that carry no ID."""
+    for row in holdings:
+        if not isinstance(row, dict):
+            continue
+        ccass_id = str(row.get("CCASS ID") or "").strip()
+        if not re.match(r"^[A-Ca-c]\d{5}$", ccass_id):
+            continue
+        return {
+            "name": row.get("Participant"),
+            "ccass_id": ccass_id,
+            "category": row.get("category"),
+            "stake_pct": to_number(row.get("Stake %")),
+        }
+    return None
+
+
+def biggest_change_5d_summary(big_changes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Largest single-participant move (by |change_pct|) in the recent big changes."""
+    best = None
+    best_magnitude = -1.0
+    for row in big_changes:
+        if not isinstance(row, dict):
+            continue
+        change_pct = to_number(row.get("change_pct")) or to_number(row.get("Change %"))
+        if change_pct is None:
+            continue
+        magnitude = abs(change_pct)
+        if magnitude > best_magnitude:
+            best_magnitude = magnitude
+            best = {
+                "participant": row.get("participant_name") or row.get("Participant"),
+                "category": row.get("category"),
+                "change_pct": change_pct,
+                "date": row.get("Date"),
+            }
+    return best
+
+
+def screen_one_stock(code: str, timeout: int) -> dict[str, Any]:
+    cleaned = clean_stock_code(code)
+    if not cleaned:
+        return {"code": code, "error": "invalid stock code"}
+    try:
+        payload = build_stock_payload(stock_code=cleaned, timeout=timeout)
+    except HTTPException as exc:
+        return {"code": cleaned, "error": str(exc.detail)}
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"code": cleaned, "error": f"{type(exc).__name__}: {exc}"}
+
+    concentration = payload.get("concentration", {})
+    holdings_summary = payload.get("holdings_summary", {})
+    warnings = payload.get("data_quality_warnings", [])
+    return {
+        "code": cleaned,
+        "name": payload.get("metadata", {}).get("name", ""),
+        "data_date": payload.get("metadata", {}).get("holdings_date", ""),
+        "ccass_total_pct": holdings_summary.get("total_in_ccass_pct", ""),
+        "top5_pct_of_ccass": concentration.get("top5_pct_of_ccass"),
+        "top5_pct_of_issued": concentration.get("top5_pct_of_issued"),
+        "top10_pct_of_ccass": concentration.get("top10_pct_of_ccass"),
+        "top10_pct_of_issued": concentration.get("top10_pct_of_issued"),
+        "issued_shares_may_be_stale": concentration.get("issued_shares_may_be_stale", False),
+        "largest_participant": largest_participant_summary(payload.get("holdings", [])),
+        "biggest_change_5d": biggest_change_5d_summary(payload.get("big_changes", [])),
+        "warnings": warnings,
+    }
+
+
+def build_screen_payload(codes: list[str], timeout: int = 25) -> dict[str, Any]:
+    """Lightweight batch screen of a watchlist (handover 3.1). Max 20 codes."""
+    seen: list[str] = []
+    for code in codes:
+        cleaned = clean_stock_code(code)
+        if cleaned and cleaned not in seen:
+            seen.append(cleaned)
+    warnings: list[str] = []
+    if not seen:
+        raise HTTPException(status_code=400, detail="Provide codes (comma-separated HK stock codes).")
+    if len(seen) > MAX_SCREEN_CODES:
+        warnings.append(f"Requested {len(seen)} codes; only the first {MAX_SCREEN_CODES} were screened.")
+        seen = seen[:MAX_SCREEN_CODES]
+
+    results: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(len(seen), MAX_SCREEN_WORKERS)) as executor:
+        futures = {executor.submit(screen_one_stock, code, timeout): code for code in seen}
+        for future in as_completed(futures):
+            code = futures[future]
+            try:
+                results[code] = future.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                results[code] = {"code": code, "error": f"{type(exc).__name__}: {exc}"}
+
+    ordered = [results[code] for code in seen]
+    return json_safe(
+        {
+            "metadata": {
+                "requested_count": len(seen),
+                "returned_count": len(ordered),
+                "settlement_note": SETTLEMENT_NOTE,
+            },
+            "results": ordered,
+            "data_quality_warnings": warnings,
+        }
+    )
+
+
 def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int = 30, headless: bool = True) -> dict[str, Any]:
     base = build_base_payload(stock_code=stock_code, timeout=timeout, headless=headless)
     exported = base.get("exported", {})
@@ -1175,6 +1287,22 @@ async def get_stock_capital(
 
 
 @mcp_server.tool(
+    name="screen_stocks",
+    description=(
+        "Batch-screen a watchlist of up to 20 Hong Kong stock codes. Returns a "
+        "lightweight summary per stock: name, data date, CCASS total %, Top5/Top10 "
+        "concentration (both bases), largest participant (name + category + stake), "
+        "and the biggest single-participant recent move. Use before drilling into a "
+        "single stock with get_ccass_stock_data."
+    ),
+)
+async def screen_stocks(
+    codes: Annotated[list[str], Field(description="HK stock codes, e.g. ['01592','02028','06162']. Max 20.")],
+) -> dict[str, Any]:
+    return build_screen_payload(codes=codes, timeout=25)
+
+
+@mcp_server.tool(
     name="get_ccass_diff",
     description=(
         "Compare CCASS holdings snapshots between two dates for a Hong Kong listed "
@@ -1309,6 +1437,17 @@ def get_stock_officers_endpoint(
     return build_officers_payload(
         stock_code=requested_code, snapshot_date=snapshot_date, timeout=timeout, headless=True
     )
+
+
+@app.get("/api/screen", operation_id="screenStocks", dependencies=[Depends(verify_api_token)])
+def screen_stocks_endpoint(
+    codes: str = Query(..., description="Comma-separated HK stock codes, e.g. 01592,02028,06162 (max 20)."),
+    timeout: int = Query(25, ge=10, le=35, description="Per-stock fetch timeout budget in seconds."),
+) -> dict[str, Any]:
+    code_list = [part for part in re.split(r"[,\s]+", codes) if part.strip()]
+    if not code_list:
+        raise HTTPException(status_code=400, detail="Provide codes (comma-separated HK stock codes).")
+    return build_screen_payload(codes=code_list, timeout=timeout)
 
 
 @app.get("/api/stock/price", operation_id="getStockPriceHistory", dependencies=[Depends(verify_api_token)])

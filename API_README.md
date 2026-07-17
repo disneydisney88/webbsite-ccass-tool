@@ -135,6 +135,13 @@ flows depend on the current schema.
 
 ### Unreleased
 
+- **Batch screening (handover 3.1):** `GET /api/screen?codes=01592,02028,06162`
+  (`screenStocks`) and MCP tool `screen_stocks` screen up to 20 watchlist codes
+  at once, returning a lightweight summary per stock — name, data date, CCASS
+  total %, Top5/Top10 (both bases), largest participant (name + category +
+  stake), and the biggest single-participant recent move — fetched with bounded
+  parallelism. Per-stock failures are reported inline as `{code, error}` rather
+  than failing the batch.
 - **REST parity with MCP:** new REST endpoints `GET /api/stock/price`
   (`getStockPriceHistory`) and `GET /api/stock/announcements`
   (`getStockAnnouncements`) expose the price-history and HKEX-announcement

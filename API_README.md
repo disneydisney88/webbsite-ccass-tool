@@ -135,6 +135,24 @@ flows depend on the current schema.
 
 ### Unreleased
 
+- **Structured error codes (handover 1.2):** the compact `/api/stock` response
+  gains an `errors` array of `{error_code, message, retry_recommended}`
+  (COLD_START / SOURCE_TIMEOUT / SOURCE_FETCH_FAILED / SOURCE_CHANGED /
+  PARSE_ERROR / ISSUE_LOOKUP_FAILED / AUTH_FAILED); the 401 body uses the same
+  shape so retry logic can act on it.
+- **Cross-stock participant search (handover 3.4):** `GET /api/participant?id=B01660&codes=...`
+  (`searchParticipantHoldings`) and MCP `search_participant_holdings` report a
+  participant's holding % and rank across up to 20 supplied stocks — a broker's
+  warehouse footprint across a watchlist. No market-wide reverse lookup exists,
+  so results are limited to the codes given.
+- **Announcement event chain (handover 3.5):** more tags (`convertible_bonds`,
+  `very_substantial_acquisition`, `resumption_of_public_float`,
+  `high_concentration_warning`, takeovers-code `general_offer`,
+  `results_announcement`) and a `timeline` output (date + tags + title, oldest
+  first, tagged rows only) on the announcements payload.
+- **Markdown output (handover 3.6):** `GET /api/stock?code=...&format=markdown`
+  returns the compact data as a `text/markdown` report (Metadata / Holdings
+  Summary / Holdings / Changes / Big Changes / Concentration / Warnings).
 - **Batch screening (handover 3.1):** `GET /api/screen?codes=01592,02028,06162`
   (`screenStocks`) and MCP tool `screen_stocks` screen up to 20 watchlist codes
   at once, returning a lightweight summary per stock — name, data date, CCASS

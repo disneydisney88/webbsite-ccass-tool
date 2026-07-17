@@ -12,6 +12,7 @@ from typing import Annotated, Any
 
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
@@ -51,7 +52,7 @@ from utils.parser import parse_date_value, parse_results, to_number
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.10.0"
+API_VERSION = "1.11.0"
 CACHE_TTL_SECONDS = 600
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -553,9 +554,15 @@ def announcement_event_tags(row: dict[str, Any]) -> list[str]:
         ("board_change", r"董事|director|board"),
         ("trading_halt", r"停牌|暫停買賣|trading halt|suspension"),
         ("resumption", r"復牌|恢復買賣|resumption"),
-        ("capital_reorganisation", r"股本重組|capital reorganisation|capital restructuring"),
+        ("capital_reorganisation", r"股本重組|capital reorganisation|capital restructuring|capital reorganization"),
+        ("general_offer", r"要約|takeover|takeovers code"),
+        ("convertible_bonds", r"可換股債券|可轉換債券|convertible bond|convertible note|cb\b"),
+        ("very_substantial_acquisition", r"非常重大收購|very substantial acquisition|vsa\b"),
+        ("resumption_of_public_float", r"公眾持股|public float|恢復公眾持股"),
+        ("high_concentration_warning", r"股權高度集中|high(?:ly)? concentrat|concentration of shareholding"),
+        ("results_announcement", r"業績|年報|中期報告|annual result|interim result|final result"),
     ]
-    return [tag for tag, pattern in patterns if re.search(pattern, text, flags=re.I)]
+    return sorted({tag for tag, pattern in patterns if re.search(pattern, text, flags=re.I)})
 
 
 def build_participant_id_map(holdings: list[dict[str, Any]]) -> dict[str, str]:
@@ -773,6 +780,69 @@ def build_stock_payload(
     )
 
 
+def _md_table(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> str:
+    """Render a markdown table. columns is a list of (source_key, header)."""
+    if not rows:
+        return "_none_\n"
+    header = "| " + " | ".join(head for _, head in columns) + " |"
+    divider = "| " + " | ".join("---" for _ in columns) + " |"
+    lines = [header, divider]
+    for row in rows:
+        cells = []
+        for key, _ in columns:
+            value = row.get(key, "")
+            cells.append("" if value is None else str(value).replace("|", "\\|"))
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def compact_payload_to_markdown(payload: dict[str, Any]) -> str:
+    """Render the compact /api/stock payload as the Streamlit 'Copy for ChatGPT'
+    style markdown (handover 3.6)."""
+    meta = payload.get("metadata", {})
+    summary = payload.get("holdings_summary", {})
+    conc = payload.get("concentration", {})
+    parts = [
+        f"# {meta.get('code', '')} {meta.get('name', '')}｜Webb-site CCASS",
+        "",
+        "## Metadata",
+        f"- Stock code: {meta.get('code', '')}",
+        f"- Name: {meta.get('name', '')}",
+        f"- Webb-site issue ID: {meta.get('issue_id', '')}",
+        f"- Holdings date: {meta.get('holdings_date', '')}",
+        f"- Changes trading date: {meta.get('changes_date', '')}",
+        f"- Settlement: {meta.get('settlement_note', '')}",
+        "",
+        "## Holdings Summary",
+        f"- Total in CCASS: {summary.get('total_in_ccass', '')} ({summary.get('total_in_ccass_pct', '')})",
+        f"- Securities not in CCASS: {summary.get('securities_not_in_ccass', '')}",
+        f"- Largest participant: {summary.get('largest_participant', '')}",
+        f"- Concentration Top5: of_ccass {conc.get('top5_pct_of_ccass')} / of_issued {conc.get('top5_pct_of_issued')}",
+        f"- Concentration Top10: of_ccass {conc.get('top10_pct_of_ccass')} / of_issued {conc.get('top10_pct_of_issued')}",
+        f"- Issued shares: {conc.get('issued_shares', '')} (as of {conc.get('issued_shares_as_of', '')}; stale={conc.get('issued_shares_may_be_stale')})",
+        f"- Counts: holdings {summary.get('holdings_returned_count')}/{summary.get('holdings_total_count')}, "
+        f"changes {summary.get('changes_returned_count')}/{summary.get('changes_total_count')}, "
+        f"big_changes {summary.get('big_changes_returned_count')}/{summary.get('big_changes_total_count')}",
+        "",
+        "## Holdings",
+        _md_table(payload.get("holdings", []), [("Rank", "Rank"), ("Participant", "Participant"), ("CCASS ID", "CCASS ID"), ("Holding", "Holding"), ("Stake %", "Stake %"), ("category", "Category")]),
+        "## Changes",
+        _md_table(payload.get("changes", []), [("Participant", "Participant"), ("Change", "Change"), ("Change %", "Change %"), ("Stake after", "Stake after"), ("category", "Category")]),
+        "## Big Changes",
+        _md_table(payload.get("big_changes", []), [("Date", "Date"), ("participant_name", "Participant"), ("participant_id", "ID"), ("change_pct", "Change %"), ("category", "Category")]),
+        "## Concentration (recent)",
+        _md_table(conc.get("records", [])[:10], [("Date", "Date"), ("top5_pct_of_ccass", "Top5 %CCASS"), ("top5_pct_of_issued", "Top5 %issued"), ("top10_pct_of_ccass", "Top10 %CCASS"), ("top10_pct_of_issued", "Top10 %issued")]),
+        "## Data Quality Warnings",
+    ]
+    warnings = payload.get("data_quality_warnings", [])
+    parts.append("\n".join(f"- {warning}" for warning in warnings) if warnings else "- none")
+    errors = payload.get("errors", [])
+    if errors:
+        parts.append("\n## Errors")
+        parts.append("\n".join(f"- [{e.get('error_code')}] retry={e.get('retry_recommended')}: {e.get('message')}" for e in errors))
+    return "\n".join(parts) + "\n"
+
+
 MAX_SCREEN_CODES = 20
 MAX_SCREEN_WORKERS = max(1, int(os.getenv("SCREEN_MAX_WORKERS", "4")))
 
@@ -885,6 +955,94 @@ def build_screen_payload(codes: list[str], timeout: int = 25) -> dict[str, Any]:
     )
 
 
+PARTICIPANT_ID_PATTERN = re.compile(r"^[A-Ca-c]\d{5}$")
+
+
+def find_participant_in_holdings(holdings: list[dict[str, Any]], participant_id: str) -> dict[str, Any] | None:
+    for row in holdings:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("CCASS ID") or "").strip().upper() == participant_id:
+            return row
+    return None
+
+
+def search_participant_one(participant_id: str, code: str, timeout: int) -> dict[str, Any]:
+    cleaned = clean_stock_code(code)
+    if not cleaned:
+        return {"code": code, "error": "invalid stock code"}
+    try:
+        payload = build_stock_payload(stock_code=cleaned, timeout=timeout)
+    except HTTPException as exc:
+        return {"code": cleaned, "error": str(exc.detail)}
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"code": cleaned, "error": f"{type(exc).__name__}: {exc}"}
+
+    row = find_participant_in_holdings(payload.get("holdings", []), participant_id)
+    total = payload.get("holdings_summary", {}).get("holdings_total_count", 0)
+    if row is None:
+        # The compact holdings are truncated, so "not in top N" is not "absent".
+        returned = payload.get("holdings_summary", {}).get("holdings_returned_count", 0)
+        note = "not in returned holdings" + (f" (only top {returned} of {total} shown)" if total > returned else "")
+        return {"code": cleaned, "name": payload.get("metadata", {}).get("name", ""), "found": False, "note": note}
+    return {
+        "code": cleaned,
+        "name": payload.get("metadata", {}).get("name", ""),
+        "found": True,
+        "participant_name": row.get("Participant"),
+        "category": row.get("category"),
+        "holding": to_number(row.get("Holding")),
+        "stake_pct": to_number(row.get("Stake %")),
+        "rank": to_number(row.get("Rank")),
+        "data_date": payload.get("metadata", {}).get("holdings_date", ""),
+    }
+
+
+def build_participant_search_payload(participant_id: str, codes: list[str], timeout: int = 25) -> dict[str, Any]:
+    """Find a CCASS participant's holdings across a caller-supplied stock list
+    (handover 3.4). Webb-site offers no market-wide reverse lookup, so this is
+    limited to the codes provided (max 20)."""
+    pid = str(participant_id or "").strip().upper()
+    if not PARTICIPANT_ID_PATTERN.match(pid):
+        raise HTTPException(status_code=400, detail="Provide a CCASS participant id like B01660 or C00028.")
+    seen: list[str] = []
+    for code in codes:
+        cleaned = clean_stock_code(code)
+        if cleaned and cleaned not in seen:
+            seen.append(cleaned)
+    if not seen:
+        raise HTTPException(status_code=400, detail="Provide codes (comma-separated HK stock codes).")
+    warnings: list[str] = []
+    if len(seen) > MAX_SCREEN_CODES:
+        warnings.append(f"Requested {len(seen)} codes; only the first {MAX_SCREEN_CODES} were searched.")
+        seen = seen[:MAX_SCREEN_CODES]
+
+    results: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(len(seen), MAX_SCREEN_WORKERS)) as executor:
+        futures = {executor.submit(search_participant_one, pid, code, timeout): code for code in seen}
+        for future in as_completed(futures):
+            code = futures[future]
+            results[code] = future.result()
+
+    ordered = [results[code] for code in seen]
+    holdings_found = [item for item in ordered if item.get("found")]
+    holdings_found.sort(key=lambda item: item.get("stake_pct") or 0, reverse=True)
+    return json_safe(
+        {
+            "metadata": {
+                "participant_id": pid,
+                "searched_count": len(seen),
+                "found_count": len(holdings_found),
+                "note": "Limited to the supplied codes; Webb-site has no market-wide reverse lookup.",
+                "settlement_note": SETTLEMENT_NOTE,
+            },
+            "holdings_ranked": holdings_found,
+            "results": ordered,
+            "data_quality_warnings": warnings,
+        }
+    )
+
+
 def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int = 30, headless: bool = True) -> dict[str, Any]:
     base = build_base_payload(stock_code=stock_code, timeout=timeout, headless=headless)
     exported = base.get("exported", {})
@@ -942,6 +1100,20 @@ def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, lim
     for row in rows:
         row["Event tags"] = announcement_event_tags(row)
     all_tags = sorted({tag for row in rows for tag in row.get("Event tags", [])})
+
+    # Timeline mode (handover 3.5): compact date + tags + title, oldest first,
+    # for building an event chain. Only rows carrying a tag are kept.
+    timeline = [
+        {
+            "date": row.get("Publish time") or row.get("Date") or "",
+            "tags": row.get("Event tags", []),
+            "title": row.get("Title", ""),
+        }
+        for row in rows
+        if row.get("Event tags")
+    ]
+    timeline.sort(key=lambda item: str(item["date"]))
+
     return json_safe(
         {
             "metadata": {
@@ -960,8 +1132,10 @@ def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, lim
                 "truncated": result.total_count > len(rows),
                 "error": result.error,
                 "event_tags_found": all_tags,
+                "tagged_count": len(timeline),
             },
             "announcements": rows,
+            "timeline": timeline,
             "data_quality_warnings": [result.error] if result.error else [],
         }
     )
@@ -1322,6 +1496,22 @@ async def screen_stocks(
 
 
 @mcp_server.tool(
+    name="search_participant_holdings",
+    description=(
+        "Find one CCASS participant's holding % and rank across a caller-supplied list "
+        "of Hong Kong stocks (max 20). For mapping a broker's warehouse footprint across "
+        "a watchlist. Webb-site has no market-wide reverse lookup, so results are limited "
+        "to the codes provided."
+    ),
+)
+async def search_participant_holdings(
+    participant_id: Annotated[str, Field(pattern=r"^[A-Ca-c]\d{5}$", description="CCASS participant id, e.g. B01660 or C00028.")],
+    codes: Annotated[list[str], Field(description="HK stock codes to search. Max 20.")],
+) -> dict[str, Any]:
+    return build_participant_search_payload(participant_id=participant_id, codes=codes, timeout=25)
+
+
+@mcp_server.tool(
     name="get_ccass_diff",
     description=(
         "Compare CCASS holdings snapshots between two dates for a Hong Kong listed "
@@ -1415,11 +1605,12 @@ def get_stock(
     changes_limit: int = Query(20, ge=1, le=100, description="Maximum changes rows returned."),
     big_changes_limit: int = Query(10, ge=1, le=100, description="Maximum big changes rows returned."),
     concentration_limit: int = Query(15, ge=1, le=100, description="Maximum concentration rows returned."),
-) -> dict[str, Any]:
+    format: str = Query("json", description="Response format: 'json' (default) or 'markdown'."),
+):
     requested_code = code or stock_code or ""
     if not requested_code:
         raise HTTPException(status_code=400, detail="Provide code.")
-    return build_stock_payload(
+    payload = build_stock_payload(
         stock_code=requested_code,
         timeout=timeout,
         holdings_limit=holdings_limit,
@@ -1428,6 +1619,9 @@ def get_stock(
         concentration_limit=concentration_limit,
         headless=True,
     )
+    if format.lower() in {"markdown", "md"}:
+        return PlainTextResponse(compact_payload_to_markdown(payload), media_type="text/markdown; charset=utf-8")
+    return payload
 
 
 @app.get("/api/stock/events", operation_id="getStockEvents", dependencies=[Depends(verify_api_token)])
@@ -1467,6 +1661,16 @@ def screen_stocks_endpoint(
     if not code_list:
         raise HTTPException(status_code=400, detail="Provide codes (comma-separated HK stock codes).")
     return build_screen_payload(codes=code_list, timeout=timeout)
+
+
+@app.get("/api/participant", operation_id="searchParticipantHoldings", dependencies=[Depends(verify_api_token)])
+def search_participant_endpoint(
+    id: str = Query(..., description="CCASS participant id, e.g. B01660 or C00028."),
+    codes: str = Query(..., description="Comma-separated HK stock codes to search (max 20)."),
+    timeout: int = Query(25, ge=10, le=35, description="Per-stock fetch timeout budget in seconds."),
+) -> dict[str, Any]:
+    code_list = [part for part in re.split(r"[,\s]+", codes) if part.strip()]
+    return build_participant_search_payload(participant_id=id, codes=code_list, timeout=timeout)
 
 
 @app.get("/api/stock/price", operation_id="getStockPriceHistory", dependencies=[Depends(verify_api_token)])

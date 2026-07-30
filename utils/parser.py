@@ -620,12 +620,27 @@ def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dic
     output["VWAP"] = table[vwap_col] if vwap_col else ""
     price_source_col = pick_first_column(table, [["price_source"], ["price source"]])
     turnover_est_col = pick_first_column(table, [["turnover_est"], ["turnover est"]])
+    vwap_est_col = pick_first_column(table, [["vwap_est"], ["vwap est"]])
     if price_source_col:
         output["price_source"] = table[price_source_col]
     if turnover_est_col:
         output["turnover_est"] = table[turnover_est_col]
+    if vwap_est_col:
+        output["vwap_est"] = table[vwap_est_col]
     output = output.dropna(how="all")
     output = output[output["Date"].astype(str).str.strip().ne("")]
+    for column in ["Close", "Open", "High", "Low", "VWAP", "vwap_est"]:
+        if column in output.columns:
+            output[column] = pd.to_numeric(output[column], errors="coerce").round(3)
+    for column in ["Turnover", "turnover_est"]:
+        if column in output.columns:
+            output[column] = pd.to_numeric(output[column], errors="coerce").round(2)
+    if "vwap_est" not in output.columns and "price_source" in output.columns:
+        volume = pd.to_numeric(output.get("Volume"), errors="coerce")
+        turnover_est = pd.to_numeric(output.get("turnover_est"), errors="coerce")
+        yahoo_source = output["price_source"].astype(str).str.lower().eq("yahoo")
+        missing_vwap = pd.to_numeric(output.get("VWAP"), errors="coerce").isna()
+        output["vwap_est"] = (turnover_est / volume.where(volume.ne(0))).where(yahoo_source & missing_vwap).round(3)
     parsed.price_history_table = output
 
     if parsed.price_history_table.empty:
@@ -647,6 +662,10 @@ def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dic
         parsed.price_source = safe_str(latest.get("price_source"))
         if parsed.price_source == "yahoo" or "turnover_est" in parsed.price_history_table.columns:
             warning = "Turnover is estimated as volume \u00d7 close, not actual turnover"
+            if warning not in parsed.analysis_warnings:
+                parsed.analysis_warnings.append(warning)
+        if parsed.price_source == "yahoo" and "vwap_est" in parsed.price_history_table.columns:
+            warning = "VWAP is estimated from estimated turnover"
             if warning not in parsed.analysis_warnings:
                 parsed.analysis_warnings.append(warning)
 

@@ -10,6 +10,7 @@ from .fetcher import clean_stock_code, now_iso
 
 
 YAHOO_TURNOVER_WARNING = "Turnover is estimated as volume \u00d7 close, not actual turnover"
+YAHOO_VWAP_WARNING = "VWAP is estimated from estimated turnover"
 
 
 @dataclass
@@ -52,17 +53,29 @@ def yahoo_period_for_days(period_days: int) -> str:
 
 def yahoo_table_from_history(history: pd.DataFrame) -> pd.DataFrame:
     if history is None or history.empty:
-        return pd.DataFrame(columns=["Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP", "price_source", "turnover_est"])
+        return pd.DataFrame(
+            columns=[
+                "Date",
+                "Close",
+                "Open",
+                "High",
+                "Low",
+                "Volume",
+                "Turnover",
+                "VWAP",
+                "price_source",
+                "turnover_est",
+                "vwap_est",
+            ]
+        )
     df = history.copy().reset_index()
     if "Date" not in df.columns and "Datetime" in df.columns:
         df = df.rename(columns={"Datetime": "Date"})
     out = pd.DataFrame()
     out["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    out["Close"] = df.get("Close", "")
-    out["Open"] = df.get("Open", "")
-    out["High"] = df.get("High", "")
-    out["Low"] = df.get("Low", "")
-    out["Volume"] = df.get("Volume", "")
+    for column in ["Close", "Open", "High", "Low"]:
+        out[column] = pd.to_numeric(df.get(column, ""), errors="coerce").round(3)
+    out["Volume"] = pd.to_numeric(df.get("Volume", ""), errors="coerce").fillna(0).astype("int64")
     close = pd.to_numeric(out["Close"], errors="coerce")
     volume = pd.to_numeric(out["Volume"], errors="coerce")
     turnover_est = (close * volume).round(2)
@@ -70,6 +83,7 @@ def yahoo_table_from_history(history: pd.DataFrame) -> pd.DataFrame:
     out["VWAP"] = ""
     out["price_source"] = "yahoo"
     out["turnover_est"] = turnover_est
+    out["vwap_est"] = (turnover_est / volume.where(volume.ne(0))).round(3)
     out = out.dropna(subset=["Date"])
     return out.sort_values("Date", ascending=False).reset_index(drop=True)
 

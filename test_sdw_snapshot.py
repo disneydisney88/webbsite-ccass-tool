@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from utils.fetch_yahoo import YAHOO_TURNOVER_WARNING, yahoo_period_for_days, yahoo_table_from_history, yahoo_ticker_from_code
+from utils.fetch_yahoo import (
+    YAHOO_TURNOVER_WARNING,
+    YAHOO_VWAP_WARNING,
+    yahoo_period_for_days,
+    yahoo_table_from_history,
+    yahoo_ticker_from_code,
+)
 from utils.parse_sdw import parse_sdw_snapshot
 from utils.snapshot_db import (
     build_results_from_db,
@@ -103,10 +109,10 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
     def test_yahoo_history_table_adds_estimated_turnover_columns(self) -> None:
         history = pd.DataFrame(
             {
-                "Open": [1.0],
-                "High": [1.2],
-                "Low": [0.9],
-                "Close": [1.1],
+                "Open": [1.0000000119],
+                "High": [1.23456],
+                "Low": [0.98765],
+                "Close": [1.1000000119],
                 "Volume": [1000],
             },
             index=pd.to_datetime(["2026-07-30"]),
@@ -117,22 +123,26 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
         self.assertEqual(table.iloc[0]["price_source"], "yahoo")
         self.assertEqual(table.iloc[0]["turnover_est"], 1100.0)
         self.assertEqual(table.iloc[0]["Turnover"], 1100.0)
+        self.assertEqual(table.iloc[0]["Close"], 1.1)
+        self.assertEqual(table.iloc[0]["High"], 1.235)
+        self.assertEqual(table.iloc[0]["vwap_est"], 1.1)
         self.assertIn("estimated", YAHOO_TURNOVER_WARNING)
+        self.assertIn("estimated", YAHOO_VWAP_WARNING)
 
     def test_price_history_upsert_and_load_roundtrip(self) -> None:
         table = pd.DataFrame(
             [
                 {
                     "Date": "2026-07-30",
-                    "Close": 1.1,
-                    "Open": 1.0,
-                    "High": 1.2,
-                    "Low": 0.9,
+                    "Close": 0.550000011920929,
+                    "Open": 0.540000011920929,
+                    "High": 0.560000011920929,
+                    "Low": 0.530000011920929,
                     "Volume": 1000,
-                    "Turnover": 1100.0,
+                    "Turnover": 550.000011920929,
                     "VWAP": "",
                     "price_source": "yahoo",
-                    "turnover_est": 1100.0,
+                    "turnover_est": 550.000011920929,
                 }
             ]
         )
@@ -143,6 +153,10 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
         self.assertEqual(written, 1)
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded.iloc[0]["price_source"], "yahoo")
+        self.assertEqual(loaded.iloc[0]["Close"], 0.55)
+        self.assertEqual(loaded.iloc[0]["Turnover"], 550.0)
+        self.assertEqual(loaded.iloc[0]["turnover_est"], 550.0)
+        self.assertEqual(loaded.iloc[0]["vwap_est"], 0.55)
 
 
 if __name__ == "__main__":

@@ -174,7 +174,15 @@ class ApiAuthTests(unittest.TestCase):
             }
         )
         base["exported"]["price_history"] = [
-            {"Date": f"2026-06-{index:02d}", "Close": index / 10, "Volume": index * 1000, "Turnover": index * 100}
+            {
+                "Date": f"2026-06-{index:02d}",
+                "Close": index / 10 + 0.000000011920929,
+                "Volume": index * 1000,
+                "Turnover": index * index * 100 + 0.000000011920929,
+                "VWAP": None,
+                "price_source": "yahoo",
+                "turnover_est": index * index * 100 + 0.000000011920929,
+            }
             for index in range(1, 6)
         ]
         with patch.object(api, "build_base_payload", return_value=base):
@@ -185,7 +193,46 @@ class ApiAuthTests(unittest.TestCase):
         self.assertEqual(payload["price_summary"]["latest_turnover_to_market_cap_pct"], 10.0)
         self.assertEqual(payload["price_summary"]["price_history_returned_count"], 2)
         self.assertIn("Turnover / Market Cap %", payload["price_history"][0])
+        self.assertEqual(payload["price_history"][0]["Close"], 0.5)
+        self.assertEqual(payload["price_history"][0]["turnover_est"], 2500.0)
+        self.assertEqual(payload["price_history"][0]["vwap_est"], 0.5)
+        self.assertIn("VWAP is estimated from estimated turnover", payload["data_quality_warnings"])
         self.assertTrue(payload["price_summary"]["truncated"])
+
+    def test_screen_stocks_uses_snapshot_largest_participant_fallback(self) -> None:
+        base = fake_base_payload(row_count=1)
+        base["exported"]["holdings"] = [{"Participant": "Total in CCASS", "Stake %": "50.00%"}]
+        stock_payload = {
+            "metadata": {"name": "Mock Stock", "holdings_date": "2026-07-30"},
+            "holdings": base["exported"]["holdings"],
+            "holdings_summary": {"total_in_ccass_pct": "50.00%"},
+            "concentration": {},
+            "big_changes": [],
+            "data_quality_warnings": [],
+        }
+        snapshot = api.pd.DataFrame(
+            [
+                {
+                    "participant_id": "PARTICIPANT ID: C00019",
+                    "participant_name": "Name of CCASS Participant (* for Consenting Investor Participants ): KINGSTON SECURITIES LTD",
+                    "shares": 1000000,
+                    "pct_of_issued": 12.3456,
+                    "source": "sdw",
+                    "fetched_at": "2026-07-30T21:30:00+08:00",
+                }
+            ]
+        )
+        with (
+            patch.object(api, "build_stock_payload", return_value=stock_payload),
+            patch.object(api, "latest_snapshot_date", return_value="2026-07-30"),
+            patch.object(api, "load_snapshot", return_value=snapshot),
+        ):
+            payload = api.build_screen_payload(["03321"], timeout=1)
+        largest = payload["results"][0]["largest_participant"]
+        self.assertEqual(largest["name"], "KINGSTON SECURITIES LTD")
+        self.assertEqual(largest["participant_id"], "C00019")
+        self.assertEqual(largest["category"], "bank")
+        self.assertEqual(largest["stake_pct"], 12.3456)
 
     def test_hkex_announcements_payload_uses_fetcher(self) -> None:
         table = api.pd.DataFrame(

@@ -10,7 +10,7 @@ REPORT_COLUMNS = {
     "holdings": ["Rank", "Participant", "CCASS ID", "Holding", "Stake %", "Cumulative %"],
     "changes": ["Participant", "Change", "Change %", "Holding after", "Stake after"],
     "concentration": ["Date", "Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"],
-    "price_history": ["Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP", "price_source", "turnover_est"],
+    "price_history": ["Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP", "price_source", "turnover_est", "vwap_est"],
 }
 
 

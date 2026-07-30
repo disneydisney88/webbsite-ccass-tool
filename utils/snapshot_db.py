@@ -313,6 +313,20 @@ def load_price_history(code: str, limit: int = 90, path: Path = DB_PATH) -> pd.D
             conn,
             params=(code, int(limit)),
         )
+    if df.empty:
+        return df
+    for column in ["Close", "Open", "High", "Low", "VWAP"]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce").round(3)
+    for column in ["Turnover", "turnover_est"]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce").round(2)
+    if "vwap_est" not in df.columns:
+        volume = pd.to_numeric(df.get("Volume"), errors="coerce")
+        turnover_est = pd.to_numeric(df.get("turnover_est"), errors="coerce")
+        yahoo_source = df.get("price_source", "").astype(str).str.lower().eq("yahoo")
+        missing_vwap = pd.to_numeric(df.get("VWAP"), errors="coerce").isna()
+        df["vwap_est"] = (turnover_est / volume.where(volume.ne(0))).where(yahoo_source & missing_vwap).round(3)
     return df
 
 

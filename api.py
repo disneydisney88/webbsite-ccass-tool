@@ -56,6 +56,8 @@ from utils.snapshot_db import (
     DB_PATH,
     db_restore_status,
     export_db_bytes,
+    latest_snapshot_date,
+    load_snapshot,
     load_watchlist_entries,
     restore_snapshot_db_from_backup,
     snapshot_exists,
@@ -561,6 +563,19 @@ def enrich_price_history(records: list[dict[str, Any]], issued_securities: Any) 
     enriched = []
     for record in records:
         item = dict(record)
+        for column in ["Open", "High", "Low", "Close", "VWAP", "vwap_est"]:
+            value = to_number(item.get(column))
+            if value is not None:
+                item[column] = round(value, 3)
+        for column in ["Turnover", "turnover_est"]:
+            value = to_number(item.get(column))
+            if value is not None:
+                item[column] = round(value, 2)
+        if str(item.get("price_source") or "").lower() == "yahoo" and item.get("vwap_est") in (None, ""):
+            turnover_est = to_number(item.get("turnover_est"))
+            volume = to_number(item.get("Volume"))
+            if turnover_est is not None and volume not in (None, 0):
+                item["vwap_est"] = round(turnover_est / volume, 3)
         cap = market_cap_value(item.get("Close"), issued_securities)
         if cap is not None:
             item["Market Cap"] = cap
@@ -746,6 +761,10 @@ def build_stock_payload(
     fetch_summary = exported.get("fetch_summary", [])
     warnings = list(exported.get("analysis_warnings", []))
     warnings.extend(warning for warning in section_failure_warnings(fetch_summary) if warning not in warnings)
+    if any(str(row.get("price_source") or "").lower() == "yahoo" and row.get("vwap_est") not in (None, "") for row in compact_price_history):
+        warning = "VWAP is estimated from estimated turnover"
+        if warning not in warnings:
+            warnings.append(warning)
     if concentration_stale:
         stale_warning = (
             "Concentration % of issued shares exceeds 100% on at least one date; "
@@ -884,6 +903,24 @@ def compact_payload_to_markdown(payload: dict[str, Any]) -> str:
 
 MAX_SCREEN_CODES = 20
 MAX_SCREEN_WORKERS = max(1, int(os.getenv("SCREEN_MAX_WORKERS", "4")))
+CCASS_ID_RE = re.compile(r"[A-Ca-c]\d{5}")
+
+
+def clean_participant_id(value: Any) -> str:
+    match = CCASS_ID_RE.search(str(value or ""))
+    return match.group(0).upper() if match else ""
+
+
+def clean_participant_name(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(
+        r"^name\s+of\s+ccass\s+participant\s*\(\*\s*for\s*consenting\s*investor\s*participants\s*\)\s*:?\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"^participant\s+name\s*:?\s*", "", text, flags=re.I)
+    return text.strip()
 
 
 def largest_participant_summary(holdings: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -892,16 +929,39 @@ def largest_participant_summary(holdings: list[dict[str, Any]]) -> dict[str, Any
     for row in holdings:
         if not isinstance(row, dict):
             continue
-        ccass_id = str(row.get("CCASS ID") or "").strip()
-        if not re.match(r"^[A-Ca-c]\d{5}$", ccass_id):
+        ccass_id = clean_participant_id(row.get("CCASS ID"))
+        if not ccass_id:
             continue
+        name = clean_participant_name(row.get("Participant"))
         return {
-            "name": row.get("Participant"),
+            "name": name,
+            "participant_id": ccass_id,
             "ccass_id": ccass_id,
-            "category": row.get("category"),
+            "category": row.get("category") or categorize(ccass_id, name),
             "stake_pct": to_number(row.get("Stake %")),
         }
     return None
+
+
+def largest_participant_from_snapshot(code: str) -> dict[str, Any] | None:
+    latest_date = latest_snapshot_date(code)
+    if not latest_date:
+        return None
+    snapshot = load_snapshot(code, latest_date)
+    if snapshot.empty:
+        return None
+    row = snapshot.sort_values("shares", ascending=False).iloc[0]
+    participant_id = clean_participant_id(row.get("participant_id"))
+    participant_name = clean_participant_name(row.get("participant_name"))
+    if not participant_id and not participant_name:
+        return None
+    return {
+        "name": participant_name,
+        "participant_id": participant_id,
+        "ccass_id": participant_id,
+        "category": categorize(participant_id, participant_name),
+        "stake_pct": to_number(row.get("pct_of_issued")),
+    }
 
 
 def biggest_change_5d_summary(big_changes: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -940,6 +1000,9 @@ def screen_one_stock(code: str, timeout: int) -> dict[str, Any]:
     concentration = payload.get("concentration", {})
     holdings_summary = payload.get("holdings_summary", {})
     warnings = payload.get("data_quality_warnings", [])
+    largest_participant = largest_participant_summary(payload.get("holdings", []))
+    if largest_participant is None:
+        largest_participant = largest_participant_from_snapshot(cleaned)
     return {
         "code": cleaned,
         "name": payload.get("metadata", {}).get("name", ""),
@@ -950,7 +1013,7 @@ def screen_one_stock(code: str, timeout: int) -> dict[str, Any]:
         "top10_pct_of_ccass": concentration.get("top10_pct_of_ccass"),
         "top10_pct_of_issued": concentration.get("top10_pct_of_issued"),
         "issued_shares_may_be_stale": concentration.get("issued_shares_may_be_stale", False),
-        "largest_participant": largest_participant_summary(payload.get("holdings", [])),
+        "largest_participant": largest_participant,
         "biggest_change_5d": biggest_change_5d_summary(payload.get("big_changes", [])),
         "warnings": warnings,
     }
@@ -1092,6 +1155,10 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
     fetch_summary = exported.get("fetch_summary", [])
     warnings = list(exported.get("analysis_warnings", []))
     warnings.extend(warning for warning in section_failure_warnings(fetch_summary) if warning not in warnings)
+    if any(str(row.get("price_source") or "").lower() == "yahoo" and row.get("vwap_est") not in (None, "") for row in compact_price_history):
+        warning = "VWAP is estimated from estimated turnover"
+        if warning not in warnings:
+            warnings.append(warning)
     price_fetch = [
         row
         for row in fetch_summary

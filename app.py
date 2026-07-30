@@ -3,9 +3,6 @@
 import json
 import os
 import importlib
-import subprocess
-import sys
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -99,34 +96,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-
-def ensure_playwright_chromium() -> None:
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            executable = Path(p.chromium.executable_path)
-        if executable.exists():
-            return
-        completed = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True,
-            text=True,
-            timeout=240,
-            check=False,
-        )
-        if completed.returncode != 0:
-            st.warning(
-                "Playwright Chromium binary is missing and automatic install failed. "
-                f"Mirror browser fallback may be unavailable. Error: {completed.stderr[-800:]}"
-            )
-    except Exception as exc:
-        st.warning(f"Playwright Chromium availability check failed. Mirror browser fallback may be unavailable: {type(exc).__name__}: {exc}")
-
-
-ensure_playwright_chromium()
-
 
 def env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)

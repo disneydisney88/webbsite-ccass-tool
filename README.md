@@ -46,7 +46,7 @@ playwright install chromium
 streamlit run app.py
 ```
 
-If Streamlit Cloud starts without a Playwright Chromium binary, the app attempts `python -m playwright install chromium` at startup and shows a warning instead of crashing if install fails. This only fixes browser availability; it does not bypass Webb-site Cloudflare/Turnstile protection.
+On Streamlit Cloud, Playwright system dependencies can conflict with `packages.txt` because one missing apt package makes the entire requirements install fail. Since the current primary CCASS path is HKEX SDW via `requests`, `packages.txt` is intentionally kept empty and Playwright is treated as optional/lazy for mirror-only browser fallback. If the mirror is unblocked later and Streamlit needs browser fetching, test any apt package additions one by one in Streamlit Cloud.
 
 ## CCASS Source Mode
 

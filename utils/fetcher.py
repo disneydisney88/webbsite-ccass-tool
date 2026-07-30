@@ -168,12 +168,12 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
 
 
 def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> FetchResult:
-    from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-    from playwright.sync_api import sync_playwright
-
     result = FetchResult(name=name, url=url, fetched_time=now_iso(), method="playwright")
     try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+
         with sync_playwright() as p:
             try:
                 browser = p.chromium.launch(headless=headless)
@@ -201,9 +201,12 @@ def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> 
             if not result.tables:
                 raise ValueError("no table found")
             result.ok = True
-    except (PlaywrightTimeoutError, PlaywrightError, Exception) as exc:
+    except Exception as exc:
         result.error_type = type(exc).__name__
-        result.error_message = str(exc)
+        if type(exc).__name__ == "ImportError":
+            result.error_message = "Playwright is not installed; mirror browser fallback is unavailable."
+        else:
+            result.error_message = str(exc)
         result.ok = False
     return result
 

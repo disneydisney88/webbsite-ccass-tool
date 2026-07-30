@@ -49,6 +49,9 @@ from utils.officers import (
 )
 from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
+from utils.source_router import fetch_source_bundle_for_stock
+from utils.fetch_sdw import fetch_sdw_snapshot
+from utils.snapshot_db import DB_PATH, export_db_bytes, load_watchlist, snapshot_exists, stock_fetched_today, upsert_snapshot
 
 
 API_TITLE = "Webb-site CCASS Research API"
@@ -125,6 +128,9 @@ class StockMetadata(BaseModel):
     changes_date: str
     data_as_of_trading_date: str = ""
     settlement_note: str = ""
+    source: str = ""
+    mirror_status: str = ""
+    history_depth_days: int = Field(default=0, ge=0)
 
 
 class HoldingsSummary(BaseModel):
@@ -414,16 +420,19 @@ def build_base_payload(stock_code: str, timeout: int, headless: bool = True) -> 
     if cached:
         return cached
 
-    deadline = time.monotonic() + timeout
-    lookup = resolve_lookup(stock_code, timeout=timeout, deadline=deadline, headless=headless)
+    bundle = fetch_source_bundle_for_stock(stock_code, timeout=timeout, headless=headless)
+    lookup = bundle.lookup
     warnings = []
-    if lookup.status != "success" or not lookup.issue_id:
+    source_name = str(bundle.metadata.get("source") or "")
+    requires_issue_id = source_name == "mirror" or not source_name
+    if lookup.status != "success" or (requires_issue_id and not lookup.issue_id):
         warning = lookup.message or "Could not resolve Webb-site issue ID within the API timeout budget."
         payload = minimal_base_payload(stock_code=stock_code, issue_id="", warnings=[f"Issue lookup failed: {warning}"])
         cache_set(stock_code, payload)
         return payload
 
-    results = fetch_compact_results(lookup.issue_id, stock_code, lookup, timeout=timeout, deadline=deadline)
+    results = bundle.results
+    warnings.extend(bundle.warnings)
     try:
         parsed = parse_results(
             lookup.issue_id,
@@ -431,11 +440,14 @@ def build_base_payload(stock_code: str, timeout: int, headless: bool = True) -> 
             stock_code=lookup.stock_code or stock_code,
             id_lookup_method=lookup.method,
             id_lookup_status=lookup.status,
+            source_metadata=bundle.metadata,
         )
+        parsed.analysis_warnings.extend(item for item in warnings if item not in parsed.analysis_warnings)
         exported = parsed_to_json_ready(parsed, results)
     except Exception as exc:
         warnings.append(f"Parsing failed: {type(exc).__name__}: {exc}")
         exported = minimal_exported_payload(stock_code=stock_code, issue_id=lookup.issue_id, warnings=warnings, results=results)
+        exported["metadata"].update(bundle.metadata)
 
     payload = {"exported": exported, "issue_id": lookup.issue_id}
     cache_set(stock_code, payload)
@@ -463,6 +475,9 @@ def minimal_exported_payload(
             "top5_cumulative_pct": "",
             "top10_cumulative_pct": "",
             "largest_participant": "",
+            "source": "",
+            "mirror_status": "",
+            "history_depth_days": 0,
         },
         "holdings": [],
         "changes": [],
@@ -741,6 +756,9 @@ def build_stock_payload(
                 "changes_date": metadata.get("changes_trading_date", ""),
                 "data_as_of_trading_date": metadata.get("holdings_data_date", ""),
                 "settlement_note": SETTLEMENT_NOTE,
+                "source": metadata.get("source", ""),
+                "mirror_status": metadata.get("mirror_status", ""),
+                "history_depth_days": int(metadata.get("history_depth_days") or 0),
             },
             "holdings_summary": {
                 "total_in_ccass": metadata.get("total_in_ccass", ""),
@@ -1543,6 +1561,7 @@ def build_full_stock_payload(stock_code: str, timeout: int = 60, headless: bool 
         stock_code=lookup.stock_code or stock_code,
         id_lookup_method=lookup.method,
         id_lookup_status=lookup.status,
+        source_metadata={"source": "mirror", "mirror_status": "forced", "history_depth_days": 0},
     )
     return json_safe(parsed_to_json_ready(parsed, results))
 
@@ -1728,6 +1747,33 @@ def get_stock_capital_endpoint(
     return build_capital_payload(
         stock_code=requested_code, changes_limit=changes_limit, buybacks_limit=buybacks_limit, timeout=timeout
     )
+
+
+@app.get("/api/snapshots/export", dependencies=[Depends(verify_api_token)])
+def export_snapshots() -> Response:
+    return Response(
+        export_db_bytes(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": 'attachment; filename="ccass_snapshots.db"'},
+    )
+
+
+@app.get("/api/snapshot_all", dependencies=[Depends(verify_api_token)])
+def snapshot_all(timeout: int = Query(30, ge=10, le=60)) -> dict[str, Any]:
+    rows = []
+    for code in load_watchlist():
+        if stock_fetched_today(code):
+            rows.append({"code": code, "ok": True, "skipped": True, "message": "Snapshot already fetched today."})
+            continue
+        result = fetch_sdw_snapshot(code, timeout=timeout)
+        if result.ok and result.snapshot:
+            already_exists = snapshot_exists(code, result.snapshot.date)
+            if not already_exists:
+                upsert_snapshot(result.snapshot, source="sdw")
+            rows.append({"code": code, "ok": True, "date": result.snapshot.date, "rows": len(result.snapshot.rows or []), "already_exists": already_exists})
+        else:
+            rows.append({"code": code, "ok": False, "error_type": result.error_type, "error_message": result.error_message})
+    return {"ok": True, "db_path": str(DB_PATH), "results": rows}
 
 
 @app.get("/api/stock/full", include_in_schema=False, dependencies=[Depends(verify_bearer_token)])

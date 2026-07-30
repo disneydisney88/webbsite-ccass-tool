@@ -3,6 +3,9 @@
 import json
 import os
 import importlib
+import subprocess
+import sys
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -30,6 +33,8 @@ from utils.report import build_report
 from utils.events import events_url, parse_events_html, parse_events_name
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html
 from utils.f10_equity import f10_equity_url, parse_f10_buybacks, parse_f10_share_changes
+from utils.snapshot_db import DB_PATH, export_db_bytes
+from utils.source_router import fetch_mirror_bundle, fetch_sdw_bundle, fetch_source_bundle_for_stock, get_source_mode, stock_code_for_issue_id
 
 exporters = importlib.reload(exporters)
 combined_stock_csv = exporters.combined_stock_csv
@@ -96,6 +101,33 @@ st.markdown(
 )
 
 
+def ensure_playwright_chromium() -> None:
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            executable = Path(p.chromium.executable_path)
+        if executable.exists():
+            return
+        completed = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=240,
+            check=False,
+        )
+        if completed.returncode != 0:
+            st.warning(
+                "Playwright Chromium binary is missing and automatic install failed. "
+                f"Mirror browser fallback may be unavailable. Error: {completed.stderr[-800:]}"
+            )
+    except Exception as exc:
+        st.warning(f"Playwright Chromium availability check failed. Mirror browser fallback may be unavailable: {type(exc).__name__}: {exc}")
+
+
+ensure_playwright_chromium()
+
+
 def env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -105,6 +137,18 @@ def env_bool(name: str, default: bool) -> bool:
 
 def empty_lookup() -> IssueLookup:
     return IssueLookup(stock_code="", issue_id="", method="", status="", message="")
+
+
+def apply_source_metadata(parsed, metadata: dict, warnings: list[str]) -> None:
+    parsed.source = str(metadata.get("source") or parsed.source or "mirror")
+    parsed.mirror_status = str(metadata.get("mirror_status") or parsed.mirror_status or "")
+    try:
+        parsed.history_depth_days = int(metadata.get("history_depth_days") or parsed.history_depth_days or 0)
+    except (TypeError, ValueError):
+        parsed.history_depth_days = 0
+    for warning in warnings:
+        if warning not in parsed.analysis_warnings:
+            parsed.analysis_warnings.append(warning)
 
 
 def table_options(result) -> list[str]:
@@ -481,26 +525,32 @@ def latest_ccass_concentration_values(concentration_data: pd.DataFrame) -> pd.Da
 def ccass_concentration_chart(concentration_data: pd.DataFrame, height: int = 145):
     if concentration_data is None or concentration_data.empty or alt is None:
         return None
-    return (
-        alt.Chart(concentration_data)
-        .mark_line(strokeWidth=2.2)
-        .encode(
-            x=alt.X("Date:T", title="Date"),
-            y=alt.Y("Percent:Q", title="CCASS 股權集中度 (%)", scale=alt.Scale(zero=False)),
-            color=alt.Color(
-                "Metric:N",
-                scale=alt.Scale(
-                    domain=["Top5 + 非流通股票", "Top10 + 非流通股票"],
-                    range=["#f97316", "#2563eb"],
-                ),
-                legend=alt.Legend(orient="top", title=None),
+    data = concentration_data.dropna(subset=["Percent"]).copy()
+    if data.empty:
+        return None
+    y_min = float(data["Percent"].min())
+    y_max = float(data["Percent"].max())
+    y_padding = max((y_max - y_min) * 0.12, 0.25)
+    y_domain = [max(y_min - y_padding, 0), min(y_max + y_padding, 100)]
+    base = alt.Chart(data).encode(
+        x=alt.X("Date:T", title="Date"),
+        y=alt.Y("Percent:Q", title="CCASS 股權集中度 (%)", scale=alt.Scale(zero=False, domain=y_domain)),
+        color=alt.Color(
+            "Metric:N",
+            scale=alt.Scale(
+                domain=["Top5 + 非流通股票", "Top10 + 非流通股票"],
+                range=["#f97316", "#2563eb"],
             ),
-            tooltip=[
-                alt.Tooltip("Date:T", title="Date", format="%Y-%m-%d"),
-                alt.Tooltip("Metric:N", title="Metric"),
-                alt.Tooltip("Percent:Q", title="Percent", format=".2f"),
-            ],
-        )
+            legend=alt.Legend(orient="top", title=None),
+        ),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Date", format="%Y-%m-%d"),
+            alt.Tooltip("Metric:N", title="Metric"),
+            alt.Tooltip("Percent:Q", title="Percent", format=".2f"),
+        ],
+    )
+    return (
+        (base.mark_line(strokeWidth=2.2) + base.mark_point(size=36, filled=True))
         .properties(height=height, title="CCASS 股權集中度")
     )
 
@@ -1300,6 +1350,8 @@ if "results" not in st.session_state:
     st.session_state.results = None
     st.session_state.lookup = empty_lookup()
     st.session_state.manual_issue_id = ""
+    st.session_state.source_metadata = {}
+    st.session_state.source_warnings = []
 
 if "hkex_announcements" not in st.session_state:
     st.session_state.hkex_announcements = empty_announcements()
@@ -1326,37 +1378,47 @@ if fetch_clicked:
         lookup = empty_lookup()
         issue_id = ""
         stock_code = ""
+        source_metadata = {}
+        source_warnings = []
+        bundle = None
 
         with st.status("Resolving Webb-site issue ID...", expanded=True) as status:
             if input_type == "Stock Code":
                 stock_code = clean_stock_code(raw_input)
                 st.write(f"Stock code: {stock_code}")
-                st.write("Opening orgdata page and extracting the real Webb-site issue ID from links.")
-                lookup = resolve_issue_id_from_stock(stock_code, timeout=int(timeout), headless=headless)
+                st.write(f"Source mode: {get_source_mode()}")
+                bundle = fetch_source_bundle_for_stock(stock_code, timeout=int(timeout), headless=headless)
+                lookup = bundle.lookup
                 issue_id = lookup.issue_id
+                source_metadata = bundle.metadata
+                source_warnings = bundle.warnings
                 if lookup.status == "success":
                     st.write(f"Webb-site issue ID: {issue_id}")
                     st.write(f"ID lookup method: {lookup.method}")
+                    st.write(f"Source: {source_metadata.get('source', 'mirror')}")
+                    st.write(f"Mirror status: {source_metadata.get('mirror_status', '')}")
                     if lookup.message:
                         st.write(lookup.message)
                 else:
                     st.error(lookup.message)
             else:
                 issue_id = raw_input
-                lookup = IssueLookup(
-                    stock_code="",
-                    issue_id=issue_id,
-                    method="manually entered",
-                    status="success",
-                    message="Issue ID was manually entered.",
-                )
+                stock_code = stock_code_for_issue_id(issue_id)
+                if get_source_mode() == "sdw" and stock_code:
+                    bundle = fetch_sdw_bundle(stock_code, issue_id=issue_id, timeout=int(timeout), mirror_status="disabled_by_config")
+                else:
+                    bundle = fetch_mirror_bundle(stock_code, issue_id=issue_id, timeout=int(timeout), headless=headless, mirror_status="manual_issue_id")
+                lookup = bundle.lookup
+                source_metadata = bundle.metadata
+                source_warnings = bundle.warnings
                 st.write(f"Webb-site issue ID: {issue_id}")
-                st.write("ID lookup method: manually entered")
+                st.write(f"ID lookup method: {lookup.method}")
+                st.write(f"Source: {source_metadata.get('source', 'mirror')}")
             status.update(label="Issue ID resolution complete", state="complete")
 
-        if issue_id:
+        if issue_id or bundle:
             with st.status("Fetching Company / Holdings / Changes / Big Changes / Concentration / Price History...", expanded=True) as status:
-                results = fetch_all(issue_id, stock_code=stock_code, timeout=int(timeout), headless=headless)
+                results = bundle.results if bundle else fetch_all(issue_id, stock_code=stock_code, timeout=int(timeout), headless=headless)
                 for section in SECTIONS:
                     result = results.get(section)
                     if result:
@@ -1424,16 +1486,25 @@ if fetch_clicked:
 
             st.session_state.results = results
             st.session_state.lookup = lookup
+            st.session_state.source_metadata = source_metadata
+            st.session_state.source_warnings = source_warnings
 
 results = st.session_state.results
 lookup = st.session_state.lookup
 hkex_announcements = st.session_state.hkex_announcements
+source_metadata = st.session_state.get("source_metadata", {})
+source_warnings = st.session_state.get("source_warnings", [])
 
 st.subheader("Resolved Metadata")
 meta_cols = st.columns(4)
 meta_cols[0].metric("Stock code", lookup.stock_code or "-")
 meta_cols[2].metric("Webb-site issue ID", lookup.issue_id or "-")
 meta_cols[3].metric("ID lookup status", lookup.status or "-")
+st.caption(
+    f"Source mode: {get_source_mode()} | Source used: {source_metadata.get('source', 'not fetched')} | "
+    f"Mirror status: {source_metadata.get('mirror_status', 'not recorded')} | "
+    f"Local history depth days: {source_metadata.get('history_depth_days', 0)}"
+)
 if lookup.method:
     st.caption(f"ID lookup method: {lookup.method}")
 if lookup.message:
@@ -1461,7 +1532,9 @@ parsed = parse_results(
     id_lookup_method=lookup.method,
     id_lookup_status=lookup.status,
     selected_indices=manual_overrides,
+    source_metadata=source_metadata,
 )
+apply_source_metadata(parsed, source_metadata, source_warnings)
 export_extras = {
     "events": st.session_state.get("events", {}).get("records", []),
     "events_url": events_url(lookup.issue_id) if lookup.issue_id else "",
@@ -1528,6 +1601,15 @@ with top_dl2:
         f"{get_download_base(parsed)}_all_sections.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"top_{get_download_base(parsed)}_all_sections_xlsx",
+        use_container_width=True,
+    )
+if DB_PATH.exists():
+    st.download_button(
+        "Download Snapshot DB Backup",
+        export_db_bytes(),
+        "ccass_snapshots.db",
+        "application/octet-stream",
+        key="top_snapshot_db_backup",
         use_container_width=True,
     )
 with st.expander("CSV content preview", expanded=False):

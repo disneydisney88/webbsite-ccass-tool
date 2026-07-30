@@ -11,6 +11,8 @@ services:
         value: "60"
       - key: FETCH_DELAY_SECONDS
         value: "0.5"
+      - key: CCASS_SOURCE_MODE
+        value: "auto"
 
   - type: web
     name: webbsite-ccass-api
@@ -24,6 +26,8 @@ services:
         value: "60"
       - key: FETCH_DELAY_SECONDS
         value: "0.5"
+      - key: CCASS_SOURCE_MODE
+        value: "auto"
       - key: API_QUIET
         value: "1"
       - key: API_TOKEN

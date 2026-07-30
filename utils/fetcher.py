@@ -146,13 +146,23 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
             response.encoding = response.apparent_encoding
         result.html = response.text
         result.raw_text = html_to_text(response.text)
+        challenge_text = f"{response.status_code} {response.text[:1000]}".lower()
+        if response.status_code == 403 or "cloudflare" in challenge_text or "turnstile" in challenge_text or "cf-chl" in challenge_text:
+            result.error_type = "MIRROR_BLOCKED"
+            result.error_message = "Webb-site mirror returned 403 or Cloudflare human verification challenge."
+            result.ok = False
+            return result
         result.tables = extract_tables_from_html(response.text)
         if not result.tables:
             raise ValueError("no table found")
         result.ok = True
     except Exception as exc:
-        result.error_type = type(exc).__name__
-        result.error_message = str(exc)
+        if result.status == 403:
+            result.error_type = "MIRROR_BLOCKED"
+            result.error_message = "Webb-site mirror returned 403 or Cloudflare human verification challenge."
+        else:
+            result.error_type = type(exc).__name__
+            result.error_message = str(exc)
         result.ok = False
     return result
 

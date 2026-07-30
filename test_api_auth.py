@@ -331,16 +331,20 @@ class ApiAuthTests(unittest.TestCase):
 
     def test_cache_second_request_uses_cached_base_payload(self) -> None:
         lookup = api.IssueLookup(stock_code="01592", issue_id="12345", method="mock", status="success")
+        bundle = SimpleNamespace(
+            lookup=lookup,
+            results={},
+            metadata={"source": "mirror", "mirror_status": "mock", "history_depth_days": 0},
+            warnings=[],
+        )
         exported = fake_base_payload(row_count=5)["exported"]
-        with patch.object(api, "resolve_lookup", return_value=lookup) as resolve:
-            with patch.object(api, "fetch_compact_results", return_value={}) as fetch:
-                with patch.object(api, "parse_results", return_value=object()):
-                    with patch.object(api, "parsed_to_json_ready", return_value=exported):
-                        first = api.build_base_payload("01592", timeout=30)
-                        second = api.build_base_payload("01592", timeout=30)
+        with patch.object(api, "fetch_source_bundle_for_stock", return_value=bundle) as fetch_source:
+            with patch.object(api, "parse_results", return_value=object()):
+                with patch.object(api, "parsed_to_json_ready", return_value=exported):
+                    first = api.build_base_payload("01592", timeout=30)
+                    second = api.build_base_payload("01592", timeout=30)
         self.assertEqual(first, second)
-        self.assertEqual(resolve.call_count, 1)
-        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch_source.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@
 - 嘗試從 `orgdata.asp` 找出 issue ID，不會憑股票代號亂猜
 - 抓取 Holdings、Changes、Big Changes、Concentration 四類頁面
 - 先用 `requests` / `pandas.read_html`，失敗後自動 fallback 到 Playwright Chromium
+- 2026-07 emergency source router: `CCASS_SOURCE_MODE=auto|mirror|sdw`
 - 顯示抓取狀態、原始文字預覽、表格
 - 產生 ChatGPT Markdown 報告
 - 支援下載 Markdown、CSV、Excel、JSON
@@ -44,6 +45,38 @@ pip install -r requirements.txt
 playwright install chromium
 streamlit run app.py
 ```
+
+If Streamlit Cloud starts without a Playwright Chromium binary, the app attempts `python -m playwright install chromium` at startup and shows a warning instead of crashing if install fails. This only fixes browser availability; it does not bypass Webb-site Cloudflare/Turnstile protection.
+
+## CCASS Source Mode
+
+Default:
+
+```text
+CCASS_SOURCE_MODE=auto
+```
+
+- `auto`: probe the Webb-site mirror once per day. If blocked by 403/Cloudflare challenge, use HKEX SDW plus the local SQLite snapshot DB.
+- `mirror`: force the original Webb-site mirror fetcher/parser.
+- `sdw`: use HKEX SDW plus local snapshots only.
+
+No Cloudflare bypass, CAPTCHA solver, stealth browser, or paid-wall circumvention is implemented.
+
+## Snapshot DB
+
+SDW snapshots are stored in `data/ccass_snapshots.db`. Render Free and Streamlit Cloud filesystems may be ephemeral, so download backups regularly from the Streamlit `Download Snapshot DB Backup` button or the API endpoint:
+
+```text
+GET /api/snapshots/export?key=<token>
+```
+
+Daily watchlist snapshots can be triggered by an external uptime monitor:
+
+```text
+GET /api/snapshot_all?key=<token>
+```
+
+Edit `data/watchlist.csv` to change the monitored stock codes.
 
 Windows PowerShell:
 

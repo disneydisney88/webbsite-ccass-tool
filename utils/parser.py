@@ -30,6 +30,9 @@ class ParsedCCASS:
     issue_id: str = ""
     id_lookup_method: str = ""
     id_lookup_status: str = ""
+    source: str = ""
+    mirror_status: str = ""
+    history_depth_days: int = 0
     fetched_time: str = ""
     holdings_data_date: str = ""
     changes_date_range: str = ""
@@ -294,6 +297,10 @@ def parse_company(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str,
     parsed.stock_code = parsed.stock_code or first_match(text, [r"\bStock code[:\s]+(\d{4,5})", r"\bCode[:\s]+(\d{4,5})"])
     parsed.stock_name = parsed.stock_name or first_match(text, [r"\bName[:\s]+(.+?)\s+(?:Code|Stock code|Market)", r"\bIssue[:\s]+(.+?)\s+(?:Code|Stock code)"])
     if not parsed.stock_name and not table.empty:
+        name_col = pick_first_column(table, [["name"], ["stock name"]])
+        if name_col:
+            parsed.stock_name = safe_str(table.iloc[0].get(name_col))
+    if not parsed.stock_name and not table.empty:
         joined = " ".join(table.head(3).fillna("").astype(str).to_numpy().ravel().tolist())
         parsed.stock_name = first_match(joined, [r"Name\s+(.+?)\s+Code", r"Issue\s+(.+?)\s+Code"])
     if result and result.ok and parse.status == "failed":
@@ -550,8 +557,9 @@ def parse_concentration(result: FetchResult, parsed: ParsedCCASS, overrides: dic
 
     date_col = pick_first_column(table, [["date"]])
     top5_col = pick_first_column(table, [["top 5"], ["top5"]])
-    top10_ncip_col = pick_first_column(table, [["top 10 + ncip"], ["top 10 ncip"], ["ncip"]])
-    top10_col = pick_first_column(table, [["top 10"], ["top10"]])
+    top10_ncip_col = pick_first_column(table, [["top 10 + ncip"], ["top 10 +ncip"], ["top 10 ncip"], ["ncip"]])
+    top10_table = table.drop(columns=[top10_ncip_col]) if top10_ncip_col else table
+    top10_col = pick_first_column(top10_table, [["top 10 %"], ["top 10"], ["top10"]])
     stake_col = pick_first_column(table, [["stake in ccass"], ["ccass"], ["stake"]])
     if any(col is None for col in [date_col, top5_col, top10_col]):
         parse.status = "no matching table"
@@ -708,6 +716,7 @@ def parse_results(
     id_lookup_method: str = "",
     id_lookup_status: str = "",
     selected_indices: dict[str, int] | None = None,
+    source_metadata: dict[str, Any] | None = None,
 ) -> ParsedCCASS:
     parsed = ParsedCCASS(
         issue_id=issue_id,
@@ -717,6 +726,13 @@ def parse_results(
     )
     fetched_times = [item.fetched_time for item in results.values() if item.fetched_time]
     parsed.fetched_time = max(fetched_times) if fetched_times else ""
+    if source_metadata:
+        parsed.source = safe_str(source_metadata.get("source"))
+        parsed.mirror_status = safe_str(source_metadata.get("mirror_status"))
+        try:
+            parsed.history_depth_days = int(source_metadata.get("history_depth_days") or 0)
+        except (TypeError, ValueError):
+            parsed.history_depth_days = 0
 
     if results.get("Company / orgdata"):
         parse_company(results["Company / orgdata"], parsed, selected_indices)

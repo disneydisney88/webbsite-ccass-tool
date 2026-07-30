@@ -39,6 +39,64 @@ Authorization: Bearer <your-random-token>
 X-API-Key: <your-random-token>
 ```
 
+## Emergency CCASS Source Router
+
+Set `CCASS_SOURCE_MODE` to control the CCASS data path:
+
+```text
+CCASS_SOURCE_MODE=auto
+```
+
+Allowed values:
+
+- `auto` (default): probe the Webb-site mirror once per day. If the mirror works, use the original mirror logic. If it returns 403 or a Cloudflare/Turnstile challenge, fall back to HKEX SDW plus the local SQLite snapshot DB.
+- `mirror`: force the original Webb-site mirror code path. This keeps the old fetcher/parser intact and is useful when the mirror is unblocked.
+- `sdw`: use HKEX SDW plus local snapshots only.
+
+The API response keeps the existing JSON field names and only adds:
+
+```json
+{
+  "metadata": {
+    "source": "mirror or sdw+local_db",
+    "mirror_status": "ok, blocked_by_cloudflare, forced, disabled_by_config, or failed",
+    "history_depth_days": 1
+  }
+}
+```
+
+When SDW history is limited, warnings include:
+
+```text
+History limited to local snapshots since YYYY-MM-DD; mirror historical data unavailable
+```
+
+## Snapshot DB Backup
+
+Snapshots are stored in `data/ccass_snapshots.db` by default. Render Free uses an ephemeral filesystem, so this DB can disappear after redeploys or instance replacement. Back it up regularly:
+
+```text
+GET /api/snapshots/export?key=<your-random-token>
+```
+
+The Streamlit app also shows a `Download Snapshot DB Backup` button when the DB file exists.
+
+## Daily Snapshot Endpoint
+
+Use an external uptime monitor or scheduler to call:
+
+```text
+GET /api/snapshot_all?key=<your-random-token>
+```
+
+The watchlist is `data/watchlist.csv`. Each stock is skipped if it has already been fetched today.
+
+## Switching Back After Mirror Unblocks
+
+1. Set `CCASS_SOURCE_MODE=mirror` on Render or Streamlit Cloud.
+2. Redeploy/restart the service.
+3. Test `/api/stock?code=03321&key=<token>` and confirm `metadata.source` is `mirror`.
+
 ## Custom GPT Action
 
 ChatGPT cannot call your local `localhost` directly. Deploy this API to Render or another HTTPS host.
@@ -64,7 +122,10 @@ It returns one pure JSON response from a single HTTP GET. The response includes:
     "name": "...",
     "issue_id": "...",
     "holdings_date": "...",
-    "changes_date": "..."
+    "changes_date": "...",
+    "source": "sdw+local_db",
+    "mirror_status": "blocked_by_cloudflare",
+    "history_depth_days": 1
   },
   "holdings_summary": {},
   "holdings": [],

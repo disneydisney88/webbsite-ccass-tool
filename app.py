@@ -115,6 +115,7 @@ def apply_source_metadata(parsed, metadata: dict, warnings: list[str]) -> None:
         parsed.history_depth_days = int(metadata.get("history_depth_days") or parsed.history_depth_days or 0)
     except (TypeError, ValueError):
         parsed.history_depth_days = 0
+    parsed.db_restored_from_backup = bool(metadata.get("db_restored_from_backup", parsed.db_restored_from_backup))
     for warning in warnings:
         if warning not in parsed.analysis_warnings:
             parsed.analysis_warnings.append(warning)

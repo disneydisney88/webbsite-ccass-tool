@@ -60,7 +60,8 @@ The API response keeps the existing JSON field names and only adds:
   "metadata": {
     "source": "mirror or sdw+local_db",
     "mirror_status": "ok, blocked_by_cloudflare, forced, disabled_by_config, or failed",
-    "history_depth_days": 1
+    "history_depth_days": 1,
+    "db_restored_from_backup": false
   }
 }
 ```
@@ -87,9 +88,47 @@ Use an external uptime monitor or scheduler to call:
 
 ```text
 GET /api/snapshot_all?key=<your-random-token>
+GET /api/snapshot_all?group=caiji&key=<your-random-token>
+GET /api/snapshot_all?group=lshape&key=<your-random-token>
 ```
 
-The watchlist is `data/watchlist.csv`. Each stock is skipped if it has already been fetched today.
+The watchlist is `data/watchlist.csv` with `code,name,group`. Valid groups are `caiji` and `lshape`; a stock can belong to both with `caiji;lshape`. Each stock is skipped if it has already been fetched today.
+
+## GitHub Actions Backup
+
+The workflow `.github/workflows/daily_snapshot.yml` runs daily at 13:30 UTC / 21:30 Hong Kong time and can also be started with `workflow_dispatch`.
+
+Required repo secret:
+
+```text
+CCASS_API_TOKEN=<same value as Render API_TOKEN>
+```
+
+The workflow downloads the exported SQLite DB to:
+
+```text
+data/backups/ccass_snapshots_latest.db
+```
+
+On Sundays it also writes `data/backups/ccass_snapshots_YYYYMMDD.db` and keeps the latest 8 weekly backups.
+
+Backup commits use `[skip render]` to avoid triggering a Render auto-deploy loop.
+
+## Restore Metadata
+
+On startup, if `data/ccass_snapshots.db` is missing and `data/backups/ccass_snapshots_latest.db` exists, the API restores the DB automatically.
+
+The stock response metadata includes:
+
+```json
+{
+  "metadata": {
+    "db_restored_from_backup": true
+  }
+}
+```
+
+When backup DB files approach 50MB, move snapshot storage to external object storage or a managed database.
 
 ## Switching Back After Mirror Unblocks
 
@@ -125,7 +164,8 @@ It returns one pure JSON response from a single HTTP GET. The response includes:
     "changes_date": "...",
     "source": "sdw+local_db",
     "mirror_status": "blocked_by_cloudflare",
-    "history_depth_days": 1
+    "history_depth_days": 1,
+    "db_restored_from_backup": false
   },
   "holdings_summary": {},
   "holdings": [],

@@ -33,6 +33,7 @@ class ParsedCCASS:
     source: str = ""
     mirror_status: str = ""
     history_depth_days: int = 0
+    db_restored_from_backup: bool = False
     fetched_time: str = ""
     holdings_data_date: str = ""
     changes_date_range: str = ""
@@ -733,6 +734,7 @@ def parse_results(
             parsed.history_depth_days = int(source_metadata.get("history_depth_days") or 0)
         except (TypeError, ValueError):
             parsed.history_depth_days = 0
+        parsed.db_restored_from_backup = bool(source_metadata.get("db_restored_from_backup", False))
 
     if results.get("Company / orgdata"):
         parse_company(results["Company / orgdata"], parsed, selected_indices)

@@ -1,0 +1,108 @@
+name: Daily CCASS Snapshot Backup
+
+on:
+  schedule:
+    - cron: "30 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-ccass-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      API_BASE_URL: https://webbsite-ccass-api.onrender.com
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify API token secret
+        run: |
+          if [ -z "${{ secrets.CCASS_API_TOKEN }}" ]; then
+            echo "Missing repo secret CCASS_API_TOKEN"
+            exit 1
+          fi
+
+      - name: Wait for Render health
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --max-time 45 "$API_BASE_URL/health"; then
+              echo
+              echo "Render health check passed"
+              exit 0
+            fi
+            echo "Render health check failed; retrying in 30s ($attempt/5)"
+            sleep 30
+          done
+          echo "Render health check failed after retries"
+          exit 1
+
+      - name: Run caiji snapshots
+        run: |
+          curl --fail --silent --show-error --max-time 1500 \
+            "$API_BASE_URL/api/snapshot_all?group=caiji&timeout=60&key=${{ secrets.CCASS_API_TOKEN }}" \
+            --output caiji_snapshot_result.json
+          python - <<'PY'
+          import json
+          data = json.load(open("caiji_snapshot_result.json", encoding="utf-8"))
+          print(json.dumps({k: data.get(k) for k in ("ok", "group", "total", "ok_count", "failed_count")}, ensure_ascii=False))
+          if data.get("failed_count", 0):
+              raise SystemExit("caiji snapshot had failed rows")
+          PY
+
+      - name: Run lshape snapshots
+        run: |
+          curl --fail --silent --show-error --max-time 1500 \
+            "$API_BASE_URL/api/snapshot_all?group=lshape&timeout=60&key=${{ secrets.CCASS_API_TOKEN }}" \
+            --output lshape_snapshot_result.json
+          python - <<'PY'
+          import json
+          data = json.load(open("lshape_snapshot_result.json", encoding="utf-8"))
+          print(json.dumps({k: data.get(k) for k in ("ok", "group", "total", "ok_count", "failed_count")}, ensure_ascii=False))
+          if data.get("failed_count", 0):
+              raise SystemExit("lshape snapshot had failed rows")
+          PY
+
+      - name: Download snapshot DB backup
+        run: |
+          mkdir -p data/backups
+          curl --fail --silent --show-error --max-time 300 \
+            "$API_BASE_URL/api/snapshots/export?key=${{ secrets.CCASS_API_TOKEN }}" \
+            --output data/backups/ccass_snapshots_latest.db
+          test -s data/backups/ccass_snapshots_latest.db
+
+          today="$(date -u +%Y%m%d)"
+          weekday="$(date -u +%u)"
+          if [ "$weekday" = "7" ]; then
+            cp data/backups/ccass_snapshots_latest.db "data/backups/ccass_snapshots_${today}.db"
+          fi
+
+          weekly_count="$(find data/backups -maxdepth 1 -name 'ccass_snapshots_[0-9]*.db' | wc -l)"
+          if [ "$weekly_count" -gt 8 ]; then
+            find data/backups -maxdepth 1 -name 'ccass_snapshots_[0-9]*.db' -printf '%T@ %p\n' \
+              | sort -nr \
+              | tail -n +9 \
+              | cut -d' ' -f2- \
+              | xargs -r rm -f
+          fi
+
+      - name: Commit backup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/backups/
+          if git diff --cached --quiet; then
+            echo "No backup changes to commit"
+            exit 0
+          fi
+          today="$(date -u +%Y-%m-%d)"
+          git commit -m "Backup CCASS snapshots ${today} [skip render]"
+          git push

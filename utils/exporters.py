@@ -18,6 +18,7 @@ def metadata_dict(parsed: ParsedCCASS) -> dict:
         "source": parsed.source,
         "mirror_status": parsed.mirror_status,
         "history_depth_days": parsed.history_depth_days,
+        "db_restored_from_backup": parsed.db_restored_from_backup,
         "fetched_time": parsed.fetched_time,
         "holdings_data_date": parsed.holdings_data_date,
         "changes_date_range": parsed.changes_date_range,

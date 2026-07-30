@@ -74,9 +74,46 @@ Daily watchlist snapshots can be triggered by an external uptime monitor:
 
 ```text
 GET /api/snapshot_all?key=<token>
+GET /api/snapshot_all?group=caiji&key=<token>
+GET /api/snapshot_all?group=lshape&key=<token>
 ```
 
-Edit `data/watchlist.csv` to change the monitored stock codes.
+Edit `data/watchlist.csv` to change the monitored stock codes. The file has `code,name,group`; group is `caiji`, `lshape`, or a semicolon-separated value such as `caiji;lshape`.
+
+## Daily Backup Loop
+
+GitHub Actions runs `Daily CCASS Snapshot Backup` every day at 13:30 UTC / 21:30 Hong Kong time, after HKEX SDW data is normally available. It:
+
+1. Wakes the Render API with `/health`.
+2. Calls `/api/snapshot_all?group=caiji` and `/api/snapshot_all?group=lshape`.
+3. Downloads `/api/snapshots/export`.
+4. Commits `data/backups/ccass_snapshots_latest.db`; on Sundays it also keeps a dated weekly DB and retains the latest 8 weekly files.
+
+The backup commit message includes `[skip render]`, which Render supports for skipping auto-deploys, so the nightly DB backup does not create a deploy loop.
+
+One manual setup step is required:
+
+```text
+GitHub repo -> Settings -> Secrets and variables -> Actions -> New repository secret
+Name: CCASS_API_TOKEN
+Value: same value as the Render API_TOKEN
+```
+
+Do not commit API tokens to the repo.
+
+## Restore From Backup
+
+On API startup, if `data/ccass_snapshots.db` is missing but `data/backups/ccass_snapshots_latest.db` exists, the app restores the working DB from the latest backup and logs:
+
+```text
+Restored snapshot DB from backup (...)
+```
+
+API metadata includes `db_restored_from_backup` so you can verify restore behavior through `/api/stock`.
+
+## DB Size Planning
+
+The SQLite DB grows with `stock count x trading days x participant rows`. With 52 stocks, expect roughly a few MB per month depending on participant count. When committed backups approach 50MB, move to external storage or a managed database instead of keeping binary DB history in Git.
 
 Windows PowerShell:
 

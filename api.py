@@ -51,7 +51,16 @@ from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
 from utils.source_router import fetch_source_bundle_for_stock
 from utils.fetch_sdw import fetch_sdw_snapshot
-from utils.snapshot_db import DB_PATH, export_db_bytes, load_watchlist, snapshot_exists, stock_fetched_today, upsert_snapshot
+from utils.snapshot_db import (
+    DB_PATH,
+    db_restore_status,
+    export_db_bytes,
+    load_watchlist_entries,
+    restore_snapshot_db_from_backup,
+    snapshot_exists,
+    stock_fetched_today,
+    upsert_snapshot,
+)
 
 
 API_TITLE = "Webb-site CCASS Research API"
@@ -131,6 +140,7 @@ class StockMetadata(BaseModel):
     source: str = ""
     mirror_status: str = ""
     history_depth_days: int = Field(default=0, ge=0)
+    db_restored_from_backup: bool = False
 
 
 class HoldingsSummary(BaseModel):
@@ -478,6 +488,7 @@ def minimal_exported_payload(
             "source": "",
             "mirror_status": "",
             "history_depth_days": 0,
+            "db_restored_from_backup": False,
         },
         "holdings": [],
         "changes": [],
@@ -759,6 +770,7 @@ def build_stock_payload(
                 "source": metadata.get("source", ""),
                 "mirror_status": metadata.get("mirror_status", ""),
                 "history_depth_days": int(metadata.get("history_depth_days") or 0),
+                "db_restored_from_backup": bool(metadata.get("db_restored_from_backup", False)),
             },
             "holdings_summary": {
                 "total_in_ccass": metadata.get("total_in_ccass", ""),
@@ -1585,6 +1597,8 @@ def health() -> dict[str, Any]:
 async def start_mcp_session_manager() -> None:
     global _mcp_session_context
     logger.info("API auth config: API_TOKEN=%s", mask_secret(os.getenv("API_TOKEN", "")))
+    if restore_snapshot_db_from_backup():
+        logger.info("Restored snapshot DB from backup (%s)", db_restore_status().get("db_restore_source", "unknown source"))
     _mcp_session_context = mcp_server.session_manager.run()
     await _mcp_session_context.__aenter__()
 
@@ -1759,21 +1773,38 @@ def export_snapshots() -> Response:
 
 
 @app.get("/api/snapshot_all", dependencies=[Depends(verify_api_token)])
-def snapshot_all(timeout: int = Query(30, ge=10, le=60)) -> dict[str, Any]:
+def snapshot_all(
+    timeout: int = Query(30, ge=10, le=60),
+    group: str | None = Query(None, pattern="^(caiji|lshape)$", description="Optional watchlist group filter."),
+) -> dict[str, Any]:
     rows = []
-    for code in load_watchlist():
+    entries = load_watchlist_entries(group=group)
+    for entry in entries:
+        code = entry.code
         if stock_fetched_today(code):
-            rows.append({"code": code, "ok": True, "skipped": True, "message": "Snapshot already fetched today."})
+            rows.append({"code": code, "name": entry.name, "group": ";".join(entry.groups), "ok": True, "skipped": True, "message": "Snapshot already fetched today."})
             continue
         result = fetch_sdw_snapshot(code, timeout=timeout)
         if result.ok and result.snapshot:
             already_exists = snapshot_exists(code, result.snapshot.date)
             if not already_exists:
                 upsert_snapshot(result.snapshot, source="sdw")
-            rows.append({"code": code, "ok": True, "date": result.snapshot.date, "rows": len(result.snapshot.rows or []), "already_exists": already_exists})
+            rows.append(
+                {
+                    "code": code,
+                    "name": result.snapshot.stock_name or entry.name,
+                    "group": ";".join(entry.groups),
+                    "ok": True,
+                    "date": result.snapshot.date,
+                    "rows": len(result.snapshot.rows or []),
+                    "already_exists": already_exists,
+                }
+            )
         else:
-            rows.append({"code": code, "ok": False, "error_type": result.error_type, "error_message": result.error_message})
-    return {"ok": True, "db_path": str(DB_PATH), "results": rows}
+            rows.append({"code": code, "name": entry.name, "group": ";".join(entry.groups), "ok": False, "error_type": result.error_type, "error_message": result.error_message})
+    ok_count = sum(1 for row in rows if row.get("ok"))
+    failed_count = sum(1 for row in rows if not row.get("ok"))
+    return {"ok": failed_count == 0, "group": group or "all", "total": len(rows), "ok_count": ok_count, "failed_count": failed_count, "db_path": str(DB_PATH), "results": rows}
 
 
 @app.get("/api/stock/full", include_in_schema=False, dependencies=[Depends(verify_bearer_token)])

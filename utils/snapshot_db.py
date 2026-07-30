@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import os
+import shutil
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -18,6 +19,9 @@ from .parse_sdw import SDWSnapshot
 DATA_DIR = Path(os.getenv("CCASS_DATA_DIR", "data"))
 DB_PATH = Path(os.getenv("CCASS_SNAPSHOT_DB", str(DATA_DIR / "ccass_snapshots.db")))
 WATCHLIST_PATH = Path(os.getenv("CCASS_WATCHLIST", str(DATA_DIR / "watchlist.csv")))
+BACKUP_LATEST_PATH = Path(os.getenv("CCASS_SNAPSHOT_BACKUP_LATEST", str(DATA_DIR / "backups" / "ccass_snapshots_latest.db")))
+_DB_RESTORED_FROM_BACKUP = False
+_DB_RESTORE_SOURCE = ""
 
 
 @dataclass
@@ -31,7 +35,50 @@ class SnapshotBuildResult:
     warnings: list[str] | None = None
 
 
+@dataclass(frozen=True)
+class WatchlistEntry:
+    code: str
+    name: str = ""
+    groups: tuple[str, ...] = ()
+
+
+def restore_snapshot_db_from_backup(path: Path = DB_PATH, backup_path: Path = BACKUP_LATEST_PATH) -> bool:
+    global _DB_RESTORED_FROM_BACKUP, _DB_RESTORE_SOURCE
+    if Path(path) != DB_PATH and Path(backup_path) == BACKUP_LATEST_PATH:
+        return False
+    if path.exists() or not backup_path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(backup_path, path)
+    _DB_RESTORED_FROM_BACKUP = True
+    try:
+        dated = datetime.fromtimestamp(backup_path.stat().st_mtime, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
+    except OSError:
+        dated = "unknown"
+    _DB_RESTORE_SOURCE = f"{backup_path} dated {dated}"
+    return True
+
+
+def db_restore_status() -> dict[str, Any]:
+    return {"db_restored_from_backup": _DB_RESTORED_FROM_BACKUP, "db_restore_source": _DB_RESTORE_SOURCE}
+
+
+def parse_groups(value: str) -> tuple[str, ...]:
+    groups: list[str] = []
+    for item in (value or "").replace("|", ";").split(";"):
+        group = item.strip().lower()
+        if group and group not in groups:
+            groups.append(group)
+    return tuple(groups)
+
+
+def entry_matches_group(entry: WatchlistEntry, group: str | None) -> bool:
+    wanted = (group or "").strip().lower()
+    return not wanted or wanted in entry.groups
+
+
 def ensure_db(path: Path = DB_PATH) -> None:
+    restore_snapshot_db_from_backup(path=path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path)) as conn:
         conn.execute(
@@ -331,19 +378,54 @@ def export_db_bytes(path: Path = DB_PATH) -> bytes:
     return path.read_bytes()
 
 
-def load_watchlist(path: Path = WATCHLIST_PATH) -> list[str]:
+def load_watchlist_entries(path: Path = WATCHLIST_PATH, group: str | None = None) -> list[WatchlistEntry]:
     if not path.exists():
         return []
     if path.suffix.lower() == ".json":
         import json
 
         data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return [str(item).zfill(5) for item in data]
-        return [str(item).zfill(5) for item in data.get("codes", [])]
-    codes: list[str] = []
+        raw_items = data if isinstance(data, list) else data.get("codes", [])
+        entries = []
+        for item in raw_items:
+            if isinstance(item, dict):
+                entry = WatchlistEntry(
+                    code=str(item.get("code", "")).zfill(5),
+                    name=str(item.get("name", "") or ""),
+                    groups=parse_groups(str(item.get("group", "") or item.get("groups", ""))),
+                )
+            else:
+                entry = WatchlistEntry(code=str(item).zfill(5))
+            if entry.code.strip("0") and entry_matches_group(entry, group):
+                entries.append(entry)
+        return entries
+
+    entries: list[WatchlistEntry] = []
     with path.open(newline="", encoding="utf-8") as handle:
-        for row in csv.reader(handle):
-            if row and row[0].strip() and not row[0].strip().lower().startswith("code"):
-                codes.append(row[0].strip().zfill(5))
-    return codes
+        reader = csv.DictReader(handle)
+        if reader.fieldnames and "code" in [field.strip().lower() for field in reader.fieldnames]:
+            for row in reader:
+                normalized = {str(key).strip().lower(): value for key, value in row.items()}
+                code = str(normalized.get("code", "") or "").strip().zfill(5)
+                entry = WatchlistEntry(
+                    code=code,
+                    name=str(normalized.get("name", "") or "").strip(),
+                    groups=parse_groups(str(normalized.get("group", "") or "")),
+                )
+                if code.strip("0") and entry_matches_group(entry, group):
+                    entries.append(entry)
+        else:
+            handle.seek(0)
+            for row in csv.reader(handle):
+                if row and row[0].strip() and not row[0].strip().lower().startswith("code"):
+                    entry = WatchlistEntry(code=row[0].strip().zfill(5))
+                    if entry_matches_group(entry, group):
+                        entries.append(entry)
+    deduped: dict[str, WatchlistEntry] = {}
+    for entry in entries:
+        deduped.setdefault(entry.code, entry)
+    return list(deduped.values())
+
+
+def load_watchlist(path: Path = WATCHLIST_PATH, group: str | None = None) -> list[str]:
+    return [entry.code for entry in load_watchlist_entries(path=path, group=group)]

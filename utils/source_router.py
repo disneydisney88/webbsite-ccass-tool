@@ -18,7 +18,7 @@ from .fetcher import (
     orgdata_url,
     resolve_issue_id_from_stock,
 )
-from .snapshot_db import DB_PATH, build_results_from_db, history_depth_days, snapshot_exists, stock_fetched_today, upsert_snapshot
+from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, history_depth_days, snapshot_exists, stock_fetched_today, upsert_snapshot
 
 
 CONFIG_PATH = Path(os.getenv("CCASS_SOURCE_CONFIG", "ccass_source_config.json"))
@@ -128,6 +128,7 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
             "source": "sdw+local_db",
             "mirror_status": mirror_status or "not_used",
             "history_depth_days": built.history_depth_days,
+            **db_restore_status(),
         },
         warnings=warnings,
     )
@@ -143,7 +144,7 @@ def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, 
         return SourceBundle(
             lookup=lookup,
             results={},
-            metadata={"source": "mirror", "mirror_status": mirror_status, "history_depth_days": history_depth_days(code) if code else 0},
+            metadata={"source": "mirror", "mirror_status": mirror_status, "history_depth_days": history_depth_days(code) if code else 0, **db_restore_status()},
             warnings=[lookup.message or "Could not resolve Webb-site issue ID."],
         )
     results = fetch_all(lookup.issue_id, stock_code=code, timeout=timeout, headless=headless)
@@ -154,7 +155,7 @@ def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, 
     return SourceBundle(
         lookup=lookup,
         results=results,
-        metadata={"source": "mirror", "mirror_status": mirror_status, "history_depth_days": history_depth_days(code) if code else 0},
+        metadata={"source": "mirror", "mirror_status": mirror_status, "history_depth_days": history_depth_days(code) if code else 0, **db_restore_status()},
         warnings=warnings,
     )
 

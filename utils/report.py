@@ -145,6 +145,7 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * Source: {parsed.source or "mirror"}
 * Mirror status: {parsed.mirror_status or "not recorded"}
 * Local history depth days: {parsed.history_depth_days}
+* DB restored from backup: {parsed.db_restored_from_backup}
 * Holdings latest date: {value_or_reason(parsed.holdings_data_date, holdings_failed, "Holdings")}
 * Changes trading date: {value_or_reason(parsed.changes_trading_date, changes_failed, "Changes")}
 * Total in CCASS %: {parsed.total_in_ccass_pct}
@@ -173,6 +174,7 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * Source: {parsed.source or "mirror"}
 * Mirror status: {parsed.mirror_status or "not recorded"}
 * Local history depth days: {parsed.history_depth_days}
+* DB restored from backup: {parsed.db_restored_from_backup}
 * Fetched time: {parsed.fetched_time}
 * Holdings data date: {value_or_reason(parsed.holdings_data_date, holdings_failed, "Holdings")}
 * Changes date range: {value_or_reason(parsed.changes_date_range, changes_failed, "Changes")}

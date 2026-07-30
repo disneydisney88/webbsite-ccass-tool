@@ -114,6 +114,32 @@ On Sundays it also writes `data/backups/ccass_snapshots_YYYYMMDD.db` and keeps t
 
 Backup commits use `[skip render]` to avoid triggering a Render auto-deploy loop.
 
+During each snapshot run, the API also stores Yahoo Finance daily close/volume in the SQLite `price_history` table. This builds a local price history over time so the API does not need to request long Yahoo ranges forever.
+
+## Price History Fallback
+
+The original Webb-site mirror price source (`hpu.asp`) is preserved. Source router behavior:
+
+- mirror price table available: use mirror rows with actual turnover
+- mirror blocked or price table unavailable: use Yahoo Finance via `yfinance`
+
+Yahoo fallback keeps existing price-history column names and adds:
+
+```json
+{
+  "price_source": "yahoo",
+  "turnover_est": 123456.78
+}
+```
+
+For Yahoo fallback, `Turnover` is also estimated as `volume x close`, and warnings include:
+
+```text
+Turnover is estimated as volume × close, not actual turnover
+```
+
+Yahoo Finance is not an official HKEX interface and may change behavior.
+
 ## Restore Metadata
 
 On startup, if `data/ccass_snapshots.db` is missing and `data/backups/ccass_snapshots_latest.db` exists, the API restores the DB automatically.
@@ -171,6 +197,7 @@ It returns one pure JSON response from a single HTTP GET. The response includes:
   "holdings": [],
   "changes": [],
   "big_changes": [],
+  "price_history": [],
   "concentration": {
     "top5_pct": "...",
     "top10_pct": "...",

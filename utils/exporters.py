@@ -26,6 +26,7 @@ def metadata_dict(parsed: ParsedCCASS) -> dict:
         "big_changes_latest_date": parsed.big_changes_latest_date,
         "concentration_latest_date": parsed.concentration_latest_date,
         "price_history_latest_date": parsed.price_history_latest_date,
+        "price_source": parsed.price_source,
         "issued_securities": parsed.issued_securities,
         "total_in_ccass": parsed.total_in_ccass,
         "total_in_ccass_pct": parsed.total_in_ccass_pct,
@@ -118,7 +119,7 @@ def combined_stock_csv(parsed: ParsedCCASS, results: dict[str, FetchResult], ext
         ),
         (
             "Price History",
-            "Historical close price, volume, turnover and VWAP",
+            "Historical close price, volume, turnover/VWAP. Yahoo fallback turnover is estimated as volume x close.",
             parsed.price_history_latest_date,
             parsed.price_history_table,
         ),

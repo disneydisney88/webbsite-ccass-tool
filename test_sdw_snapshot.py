@@ -4,13 +4,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
+from utils.fetch_yahoo import YAHOO_TURNOVER_WARNING, yahoo_period_for_days, yahoo_table_from_history, yahoo_ticker_from_code
 from utils.parse_sdw import parse_sdw_snapshot
 from utils.snapshot_db import (
     build_results_from_db,
     db_restore_status,
+    load_price_history,
     load_snapshot,
     load_watchlist_entries,
     restore_snapshot_db_from_backup,
+    upsert_price_history,
     upsert_snapshot,
 )
 
@@ -86,6 +91,58 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
             self.assertTrue(restored)
             self.assertEqual(path.read_bytes(), b"sqlite bytes")
             self.assertTrue(db_restore_status()["db_restored_from_backup"])
+
+    def test_yahoo_ticker_conversion_keeps_hk_four_digit_symbol(self) -> None:
+        self.assertEqual(yahoo_ticker_from_code("01449"), "1449.HK")
+        self.assertEqual(yahoo_ticker_from_code("00388"), "0388.HK")
+        self.assertEqual(yahoo_ticker_from_code("00700"), "0700.HK")
+        self.assertEqual(yahoo_ticker_from_code("00005"), "0005.HK")
+        self.assertEqual(yahoo_period_for_days(7), "1mo")
+        self.assertEqual(yahoo_period_for_days(90), "3mo")
+
+    def test_yahoo_history_table_adds_estimated_turnover_columns(self) -> None:
+        history = pd.DataFrame(
+            {
+                "Open": [1.0],
+                "High": [1.2],
+                "Low": [0.9],
+                "Close": [1.1],
+                "Volume": [1000],
+            },
+            index=pd.to_datetime(["2026-07-30"]),
+        )
+        history.index.name = "Date"
+        table = yahoo_table_from_history(history)
+        self.assertEqual(table.iloc[0]["Date"], "2026-07-30")
+        self.assertEqual(table.iloc[0]["price_source"], "yahoo")
+        self.assertEqual(table.iloc[0]["turnover_est"], 1100.0)
+        self.assertEqual(table.iloc[0]["Turnover"], 1100.0)
+        self.assertIn("estimated", YAHOO_TURNOVER_WARNING)
+
+    def test_price_history_upsert_and_load_roundtrip(self) -> None:
+        table = pd.DataFrame(
+            [
+                {
+                    "Date": "2026-07-30",
+                    "Close": 1.1,
+                    "Open": 1.0,
+                    "High": 1.2,
+                    "Low": 0.9,
+                    "Volume": 1000,
+                    "Turnover": 1100.0,
+                    "VWAP": "",
+                    "price_source": "yahoo",
+                    "turnover_est": 1100.0,
+                }
+            ]
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            db_path = Path(tmpdir) / "snapshots.db"
+            written = upsert_price_history("01449", table, path=db_path)
+            loaded = load_price_history("01449", path=db_path)
+        self.assertEqual(written, 1)
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded.iloc[0]["price_source"], "yahoo")
 
 
 if __name__ == "__main__":

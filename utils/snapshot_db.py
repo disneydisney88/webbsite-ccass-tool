@@ -106,6 +106,25 @@ def ensure_db(path: Path = DB_PATH) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS price_history (
+                code TEXT NOT NULL,
+                date TEXT NOT NULL,
+                close REAL,
+                open REAL,
+                high REAL,
+                low REAL,
+                volume INTEGER,
+                turnover REAL,
+                vwap REAL,
+                price_source TEXT NOT NULL,
+                turnover_est REAL,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (code, date, price_source)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -215,6 +234,86 @@ def load_stock_meta(code: str, path: Path = DB_PATH) -> dict[str, Any]:
     if not row:
         return {"name": "", "issued_shares": "", "issued_shares_as_of": ""}
     return {"name": row[0] or "", "issued_shares": row[1] or "", "issued_shares_as_of": row[2] or ""}
+
+
+def upsert_price_history(code: str, table: pd.DataFrame, source: str = "yahoo", path: Path = DB_PATH) -> int:
+    ensure_db(path)
+    if table is None or table.empty:
+        return 0
+    fetched_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+    def number(value: Any) -> float | None:
+        try:
+            if pd.isna(value) or value == "":
+                return None
+        except (TypeError, ValueError):
+            pass
+        try:
+            return float(str(value).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+
+    rows = []
+    for _, row in table.iterrows():
+        date = str(row.get("Date", "") or "").strip()
+        if not date:
+            continue
+        rows.append(
+            (
+                code,
+                date,
+                number(row.get("Close")),
+                number(row.get("Open")),
+                number(row.get("High")),
+                number(row.get("Low")),
+                int(number(row.get("Volume")) or 0),
+                number(row.get("Turnover")),
+                number(row.get("VWAP")),
+                str(row.get("price_source", source) or source),
+                number(row.get("turnover_est")),
+                fetched_at,
+            )
+        )
+    with closing(sqlite3.connect(path)) as conn:
+        conn.executemany(
+            """
+            INSERT INTO price_history
+                (code, date, close, open, high, low, volume, turnover, vwap, price_source, turnover_est, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code, date, price_source) DO UPDATE SET
+                close=excluded.close,
+                open=excluded.open,
+                high=excluded.high,
+                low=excluded.low,
+                volume=excluded.volume,
+                turnover=excluded.turnover,
+                vwap=excluded.vwap,
+                turnover_est=excluded.turnover_est,
+                fetched_at=excluded.fetched_at
+            """,
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
+def load_price_history(code: str, limit: int = 90, path: Path = DB_PATH) -> pd.DataFrame:
+    ensure_db(path)
+    with closing(sqlite3.connect(path)) as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT date AS Date, close AS Close, open AS Open, high AS High, low AS Low,
+                   volume AS Volume, turnover AS Turnover, vwap AS VWAP,
+                   price_source, turnover_est
+            FROM price_history
+            WHERE code=?
+            ORDER BY date DESC
+            LIMIT ?
+            """,
+            conn,
+            params=(code, int(limit)),
+        )
+    return df
 
 
 def holdings_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -353,15 +452,19 @@ def build_results_from_db(code: str, source_url: str, path: Path = DB_PATH) -> S
         "LOCAL_HISTORY_LIMITED",
         "Big Changes require local history or mirror historical data; not enough SDW snapshots are available yet.",
     )
-    results["Price History"] = _fetch_result(
-        "Price History",
-        "local_db://price_history",
-        pd.DataFrame(),
-        raw,
-        False,
-        "SOURCE_UNAVAILABLE",
-        "Price History is only available from the mirror source.",
-    )
+    price_table = load_price_history(code, path=path)
+    if price_table.empty:
+        results["Price History"] = _fetch_result(
+            "Price History",
+            "local_db://price_history",
+            pd.DataFrame(),
+            raw,
+            False,
+            "SOURCE_UNAVAILABLE",
+            "Price History is only available from the mirror or Yahoo fallback source.",
+        )
+    else:
+        results["Price History"] = _fetch_result("Price History", "local_db://price_history", price_table, raw)
     return SnapshotBuildResult(
         results=results,
         stock_name=meta.get("name", ""),

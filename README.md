@@ -86,8 +86,9 @@ GitHub Actions runs `Daily CCASS Snapshot Backup` every day at 13:30 UTC / 21:30
 
 1. Wakes the Render API with `/health`.
 2. Calls `/api/snapshot_all?group=caiji` and `/api/snapshot_all?group=lshape`.
-3. Downloads `/api/snapshots/export`.
-4. Commits `data/backups/ccass_snapshots_latest.db`; on Sundays it also keeps a dated weekly DB and retains the latest 8 weekly files.
+3. Fetches Yahoo Finance daily close/volume for each watchlist stock and stores it in SQLite `price_history`.
+4. Downloads `/api/snapshots/export`.
+5. Commits `data/backups/ccass_snapshots_latest.db`; on Sundays it also keeps a dated weekly DB and retains the latest 8 weekly files.
 
 The backup commit message includes `[skip render]`, which Render supports for skipping auto-deploys, so the nightly DB backup does not create a deploy loop.
 
@@ -114,6 +115,17 @@ API metadata includes `db_restored_from_backup` so you can verify restore behavi
 ## DB Size Planning
 
 The SQLite DB grows with `stock count x trading days x participant rows`. With 52 stocks, expect roughly a few MB per month depending on participant count. When committed backups approach 50MB, move to external storage or a managed database instead of keeping binary DB history in Git.
+
+## Price History Fallback
+
+Mirror price history (`hpu.asp`) is still kept. When the mirror is available, it remains the preferred source because it includes actual turnover. When the mirror is blocked or the price table fails, the app falls back to Yahoo Finance through the `yfinance` library.
+
+Yahoo Finance is not an official HKEX source and may change behavior. Yahoo fallback rows keep the existing price-history columns and add:
+
+- `price_source`: `yahoo`
+- `turnover_est`: estimated turnover calculated as `volume x close`
+
+Reports and API warnings always state: `Turnover is estimated as volume × close, not actual turnover`.
 
 Windows PowerShell:
 

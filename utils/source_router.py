@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path
 
 from .fetch_sdw import SDW_URL, fetch_sdw_snapshot
+from .fetch_yahoo import fetch_yahoo_price_history
 from .fetcher import (
     FetchResult,
     IssueLookup,
@@ -18,7 +19,7 @@ from .fetcher import (
     orgdata_url,
     resolve_issue_id_from_stock,
 )
-from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, history_depth_days, snapshot_exists, stock_fetched_today, upsert_snapshot
+from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, history_depth_days, load_price_history, snapshot_exists, stock_fetched_today, upsert_price_history, upsert_snapshot
 
 
 CONFIG_PATH = Path(os.getenv("CCASS_SOURCE_CONFIG", "ccass_source_config.json"))
@@ -115,6 +116,14 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
         else:
             warnings.append(f"SDW fetch failed: {fetch_result.error_type} - {fetch_result.error_message}")
 
+    if load_price_history(code).empty:
+        price_result = fetch_yahoo_price_history(code, period_days=int(os.getenv("YAHOO_PRICE_PERIOD_DAYS", "90")))
+        if price_result.ok:
+            upsert_price_history(code, price_result.table, source="yahoo")
+            warnings.append(price_result.warning)
+        else:
+            warnings.append(f"Yahoo price fetch failed: {price_result.error_type} - {price_result.error_message}")
+
     built = build_results_from_db(code, SDW_URL)
     warnings.extend(built.warnings or [])
     if built.stock_name:
@@ -152,6 +161,17 @@ def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, 
     if any(_is_cloudflare_challenge(result) for result in results.values()):
         mirror_status = "blocked_by_cloudflare"
         warnings.append("MIRROR_BLOCKED: Webb-site mirror returned 403/Cloudflare challenge.")
+    price_result = results.get("Price History")
+    if not price_result or not price_result.ok:
+        yahoo_result = fetch_yahoo_price_history(code, period_days=int(os.getenv("YAHOO_PRICE_PERIOD_DAYS", "90")))
+        if yahoo_result.ok:
+            upsert_price_history(code, yahoo_result.table, source="yahoo")
+            built = build_results_from_db(code, "local_db://price_history")
+            if "Price History" in built.results:
+                results["Price History"] = built.results["Price History"]
+            warnings.append(yahoo_result.warning)
+        else:
+            warnings.append(f"Yahoo price fetch failed: {yahoo_result.error_type} - {yahoo_result.error_message}")
     return SourceBundle(
         lookup=lookup,
         results=results,

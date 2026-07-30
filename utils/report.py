@@ -10,7 +10,7 @@ REPORT_COLUMNS = {
     "holdings": ["Rank", "Participant", "CCASS ID", "Holding", "Stake %", "Cumulative %"],
     "changes": ["Participant", "Change", "Change %", "Holding after", "Stake after"],
     "concentration": ["Date", "Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"],
-    "price_history": ["Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP"],
+    "price_history": ["Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP", "price_source", "turnover_est"],
 }
 
 
@@ -159,6 +159,7 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * Big Changes latest date: {value_or_reason(parsed.big_changes_latest_date, big_failed, "Big Changes")}
 * Concentration latest date: {value_or_reason(parsed.concentration_latest_date, conc_failed, "Concentration")}
 * Price latest date: {value_or_reason(parsed.price_history_latest_date, price_failed, "Price History")}
+* Price source: {parsed.price_source or "not available"}
 * Latest close / volume / turnover: {parsed.latest_price or "not available"} / {parsed.latest_price_volume or "not available"} / {parsed.latest_price_turnover or "not available"}
 
 ## Fetch Summary
@@ -182,6 +183,7 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * Big Changes latest date: {value_or_reason(parsed.big_changes_latest_date, big_failed, "Big Changes")}
 * Concentration latest date: {value_or_reason(parsed.concentration_latest_date, conc_failed, "Concentration")}
 * Price latest date: {value_or_reason(parsed.price_history_latest_date, price_failed, "Price History")}
+* Price source: {parsed.price_source or "not available"}
 * Latest close: {parsed.latest_price}
 * Latest volume: {parsed.latest_price_volume}
 * Latest turnover: {parsed.latest_price_turnover}

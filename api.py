@@ -51,6 +51,7 @@ from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
 from utils.source_router import fetch_source_bundle_for_stock
 from utils.fetch_sdw import fetch_sdw_snapshot
+from utils.fetch_yahoo import fetch_yahoo_price_history
 from utils.snapshot_db import (
     DB_PATH,
     db_restore_status,
@@ -59,6 +60,7 @@ from utils.snapshot_db import (
     restore_snapshot_db_from_backup,
     snapshot_exists,
     stock_fetched_today,
+    upsert_price_history,
     upsert_snapshot,
 )
 
@@ -141,6 +143,7 @@ class StockMetadata(BaseModel):
     mirror_status: str = ""
     history_depth_days: int = Field(default=0, ge=0)
     db_restored_from_backup: bool = False
+    price_source: str = ""
 
 
 class HoldingsSummary(BaseModel):
@@ -219,6 +222,7 @@ class StockCompactResponse(BaseModel):
     changes: list[ChangeRecord]
     big_changes: list[BigChangeRecord]
     concentration: ConcentrationSummary
+    price_history: list[RecordModel] = []
     fetch_summary: list[dict[str, Any]]
     data_quality_warnings: list[str]
     errors: list[dict[str, Any]] = []
@@ -485,6 +489,7 @@ def minimal_exported_payload(
             "top5_cumulative_pct": "",
             "top10_cumulative_pct": "",
             "largest_participant": "",
+            "price_source": "",
             "source": "",
             "mirror_status": "",
             "history_depth_days": 0,
@@ -717,11 +722,13 @@ def build_stock_payload(
     changes = exported.get("changes", [])
     big_changes = exported.get("bigchanges", [])
     concentration = exported.get("concentration", [])
+    price_history = exported.get("price_history", [])
 
     compact_holdings = compact_records(holdings, "holdings", holdings_limit)
     compact_changes = compact_records(changes, "changes", changes_limit)
     compact_big_changes = compact_records(big_changes, "big_changes", big_changes_limit)
     compact_concentration = compact_records(concentration, "concentration", concentration_limit)
+    compact_price_history = compact_records(price_history, "price_history", 20)
 
     # Enrich big changes with participant_id (joined from Holdings) and slim,
     # explicitly-named fields; existing keys are preserved for compatibility.
@@ -771,6 +778,7 @@ def build_stock_payload(
                 "mirror_status": metadata.get("mirror_status", ""),
                 "history_depth_days": int(metadata.get("history_depth_days") or 0),
                 "db_restored_from_backup": bool(metadata.get("db_restored_from_backup", False)),
+                "price_source": metadata.get("price_source", ""),
             },
             "holdings_summary": {
                 "total_in_ccass": metadata.get("total_in_ccass", ""),
@@ -803,6 +811,7 @@ def build_stock_payload(
                 "issued_shares_may_be_stale": concentration_stale,
                 "records": compact_concentration,
             },
+            "price_history": compact_price_history,
             "fetch_summary": fetch_summary,
             "data_quality_warnings": warnings,
             "errors": collect_structured_errors(fetch_summary, warnings),
@@ -1102,6 +1111,7 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
                 "latest_volume": metadata.get("latest_price_volume", ""),
                 "latest_turnover": metadata.get("latest_price_turnover", ""),
                 "latest_vwap": metadata.get("latest_price_vwap", ""),
+                "price_source": metadata.get("price_source", ""),
                 "issued_securities": issued_securities,
                 "latest_market_cap": market_cap_value(metadata.get("latest_price", ""), issued_securities),
                 "latest_turnover_to_market_cap_pct": ratio_percent(
@@ -1783,27 +1793,39 @@ def snapshot_all(
         code = entry.code
         if stock_fetched_today(code):
             rows.append({"code": code, "name": entry.name, "group": ";".join(entry.groups), "ok": True, "skipped": True, "message": "Snapshot already fetched today."})
-            continue
-        result = fetch_sdw_snapshot(code, timeout=timeout)
-        if result.ok and result.snapshot:
-            already_exists = snapshot_exists(code, result.snapshot.date)
-            if not already_exists:
-                upsert_snapshot(result.snapshot, source="sdw")
-            rows.append(
-                {
-                    "code": code,
-                    "name": result.snapshot.stock_name or entry.name,
-                    "group": ";".join(entry.groups),
-                    "ok": True,
-                    "date": result.snapshot.date,
-                    "rows": len(result.snapshot.rows or []),
-                    "already_exists": already_exists,
-                }
-            )
         else:
-            rows.append({"code": code, "name": entry.name, "group": ";".join(entry.groups), "ok": False, "error_type": result.error_type, "error_message": result.error_message})
-    ok_count = sum(1 for row in rows if row.get("ok"))
-    failed_count = sum(1 for row in rows if not row.get("ok"))
+            result = fetch_sdw_snapshot(code, timeout=timeout)
+            if result.ok and result.snapshot:
+                already_exists = snapshot_exists(code, result.snapshot.date)
+                if not already_exists:
+                    upsert_snapshot(result.snapshot, source="sdw")
+                rows.append(
+                    {
+                        "code": code,
+                        "name": result.snapshot.stock_name or entry.name,
+                        "group": ";".join(entry.groups),
+                        "ok": True,
+                        "date": result.snapshot.date,
+                        "rows": len(result.snapshot.rows or []),
+                        "already_exists": already_exists,
+                    }
+                )
+            else:
+                rows.append({"code": code, "name": entry.name, "group": ";".join(entry.groups), "ok": False, "error_type": result.error_type, "error_message": result.error_message})
+                continue
+
+        price_result = fetch_yahoo_price_history(code, period_days=7, sleep_seconds=1.0)
+        if price_result.ok:
+            price_rows = upsert_price_history(code, price_result.table, source="yahoo")
+            rows[-1]["price_ok"] = True
+            rows[-1]["price_rows"] = price_rows
+            rows[-1]["price_source"] = "yahoo"
+        else:
+            rows[-1]["price_ok"] = False
+            rows[-1]["price_error_type"] = price_result.error_type
+            rows[-1]["price_error_message"] = price_result.error_message
+    ok_count = sum(1 for row in rows if row.get("ok") and row.get("price_ok", True) is not False)
+    failed_count = sum(1 for row in rows if not row.get("ok") or row.get("price_ok", True) is False)
     return {"ok": failed_count == 0, "group": group or "all", "total": len(rows), "ok_count": ok_count, "failed_count": failed_count, "db_path": str(DB_PATH), "results": rows}
 
 

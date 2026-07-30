@@ -294,6 +294,7 @@ class ApiAuthTests(unittest.TestCase):
             "holdings",
             "changes",
             "big_changes",
+            "price_history",
             "concentration",
             "fetch_summary",
             "data_quality_warnings",

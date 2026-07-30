@@ -41,6 +41,7 @@ class ParsedCCASS:
     big_changes_latest_date: str = ""
     concentration_latest_date: str = ""
     price_history_latest_date: str = ""
+    price_source: str = ""
     issued_securities: str = ""
     total_in_ccass: str = ""
     total_in_ccass_pct: str = ""
@@ -617,6 +618,12 @@ def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dic
     output["Volume"] = table[volume_col] if volume_col else ""
     output["Turnover"] = table[turnover_col] if turnover_col else ""
     output["VWAP"] = table[vwap_col] if vwap_col else ""
+    price_source_col = pick_first_column(table, [["price_source"], ["price source"]])
+    turnover_est_col = pick_first_column(table, [["turnover_est"], ["turnover est"]])
+    if price_source_col:
+        output["price_source"] = table[price_source_col]
+    if turnover_est_col:
+        output["turnover_est"] = table[turnover_est_col]
     output = output.dropna(how="all")
     output = output[output["Date"].astype(str).str.strip().ne("")]
     parsed.price_history_table = output
@@ -637,6 +644,11 @@ def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dic
         parsed.latest_price_volume = safe_str(latest.get("Volume"))
         parsed.latest_price_turnover = safe_str(latest.get("Turnover"))
         parsed.latest_price_vwap = safe_str(latest.get("VWAP"))
+        parsed.price_source = safe_str(latest.get("price_source"))
+        if parsed.price_source == "yahoo" or "turnover_est" in parsed.price_history_table.columns:
+            warning = "Turnover is estimated as volume \u00d7 close, not actual turnover"
+            if warning not in parsed.analysis_warnings:
+                parsed.analysis_warnings.append(warning)
 
 
 def calculate_concentration_5day_change(df: pd.DataFrame) -> dict[str, str]:

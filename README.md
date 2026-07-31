@@ -97,11 +97,6 @@ Price History is routed independently: `dbpub/hpu.asp` on the configured
 Webb-site mirror is preferred even when Holdings/Changes have fallen back to
 SDW. Yahoo Finance is used only when that price page cannot be fetched.
 
-`packages.txt` deliberately contains only `libglib2.0-0`, the runtime library
-required by Chromium on Streamlit Cloud. Keep this list minimal: adding the old
-large Playwright apt dependency list can make Streamlit's requirements install
-fail before the app starts.
-
 ## Snapshot DB
 
 SDW snapshots are stored in `data/ccass_snapshots.db`. Render Free and Streamlit Cloud filesystems may be ephemeral, so download backups regularly from the Streamlit `Download Snapshot DB Backup` button or the API endpoint:

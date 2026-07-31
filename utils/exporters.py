@@ -81,13 +81,16 @@ def extras_frames(parsed: ParsedCCASS, extras: dict | None) -> list[pd.DataFrame
             continue
         out = pd.DataFrame(records)
         out.insert(0, "section", section)
-        out.insert(1, "row_meaning", description)
-        out.insert(2, "stock_code", parsed.stock_code)
-        out.insert(3, "stock_name", parsed.stock_name)
-        out.insert(4, "webbsite_issue_id", parsed.issue_id)
-        out.insert(5, "fetched_time", parsed.fetched_time)
-        out.insert(6, "data_date_or_latest_date", "")
-        out.insert(7, "source_url", (extras or {}).get(url_key, ""))
+        out.insert(1, "record_type", "data")
+        out.insert(2, "row_meaning", description)
+        out.insert(3, "stock_code", parsed.stock_code)
+        out.insert(4, "stock_name", parsed.stock_name)
+        out.insert(5, "webbsite_issue_id", parsed.issue_id)
+        out.insert(6, "fetched_time", parsed.fetched_time)
+        out.insert(7, "data_date_or_latest_date", "")
+        out.insert(8, "source_url", (extras or {}).get(url_key, ""))
+        out.insert(9, "fetch_status", "success")
+        out.insert(10, "fetch_method", "supplementary_source")
         frames.append(out)
     return frames
 
@@ -100,7 +103,15 @@ def combined_stock_csv(parsed: ParsedCCASS, results: dict[str, FetchResult], ext
     when a source page is temporarily unavailable, so every section gets a
     status record with its source and failure detail before any data rows.
     """
+    company_result = results.get("Company / orgdata")
+    company_table = company_result.tables[0] if company_result and company_result.tables else pd.DataFrame()
     sections = [
+        (
+            "Company / orgdata",
+            "Company identity and stock metadata used to resolve the Webb-site issue ID",
+            "",
+            company_table,
+        ),
         (
             "Holdings",
             "Broker/participant holdings on the Holdings data date",

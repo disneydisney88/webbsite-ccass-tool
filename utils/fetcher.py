@@ -3,14 +3,15 @@ from __future__ import annotations
 import os
 import re
 import time
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import StringIO
+from pathlib import Path
 from typing import Optional
 
-
-
-BASE_URL = "https://webbsite.0xmd.com"
+DEFAULT_BASE_URL = "https://webbsite.0xmd.com"
+BASE_URL = DEFAULT_BASE_URL
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -26,6 +27,7 @@ KNOWN_ISSUE_ID_BY_STOCK = {
     "00524": "1061",
     "01592": "26603",
     "06162": "27470",
+    "01912": "28222",
 }
 
 
@@ -75,17 +77,37 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def mirror_base_url() -> str:
+    """Configured Webb-site-compatible mirror base URL.
+
+    Keep the original 0xmd mirror as the default. A replacement mirror can be
+    tested by setting CCASS_MIRROR_BASE_URL before app startup, or by adding
+    CCASS_MIRROR_BASE_URL / mirror_base_url to ccass_source_config.json.
+    """
+    value = os.getenv("CCASS_MIRROR_BASE_URL", "").strip()
+    if not value:
+        config_path = Path(os.getenv("CCASS_SOURCE_CONFIG", "ccass_source_config.json"))
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+            value = str(data.get("CCASS_MIRROR_BASE_URL") or data.get("mirror_base_url") or "").strip()
+        except (OSError, json.JSONDecodeError):
+            value = ""
+    value = value or BASE_URL
+    return value.rstrip("/")
+
+
 def orgdata_url(stock_code: str) -> str:
-    return f"{BASE_URL}/dbpub/orgdata.asp?code={clean_stock_code(stock_code)}&Submit=current"
+    return f"{mirror_base_url()}/dbpub/orgdata.asp?code={clean_stock_code(stock_code)}&Submit=current"
 
 
 def issue_urls(issue_id: str) -> dict[str, str]:
+    base = mirror_base_url()
     return {
-        "Holdings": f"{BASE_URL}/ccass/choldings.asp?i={issue_id}",
-        "Changes": f"{BASE_URL}/ccass/chldchg.asp?i={issue_id}",
-        "Big Changes": f"{BASE_URL}/ccass/bigchangesissue.asp?i={issue_id}",
-        "Concentration": f"{BASE_URL}/ccass/cconchist.asp?i={issue_id}",
-        "Price History": f"{BASE_URL}/dbpub/hpu.asp?i={issue_id}",
+        "Holdings": f"{base}/ccass/choldings.asp?i={issue_id}",
+        "Changes": f"{base}/ccass/chldchg.asp?i={issue_id}",
+        "Big Changes": f"{base}/ccass/bigchangesissue.asp?i={issue_id}",
+        "Concentration": f"{base}/ccass/cconchist.asp?i={issue_id}",
+        "Price History": f"{base}/dbpub/hpu.asp?i={issue_id}",
     }
 
 

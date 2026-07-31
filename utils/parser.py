@@ -32,6 +32,7 @@ class ParsedCCASS:
     id_lookup_status: str = ""
     source: str = ""
     mirror_status: str = ""
+    mirror_base_url: str = ""
     history_depth_days: int = 0
     db_restored_from_backup: bool = False
     fetched_time: str = ""
@@ -761,6 +762,7 @@ def parse_results(
     if source_metadata:
         parsed.source = safe_str(source_metadata.get("source"))
         parsed.mirror_status = safe_str(source_metadata.get("mirror_status"))
+        parsed.mirror_base_url = safe_str(source_metadata.get("mirror_base_url"))
         try:
             parsed.history_depth_days = int(source_metadata.get("history_depth_days") or 0)
         except (TypeError, ValueError):

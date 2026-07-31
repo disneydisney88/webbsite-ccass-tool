@@ -144,6 +144,7 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * Webb-site issue ID: {parsed.issue_id}
 * Source: {parsed.source or "mirror"}
 * Mirror status: {parsed.mirror_status or "not recorded"}
+* Mirror base URL: {parsed.mirror_base_url or "not recorded"}
 * Local history depth days: {parsed.history_depth_days}
 * DB restored from backup: {parsed.db_restored_from_backup}
 * Holdings latest date: {value_or_reason(parsed.holdings_data_date, holdings_failed, "Holdings")}
@@ -174,6 +175,7 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * ID lookup method: {parsed.id_lookup_method}
 * Source: {parsed.source or "mirror"}
 * Mirror status: {parsed.mirror_status or "not recorded"}
+* Mirror base URL: {parsed.mirror_base_url or "not recorded"}
 * Local history depth days: {parsed.history_depth_days}
 * DB restored from backup: {parsed.db_restored_from_backup}
 * Fetched time: {parsed.fetched_time}

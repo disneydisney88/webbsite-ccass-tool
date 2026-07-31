@@ -16,11 +16,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from utils.fetcher import BASE_URL
+from utils.fetcher import mirror_base_url
 
 
 def officers_url(org_id: str, snapshot_date: str | None = None) -> str:
-    url = f"{BASE_URL}/dbpub/officers.asp?p={org_id}"
+    url = f"{mirror_base_url()}/dbpub/officers.asp?p={org_id}"
     if snapshot_date:
         url += f"&d={snapshot_date}"
     return url
@@ -67,11 +67,12 @@ def parse_shutdown_notice(html: str) -> str | None:
 
 
 def _link_url(href: str) -> str:
+    base = mirror_base_url()
     if href.startswith("http"):
         return href
     if href.startswith("/"):
-        return f"{BASE_URL}{href}"
-    return f"{BASE_URL}/dbpub/{href}"
+        return f"{base}{href}"
+    return f"{base}/dbpub/{href}"
 
 
 def _position_parts(cell) -> tuple[str | None, str | None]:

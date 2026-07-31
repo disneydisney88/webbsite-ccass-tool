@@ -143,6 +143,7 @@ class StockMetadata(BaseModel):
     settlement_note: str = ""
     source: str = ""
     mirror_status: str = ""
+    mirror_base_url: str = ""
     history_depth_days: int = Field(default=0, ge=0)
     db_restored_from_backup: bool = False
     price_source: str = ""
@@ -494,6 +495,7 @@ def minimal_exported_payload(
             "price_source": "",
             "source": "",
             "mirror_status": "",
+            "mirror_base_url": "",
             "history_depth_days": 0,
             "db_restored_from_backup": False,
         },
@@ -795,6 +797,7 @@ def build_stock_payload(
                 "settlement_note": SETTLEMENT_NOTE,
                 "source": metadata.get("source", ""),
                 "mirror_status": metadata.get("mirror_status", ""),
+                "mirror_base_url": metadata.get("mirror_base_url", ""),
                 "history_depth_days": int(metadata.get("history_depth_days") or 0),
                 "db_restored_from_backup": bool(metadata.get("db_restored_from_backup", False)),
                 "price_source": metadata.get("price_source", ""),

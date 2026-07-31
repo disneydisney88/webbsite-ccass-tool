@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
+import utils.source_router as source_router
 from utils.fetch_yahoo import (
     YAHOO_TURNOVER_WARNING,
     YAHOO_VWAP_WARNING,
@@ -97,6 +100,43 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
             self.assertTrue(restored)
             self.assertEqual(path.read_bytes(), b"sqlite bytes")
             self.assertTrue(db_restore_status()["db_restored_from_backup"])
+
+    def test_mirror_probe_cache_is_scoped_to_mirror_base_url(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            cache_path = Path(tmpdir) / "mirror_probe_status.json"
+            with patch.object(source_router, "PROBE_CACHE_PATH", cache_path):
+                with patch.dict(os.environ, {"CCASS_MIRROR_BASE_URL": "https://webbsite.0xmd.com"}):
+                    source_router._write_probe_cache("blocked_by_cloudflare")
+                    self.assertEqual(source_router._probe_cache_today()["status"], "blocked_by_cloudflare")
+                with patch.dict(os.environ, {"CCASS_MIRROR_BASE_URL": "https://webb-database.com"}):
+                    self.assertIsNone(source_router._probe_cache_today())
+
+    def test_mirror_probe_uses_browser_for_200_no_table_shell(self) -> None:
+        request_result = source_router.FetchResult(
+            name="Mirror probe",
+            url="https://webb-database.com/ccass/choldings.asp?i=28222",
+            status=200,
+            ok=False,
+            error_type="ValueError",
+            error_message="no table found",
+        )
+        browser_result = source_router.FetchResult(
+            name="Mirror probe",
+            url="https://webb-database.com/ccass/choldings.asp?i=28222",
+            status=200,
+            ok=True,
+            tables=[pd.DataFrame({"Participant": ["A"], "Holding": [1]})],
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            cache_path = Path(tmpdir) / "mirror_probe_status.json"
+            with (
+                patch.object(source_router, "PROBE_CACHE_PATH", cache_path),
+                patch.object(source_router, "fetch_with_requests", return_value=request_result),
+                patch.object(source_router, "fetch_with_playwright", return_value=browser_result) as browser_fetch,
+                patch.dict(os.environ, {"CCASS_MIRROR_BASE_URL": "https://webb-database.com"}),
+            ):
+                self.assertEqual(source_router.mirror_probe("01912", "28222", timeout=30), "ok")
+                browser_fetch.assert_called_once()
 
     def test_yahoo_ticker_conversion_keeps_hk_four_digit_symbol(self) -> None:
         self.assertEqual(yahoo_ticker_from_code("01449"), "1449.HK")

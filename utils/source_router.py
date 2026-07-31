@@ -14,8 +14,10 @@ from .fetcher import (
     KNOWN_ISSUE_ID_BY_STOCK,
     clean_stock_code,
     fetch_all,
+    fetch_with_playwright,
     fetch_with_requests,
     issue_urls,
+    mirror_base_url,
     orgdata_url,
     resolve_issue_id_from_stock,
 )
@@ -62,15 +64,18 @@ def _probe_cache_today() -> dict[str, object] | None:
         data = json.loads(PROBE_CACHE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return data if data.get("date") == date.today().isoformat() else None
+    return data if data.get("date") == date.today().isoformat() and data.get("mirror_base_url") == mirror_base_url() else None
 
 
 def _write_probe_cache(status: str) -> None:
     PROBE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PROBE_CACHE_PATH.write_text(json.dumps({"date": date.today().isoformat(), "status": status}, indent=2), encoding="utf-8")
+    PROBE_CACHE_PATH.write_text(
+        json.dumps({"date": date.today().isoformat(), "status": status, "mirror_base_url": mirror_base_url()}, indent=2),
+        encoding="utf-8",
+    )
 
 
-def mirror_probe(stock_code: str, issue_id: str, timeout: int) -> str:
+def mirror_probe(stock_code: str, issue_id: str, timeout: int, headless: bool = True) -> str:
     cached = _probe_cache_today()
     if cached:
         return str(cached.get("status") or "unknown")
@@ -80,6 +85,9 @@ def mirror_probe(stock_code: str, issue_id: str, timeout: int) -> str:
         status = "blocked_by_cloudflare"
     elif result.ok:
         status = "ok"
+    elif result.status == 200:
+        browser_result = fetch_with_playwright("Mirror probe", url, timeout=max(10, min(timeout, 45)), headless=headless)
+        status = "ok" if browser_result.ok else "failed"
     else:
         status = "failed"
     _write_probe_cache(status)
@@ -106,7 +114,12 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
     )
     warnings: list[str] = []
     if not code:
-        return SourceBundle(lookup=lookup, results={}, metadata={"source": "sdw+local_db", "mirror_status": mirror_status}, warnings=["Stock code is required for SDW mode."])
+        return SourceBundle(
+            lookup=lookup,
+            results={},
+            metadata={"source": "sdw+local_db", "mirror_status": mirror_status, "mirror_base_url": mirror_base_url()},
+            warnings=["Stock code is required for SDW mode."],
+        )
 
     if not stock_fetched_today(code):
         fetch_result = fetch_sdw_snapshot(code, timeout=timeout)
@@ -136,6 +149,7 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
         metadata={
             "source": "sdw+local_db",
             "mirror_status": mirror_status or "not_used",
+            "mirror_base_url": mirror_base_url(),
             "history_depth_days": built.history_depth_days,
             **db_restore_status(),
         },
@@ -153,7 +167,13 @@ def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, 
         return SourceBundle(
             lookup=lookup,
             results={},
-            metadata={"source": "mirror", "mirror_status": mirror_status, "history_depth_days": history_depth_days(code) if code else 0, **db_restore_status()},
+            metadata={
+                "source": "mirror",
+                "mirror_status": mirror_status,
+                "mirror_base_url": mirror_base_url(),
+                "history_depth_days": history_depth_days(code) if code else 0,
+                **db_restore_status(),
+            },
             warnings=[lookup.message or "Could not resolve Webb-site issue ID."],
         )
     results = fetch_all(lookup.issue_id, stock_code=code, timeout=timeout, headless=headless)
@@ -175,7 +195,13 @@ def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, 
     return SourceBundle(
         lookup=lookup,
         results=results,
-        metadata={"source": "mirror", "mirror_status": mirror_status, "history_depth_days": history_depth_days(code) if code else 0, **db_restore_status()},
+        metadata={
+            "source": "mirror",
+            "mirror_status": mirror_status,
+            "mirror_base_url": mirror_base_url(),
+            "history_depth_days": history_depth_days(code) if code else 0,
+            **db_restore_status(),
+        },
         warnings=warnings,
     )
 
@@ -189,7 +215,7 @@ def fetch_source_bundle_for_stock(stock_code: str, timeout: int = 30, headless: 
     if mode == "mirror":
         return fetch_mirror_bundle(code, issue_id="", timeout=timeout, headless=headless, mirror_status="forced")
 
-    probe_status = mirror_probe(code, issue_id, timeout=timeout)
+    probe_status = mirror_probe(code, issue_id, timeout=timeout, headless=headless)
     if probe_status == "ok":
         return fetch_mirror_bundle(code, issue_id="", timeout=timeout, headless=headless, mirror_status="ok")
     if probe_status == "blocked_by_cloudflare":

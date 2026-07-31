@@ -2,8 +2,10 @@
 
 import os
 import unittest
+from unittest.mock import patch
 
 from utils.events import parse_events_html, parse_events_name, events_url
+from utils.fetcher import issue_urls, orgdata_url
 from utils.officers import (
     extract_org_id_from_html,
     officers_url,
@@ -45,6 +47,12 @@ class EventsParserTest(unittest.TestCase):
     def test_name_and_url(self):
         self.assertIn("Zhongke Group Holdings", parse_events_name(self.html))
         self.assertEqual(events_url("27882"), "https://webbsite.0xmd.com/dbpub/events.asp?i=27882")
+
+    def test_configured_mirror_base_url_is_used(self):
+        with patch.dict(os.environ, {"CCASS_MIRROR_BASE_URL": "https://webb-database.com"}):
+            self.assertEqual(events_url("28222"), "https://webb-database.com/dbpub/events.asp?i=28222")
+            self.assertEqual(orgdata_url("01903"), "https://webb-database.com/dbpub/orgdata.asp?code=01903&Submit=current")
+            self.assertEqual(issue_urls("28222")["Holdings"], "https://webb-database.com/ccass/choldings.asp?i=28222")
 
 
 class OfficersParserTest(unittest.TestCase):
@@ -90,6 +98,13 @@ class OfficersParserTest(unittest.TestCase):
         self.assertEqual(
             officers_url("14909854"), "https://webbsite.0xmd.com/dbpub/officers.asp?p=14909854"
         )
+
+    def test_officers_url_uses_configured_mirror_base_url(self):
+        with patch.dict(os.environ, {"CCASS_MIRROR_BASE_URL": "https://webb-database.com"}):
+            self.assertEqual(
+                officers_url("13795735", "2026-07-31"),
+                "https://webb-database.com/dbpub/officers.asp?p=13795735&d=2026-07-31",
+            )
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from utils.fetcher import BASE_URL
+from utils.fetcher import mirror_base_url
 
 # (needle found in the source header, clean output key)
 _HEADER_ALIASES = [
@@ -31,7 +31,7 @@ _HEADER_ALIASES = [
 
 
 def events_url(issue_id: str) -> str:
-    return f"{BASE_URL}/dbpub/events.asp?i={issue_id}"
+    return f"{mirror_base_url()}/dbpub/events.asp?i={issue_id}"
 
 
 def _clean_text(text: str) -> str:
@@ -48,11 +48,12 @@ def _header_key(header: str) -> str:
 
 
 def _detail_url(href: str) -> str:
+    base = mirror_base_url()
     if href.startswith("http"):
         return href
     if href.startswith("/"):
-        return f"{BASE_URL}{href}"
-    return f"{BASE_URL}/dbpub/{href}"
+        return f"{base}{href}"
+    return f"{base}/dbpub/{href}"
 
 
 def parse_events_name(html: str) -> str:

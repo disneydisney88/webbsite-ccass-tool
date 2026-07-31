@@ -17,6 +17,7 @@ def metadata_dict(parsed: ParsedCCASS) -> dict:
         "id_lookup_status": parsed.id_lookup_status,
         "source": parsed.source,
         "mirror_status": parsed.mirror_status,
+        "mirror_base_url": parsed.mirror_base_url,
         "history_depth_days": parsed.history_depth_days,
         "db_restored_from_backup": parsed.db_restored_from_backup,
         "fetched_time": parsed.fetched_time,

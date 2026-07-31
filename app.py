@@ -1367,6 +1367,7 @@ if fetch_clicked:
                     st.write(f"ID lookup method: {lookup.method}")
                     st.write(f"Source: {source_metadata.get('source', 'mirror')}")
                     st.write(f"Mirror status: {source_metadata.get('mirror_status', '')}")
+                    st.write(f"Mirror base URL: {source_metadata.get('mirror_base_url', '')}")
                     if lookup.message:
                         st.write(lookup.message)
                 else:
@@ -1384,6 +1385,7 @@ if fetch_clicked:
                 st.write(f"Webb-site issue ID: {issue_id}")
                 st.write(f"ID lookup method: {lookup.method}")
                 st.write(f"Source: {source_metadata.get('source', 'mirror')}")
+                st.write(f"Mirror base URL: {source_metadata.get('mirror_base_url', '')}")
             status.update(label="Issue ID resolution complete", state="complete")
 
         if issue_id or bundle:
@@ -1473,6 +1475,7 @@ meta_cols[3].metric("ID lookup status", lookup.status or "-")
 st.caption(
     f"Source mode: {get_source_mode()} | Source used: {source_metadata.get('source', 'not fetched')} | "
     f"Mirror status: {source_metadata.get('mirror_status', 'not recorded')} | "
+    f"Mirror base URL: {source_metadata.get('mirror_base_url', 'not recorded')} | "
     f"Local history depth days: {source_metadata.get('history_depth_days', 0)}"
 )
 if lookup.method:

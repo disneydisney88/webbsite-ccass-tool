@@ -93,6 +93,12 @@ On Streamlit Cloud, Chromium is installed lazily only when a mirror page actuall
 needs browser rendering. A failed browser installation is shown as a warning and
 does not stop the SDW/local DB fallback.
 
+For full mirror Holdings/Changes on Streamlit Cloud, add this App Secret (not a
+GitHub Actions secret): `CCASS_API_TOKEN` with the same value as Render's
+`API_TOKEN`. The Streamlit app then sends its CCASS request to Render's Docker
+runtime, where Chromium dependencies are installed. Optional:
+`CCASS_RENDER_API_URL=https://webbsite-ccass-api.onrender.com`.
+
 Price History is routed independently: `dbpub/hpu.asp` on the configured
 Webb-site mirror is preferred even when Holdings/Changes have fallen back to
 SDW. Yahoo Finance is used only when that price page cannot be fetched.

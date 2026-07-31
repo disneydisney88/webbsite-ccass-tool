@@ -49,7 +49,7 @@ from utils.officers import (
 )
 from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
-from utils.source_router import fetch_source_bundle_for_stock
+from utils.source_router import fetch_mirror_bundle, fetch_source_bundle_for_stock
 from utils.fetch_sdw import fetch_sdw_snapshot
 from utils.fetch_yahoo import fetch_yahoo_price_history
 from utils.snapshot_db import (
@@ -1639,22 +1639,27 @@ async def get_ccass_diff(
     return build_diff_payload(stock_code=code, date_a=date_a, date_b=date_b, timeout=30)
 
 
-def build_full_stock_payload(stock_code: str, timeout: int = 60, headless: bool = True) -> dict[str, Any]:
+def build_full_stock_payload(stock_code: str = "", issue_id: str = "", timeout: int = 60, headless: bool = True) -> dict[str, Any]:
     stock_code = clean_stock_code(stock_code)
-    if not stock_code:
-        raise HTTPException(status_code=400, detail="Provide stock_code.")
-    lookup = resolve_issue_id_from_stock(stock_code, timeout=timeout, headless=headless)
+    issue_id = str(issue_id or "").strip()
+    if not stock_code and not issue_id:
+        raise HTTPException(status_code=400, detail="Provide stock_code or issue_id.")
+    bundle = fetch_mirror_bundle(stock_code, issue_id=issue_id, timeout=timeout, headless=headless, mirror_status="forced")
+    lookup = bundle.lookup
     if lookup.status != "success" or not lookup.issue_id:
         raise HTTPException(status_code=502, detail=lookup.message or "Could not resolve Webb-site issue ID.")
-    results = fetch_all(lookup.issue_id, stock_code=stock_code, timeout=timeout, headless=headless)
+    results = bundle.results
     parsed = parse_results(
         lookup.issue_id,
         results,
         stock_code=lookup.stock_code or stock_code,
         id_lookup_method=lookup.method,
         id_lookup_status=lookup.status,
-        source_metadata={"source": "mirror", "mirror_status": "forced", "history_depth_days": 0},
+        source_metadata=bundle.metadata,
     )
+    for warning in bundle.warnings:
+        if warning not in parsed.analysis_warnings:
+            parsed.analysis_warnings.append(warning)
     return json_safe(parsed_to_json_ready(parsed, results))
 
 
@@ -1901,10 +1906,11 @@ def snapshot_all(
 
 @app.get("/api/stock/full", include_in_schema=False, dependencies=[Depends(verify_bearer_token)])
 def get_stock_full(
-    stock_code: str = Query(..., description="HK stock code, e.g. 01592."),
+    stock_code: str = Query("", description="HK stock code, e.g. 01592."),
+    issue_id: str = Query("", description="Optional Webb-site issue ID."),
     timeout: int = Query(60, ge=10, le=120, description="Timeout per source page in seconds."),
 ) -> dict[str, Any]:
-    return build_full_stock_payload(stock_code=stock_code, timeout=timeout, headless=True)
+    return build_full_stock_payload(stock_code=stock_code, issue_id=issue_id, timeout=timeout, headless=True)
 
 
 app.mount("/mcp", mcp_server.streamable_http_app())

@@ -8,6 +8,16 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+for _secret_name in ("CCASS_API_TOKEN", "CCASS_RENDER_API_URL"):
+    if not os.getenv(_secret_name):
+        try:
+            _secret_value = st.secrets.get(_secret_name, "")
+        except Exception:
+            _secret_value = ""
+        if _secret_value:
+            os.environ[_secret_name] = str(_secret_value)
+os.environ.setdefault("CCASS_RENDER_API_URL", "https://webbsite-ccass-api.onrender.com")
+
 try:
     import altair as alt
 except ImportError:
@@ -31,7 +41,7 @@ from utils.events import events_url, parse_events_html, parse_events_name
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html
 from utils.f10_equity import f10_equity_url, parse_f10_buybacks, parse_f10_share_changes
 from utils.snapshot_db import DB_PATH, export_db_bytes
-from utils.source_router import fetch_mirror_bundle, fetch_sdw_bundle, fetch_source_bundle_for_stock, get_source_mode, stock_code_for_issue_id
+from utils.source_router import fetch_mirror_bundle, fetch_render_api_bundle, fetch_sdw_bundle, fetch_source_bundle_for_stock, get_source_mode, stock_code_for_issue_id
 
 exporters = importlib.reload(exporters)
 combined_stock_csv = exporters.combined_stock_csv
@@ -1375,7 +1385,10 @@ if fetch_clicked:
             else:
                 issue_id = raw_input
                 stock_code = stock_code_for_issue_id(issue_id)
-                if get_source_mode() == "sdw" and stock_code:
+                render_bundle = fetch_render_api_bundle(stock_code, issue_id=issue_id, timeout=int(timeout))
+                if render_bundle is not None:
+                    bundle = render_bundle
+                elif get_source_mode() == "sdw" and stock_code:
                     bundle = fetch_sdw_bundle(stock_code, issue_id=issue_id, timeout=int(timeout), mirror_status="disabled_by_config")
                 else:
                     bundle = fetch_mirror_bundle(stock_code, issue_id=issue_id, timeout=int(timeout), headless=headless, mirror_status="manual_issue_id")

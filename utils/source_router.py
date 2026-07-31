@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import requests
+import pandas as pd
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -27,6 +29,7 @@ from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, hist
 CONFIG_PATH = Path(os.getenv("CCASS_SOURCE_CONFIG", "ccass_source_config.json"))
 PROBE_CACHE_PATH = Path(os.getenv("CCASS_MIRROR_PROBE_CACHE", "data/mirror_probe_status.json"))
 VALID_MODES = {"auto", "mirror", "sdw"}
+RENDER_API_DEFAULT = "https://webbsite-ccass-api.onrender.com"
 
 
 @dataclass
@@ -50,6 +53,45 @@ def get_source_mode() -> str:
         except (OSError, json.JSONDecodeError):
             pass
     return "auto"
+
+
+def fetch_render_api_bundle(stock_code: str = "", issue_id: str = "", timeout: int = 60) -> SourceBundle | None:
+    """Use Render's Docker/Playwright runtime when Streamlit supplies its API token."""
+    token = os.getenv("CCASS_API_TOKEN", "").strip()
+    api_base = os.getenv("CCASS_RENDER_API_URL", "").strip().rstrip("/")
+    if not token or not api_base:
+        return None
+    try:
+        response = requests.get(
+            f"{api_base}/api/stock/full",
+            params={"stock_code": clean_stock_code(stock_code), "issue_id": str(issue_id or ""), "timeout": min(max(timeout, 10), 120)},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout + 20,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        return None
+
+    metadata = data.get("metadata") or {}
+    logs = {str(row.get("section")): row for row in data.get("fetch_log") or []}
+    table_keys = {"Holdings": "holdings", "Changes": "changes", "Big Changes": "bigchanges", "Concentration": "concentration", "Price History": "price_history"}
+    results: dict[str, FetchResult] = {}
+    for section, key in table_keys.items():
+        log = logs.get(section, {})
+        table = pd.DataFrame(data.get(key) or [])
+        results[section] = FetchResult(
+            name=section,
+            url=str(log.get("url") or ""), final_url=str(log.get("final_url") or ""),
+            status=log.get("status_code"), fetched_time=str(log.get("fetched_time") or ""),
+            tables=[table] if not table.empty else [], method="render_api",
+            ok=bool(log.get("ok", not table.empty)), error_type=str(log.get("error_type") or ""),
+            error_message=str(log.get("error_message") or ""), fallback_method_used="streamlit -> render api",
+        )
+    company = pd.DataFrame([{"Code": metadata.get("stock_code", stock_code), "Name": metadata.get("stock_name", "")}])
+    results["Company / orgdata"] = FetchResult(name="Company / orgdata", url="render_api://metadata", tables=[company], method="render_api", ok=True)
+    lookup = IssueLookup(stock_code=str(metadata.get("stock_code") or stock_code), issue_id=str(metadata.get("issue_id") or ""), method=str(metadata.get("id_lookup_method") or "render api"), status=str(metadata.get("id_lookup_status") or "success"))
+    return SourceBundle(lookup=lookup, results=results, metadata={**metadata, "source": "render_api"}, warnings=list(data.get("analysis_warnings") or []))
 
 
 def _is_cloudflare_challenge(result: FetchResult) -> bool:
@@ -248,6 +290,9 @@ def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, 
 
 def fetch_source_bundle_for_stock(stock_code: str, timeout: int = 30, headless: bool = True) -> SourceBundle:
     code = clean_stock_code(stock_code)
+    render_bundle = fetch_render_api_bundle(code, timeout=timeout)
+    if render_bundle is not None:
+        return render_bundle
     mode = get_source_mode()
     issue_id = issue_id_for_stock(code)
     if mode == "sdw":

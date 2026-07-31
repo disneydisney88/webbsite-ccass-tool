@@ -98,6 +98,9 @@ GitHub Actions secret): `CCASS_API_TOKEN` with the same value as Render's
 `API_TOKEN`. The Streamlit app then sends its CCASS request to Render's Docker
 runtime, where Chromium dependencies are installed. Optional:
 `CCASS_RENDER_API_URL=https://webbsite-ccass-api.onrender.com`.
+Render Free may take one to three minutes for a cold full-mirror request; the
+Streamlit bridge deliberately waits for that request instead of falling back to
+the Cloud browser, which lacks Chromium system libraries.
 
 Price History is routed independently: `dbpub/hpu.asp` on the configured
 Webb-site mirror is preferred even when Holdings/Changes have fallen back to

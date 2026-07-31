@@ -64,9 +64,11 @@ def fetch_render_api_bundle(stock_code: str = "", issue_id: str = "", timeout: i
     try:
         response = requests.get(
             f"{api_base}/api/stock/full",
-            params={"stock_code": clean_stock_code(stock_code), "issue_id": str(issue_id or ""), "timeout": min(max(timeout, 10), 120)},
+            params={"stock_code": clean_stock_code(stock_code), "issue_id": str(issue_id or ""), "timeout": 120},
             headers={"Authorization": f"Bearer {token}"},
-            timeout=timeout + 20,
+            # Render Free can need about a minute to wake, then Chromium still
+            # needs time for the two JS-reload CCASS pages.
+            timeout=max(timeout + 90, 180),
         )
         response.raise_for_status()
         data = response.json()

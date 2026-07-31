@@ -70,8 +70,24 @@ def fetch_render_api_bundle(stock_code: str = "", issue_id: str = "", timeout: i
         )
         response.raise_for_status()
         data = response.json()
-    except Exception:
-        return None
+    except requests.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        detail = f"HTTP {status}" if status else type(exc).__name__
+        lookup = IssueLookup(stock_code=clean_stock_code(stock_code), issue_id=str(issue_id or ""), status="failed", message=f"Render API bridge failed: {detail}")
+        return SourceBundle(
+            lookup=lookup,
+            results={},
+            metadata={"source": "render_api", "mirror_status": "render_api_unavailable", "mirror_base_url": mirror_base_url()},
+            warnings=[f"Render API bridge failed: {detail}. Check Streamlit CCASS_API_TOKEN and Render deployment."],
+        )
+    except (TypeError, ValueError) as exc:
+        lookup = IssueLookup(stock_code=clean_stock_code(stock_code), issue_id=str(issue_id or ""), status="failed", message="Render API bridge returned an invalid response.")
+        return SourceBundle(
+            lookup=lookup,
+            results={},
+            metadata={"source": "render_api", "mirror_status": "render_api_invalid_response", "mirror_base_url": mirror_base_url()},
+            warnings=[f"Render API bridge returned an invalid response: {type(exc).__name__}"],
+        )
 
     metadata = data.get("metadata") or {}
     logs = {str(row.get("section")): row for row in data.get("fetch_log") or []}

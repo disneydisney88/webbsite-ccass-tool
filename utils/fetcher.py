@@ -4,6 +4,9 @@ import os
 import re
 import time
 import json
+import subprocess
+import sys
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import StringIO
@@ -14,11 +17,47 @@ from typing import Optional
 # compatible mirror until it becomes available again.
 DEFAULT_BASE_URL = "https://webb-database.com"
 BASE_URL = DEFAULT_BASE_URL
+_PLAYWRIGHT_INSTALL_LOCK = threading.Lock()
+_PLAYWRIGHT_INSTALL_ATTEMPTED = False
+_PLAYWRIGHT_INSTALL_READY = False
+_PLAYWRIGHT_INSTALL_ERROR = ""
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+def ensure_playwright_chromium() -> tuple[bool, str]:
+    """Install Chromium once, only after a mirror page needs browser rendering."""
+    global _PLAYWRIGHT_INSTALL_ATTEMPTED, _PLAYWRIGHT_INSTALL_READY, _PLAYWRIGHT_INSTALL_ERROR
+
+    with _PLAYWRIGHT_INSTALL_LOCK:
+        if _PLAYWRIGHT_INSTALL_READY:
+            return True, ""
+        if _PLAYWRIGHT_INSTALL_ATTEMPTED:
+            return False, _PLAYWRIGHT_INSTALL_ERROR or "Chromium installation was already attempted."
+
+        _PLAYWRIGHT_INSTALL_ATTEMPTED = True
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+            )
+        except Exception as exc:
+            _PLAYWRIGHT_INSTALL_ERROR = f"Could not install Chromium: {exc}"
+            return False, _PLAYWRIGHT_INSTALL_ERROR
+
+        if completed.returncode == 0:
+            _PLAYWRIGHT_INSTALL_READY = True
+            return True, ""
+
+        detail = (completed.stderr or completed.stdout or "unknown installer error").strip().replace("\n", " ")
+        _PLAYWRIGHT_INSTALL_ERROR = f"Could not install Chromium (exit {completed.returncode}): {detail[-500:]}"
+        return False, _PLAYWRIGHT_INSTALL_ERROR
 
 KNOWN_ISSUE_ID_BY_STOCK = {
     "03321": "27882",
@@ -203,11 +242,22 @@ def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> 
                 browser = p.chromium.launch(headless=headless)
             except Exception as launch_exc:
                 message = str(launch_exc).lower()
-                missing_headless_shell = "chromium_headless_shell" in message or "chrome-headless-shell" in message
-                if not headless or not missing_headless_shell:
-                    raise
-                browser = p.chromium.launch(headless=False)
-                result.fallback_method_used = "playwright headless -> headed"
+                missing_executable = "executable doesn't exist" in message or "browser executable" in message
+                if missing_executable:
+                    installed, install_error = ensure_playwright_chromium()
+                    if not installed:
+                        raise RuntimeError(
+                            "Playwright Chromium is unavailable and automatic installation failed. "
+                            f"{install_error}"
+                        ) from launch_exc
+                    browser = p.chromium.launch(headless=headless)
+                    result.fallback_method_used = "playwright installed Chromium on demand"
+                else:
+                    missing_headless_shell = "chromium_headless_shell" in message or "chrome-headless-shell" in message
+                    if not headless or not missing_headless_shell:
+                        raise
+                    browser = p.chromium.launch(headless=False)
+                    result.fallback_method_used = "playwright headless -> headed"
             context = browser.new_context(
                 user_agent=USER_AGENT,
                 viewport={"width": 1440, "height": 1000},

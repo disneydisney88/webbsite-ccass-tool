@@ -89,6 +89,10 @@ You can set it as an environment variable or in `ccass_source_config.json`:
 
 `hpu.asp` may work through plain requests on that mirror, while some CCASS pages first return a small JavaScript cookie reload page. The app does not manually bypass this; it only uses the existing Playwright real-browser fallback when mirror mode or the daily auto probe needs a browser and Playwright is available. If Playwright is unavailable, the app falls back to SDW/local DB instead of crashing.
 
+On Streamlit Cloud, Chromium is installed lazily only when a mirror page actually
+needs browser rendering. A failed browser installation is shown as a warning and
+does not stop the SDW/local DB fallback.
+
 ## Snapshot DB
 
 SDW snapshots are stored in `data/ccass_snapshots.db`. Render Free and Streamlit Cloud filesystems may be ephemeral, so download backups regularly from the Streamlit `Download Snapshot DB Backup` button or the API endpoint:

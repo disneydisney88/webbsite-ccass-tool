@@ -103,6 +103,32 @@ def stock_code_for_issue_id(issue_id: str) -> str:
     return reverse.get(str(issue_id), "")
 
 
+def fetch_webb_price_history(
+    stock_code: str,
+    issue_id: str = "",
+    timeout: int = 30,
+    headless: bool = True,
+) -> tuple[FetchResult | None, IssueLookup]:
+    """Fetch price history independently from the CCASS source decision.
+
+    The Webb-site price page can remain available even when CCASS holdings pages
+    need browser rendering or the router has selected SDW for holdings.
+    """
+    code = clean_stock_code(stock_code)
+    if issue_id:
+        lookup = IssueLookup(stock_code=code, issue_id=issue_id, method="known mapping fallback", status="success")
+    else:
+        lookup = resolve_issue_id_from_stock(code, timeout=timeout, headless=headless)
+    if lookup.status != "success" or not lookup.issue_id:
+        return None, lookup
+
+    result = fetch_with_requests("Price History", issue_urls(lookup.issue_id)["Price History"], timeout=timeout)
+    if result.ok:
+        for table in result.tables:
+            table["price_source"] = "mirror"
+    return result, lookup
+
+
 def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mirror_status: str = "") -> SourceBundle:
     code = clean_stock_code(stock_code)
     lookup = IssueLookup(
@@ -129,15 +155,26 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
         else:
             warnings.append(f"SDW fetch failed: {fetch_result.error_type} - {fetch_result.error_message}")
 
-    if load_price_history(code).empty:
-        price_result = fetch_yahoo_price_history(code, period_days=int(os.getenv("YAHOO_PRICE_PERIOD_DAYS", "90")))
-        if price_result.ok:
-            upsert_price_history(code, price_result.table, source="yahoo")
-            warnings.append(price_result.warning)
+    mirror_price, price_lookup = fetch_webb_price_history(code, lookup.issue_id, timeout=timeout)
+    if price_lookup.issue_id and not lookup.issue_id:
+        lookup.issue_id = price_lookup.issue_id
+        lookup.method = price_lookup.method
+        lookup.status = price_lookup.status
+
+    if not mirror_price or not mirror_price.ok:
+        if load_price_history(code).empty:
+            price_result = fetch_yahoo_price_history(code, period_days=int(os.getenv("YAHOO_PRICE_PERIOD_DAYS", "90")))
+            if price_result.ok:
+                upsert_price_history(code, price_result.table, source="yahoo")
+                warnings.append(price_result.warning)
+            else:
+                warnings.append(f"Yahoo price fetch failed: {price_result.error_type} - {price_result.error_message}")
         else:
-            warnings.append(f"Yahoo price fetch failed: {price_result.error_type} - {price_result.error_message}")
+            warnings.append("Webb-site price fetch failed; showing locally cached price history.")
 
     built = build_results_from_db(code, SDW_URL)
+    if mirror_price and mirror_price.ok:
+        built.results["Price History"] = mirror_price
     warnings.extend(built.warnings or [])
     if built.stock_name:
         lookup.message = f"{lookup.message} Stock name from SDW/local DB: {built.stock_name}"
@@ -182,6 +219,9 @@ def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, 
         mirror_status = "blocked_by_cloudflare"
         warnings.append("MIRROR_BLOCKED: Webb-site mirror returned 403/Cloudflare challenge.")
     price_result = results.get("Price History")
+    if price_result and price_result.ok:
+        for table in price_result.tables:
+            table["price_source"] = "mirror"
     if not price_result or not price_result.ok:
         yahoo_result = fetch_yahoo_price_history(code, period_days=int(os.getenv("YAHOO_PRICE_PERIOD_DAYS", "90")))
         if yahoo_result.ok:

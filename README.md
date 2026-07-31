@@ -93,6 +93,10 @@ On Streamlit Cloud, Chromium is installed lazily only when a mirror page actuall
 needs browser rendering. A failed browser installation is shown as a warning and
 does not stop the SDW/local DB fallback.
 
+Price History is routed independently: `dbpub/hpu.asp` on the configured
+Webb-site mirror is preferred even when Holdings/Changes have fallen back to
+SDW. Yahoo Finance is used only when that price page cannot be fetched.
+
 `packages.txt` deliberately contains only `libglib2.0-0`, the runtime library
 required by Chromium on Streamlit Cloud. Keep this list minimal: adding the old
 large Playwright apt dependency list can make Streamlit's requirements install

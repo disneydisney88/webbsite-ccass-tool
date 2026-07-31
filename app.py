@@ -1385,7 +1385,8 @@ if fetch_clicked:
             else:
                 issue_id = raw_input
                 stock_code = stock_code_for_issue_id(issue_id)
-                render_bundle = fetch_render_api_bundle(stock_code, issue_id=issue_id, timeout=int(timeout))
+                render_enabled = os.getenv("CCASS_RENDER_FULL", "").strip().lower() in {"1", "true", "yes"}
+                render_bundle = fetch_render_api_bundle(stock_code, issue_id=issue_id, timeout=int(timeout)) if render_enabled else None
                 if render_bundle is not None:
                     bundle = render_bundle
                 elif get_source_mode() == "sdw" and stock_code:

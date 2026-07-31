@@ -93,14 +93,15 @@ On Streamlit Cloud, Chromium is installed lazily only when a mirror page actuall
 needs browser rendering. A failed browser installation is shown as a warning and
 does not stop the SDW/local DB fallback.
 
-For full mirror Holdings/Changes on Streamlit Cloud, add this App Secret (not a
-GitHub Actions secret): `CCASS_API_TOKEN` with the same value as Render's
-`API_TOKEN`. The Streamlit app then sends its CCASS request to Render's Docker
-runtime, where Chromium dependencies are installed. Optional:
+The default Streamlit path is fast hybrid mode: HKEX SDW provides current
+Holdings, local snapshots provide Changes, and direct Webb-site pages provide
+Big Changes, Concentration and Price History. It does not launch a browser.
+
+Full mirror Holdings/Changes is optional. To enable the slower Render browser
+path, add these App Secrets (not GitHub Actions secrets):
+`CCASS_API_TOKEN` with the same value as Render's `API_TOKEN`, plus
+`CCASS_RENDER_FULL=true`. Optional:
 `CCASS_RENDER_API_URL=https://webbsite-ccass-api.onrender.com`.
-Render Free may take one to three minutes for a cold full-mirror request; the
-Streamlit bridge deliberately waits for that request instead of falling back to
-the Cloud browser, which lacks Chromium system libraries.
 
 Price History is routed independently: `dbpub/hpu.asp` on the configured
 Webb-site mirror is preferred even when Holdings/Changes have fallen back to

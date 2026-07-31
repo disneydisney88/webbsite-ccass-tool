@@ -254,6 +254,30 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
     )
 
 
+def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = True) -> SourceBundle:
+    """Fast path: SDW for broker holdings, direct mirror pages for Webb-only history."""
+    bundle = fetch_sdw_bundle(stock_code, timeout=timeout, mirror_status="hybrid")
+    issue_id = bundle.lookup.issue_id
+    if not issue_id:
+        return bundle
+
+    urls = issue_urls(issue_id)
+    for section in ("Big Changes", "Concentration"):
+        result = fetch_with_requests(section, urls[section], timeout=timeout)
+        if result.ok:
+            bundle.results[section] = result
+        else:
+            bundle.warnings.append(f"Webb-site {section} fetch failed: {result.error_type} - {result.error_message}")
+    bundle.metadata.update(
+        {
+            "source": "hybrid_sdw_webb",
+            "mirror_status": "direct_pages_only",
+            "mirror_base_url": mirror_base_url(),
+        }
+    )
+    return bundle
+
+
 def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, headless: bool = True, mirror_status: str = "ok") -> SourceBundle:
     code = clean_stock_code(stock_code)
     if issue_id:
@@ -308,23 +332,14 @@ def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, 
 
 def fetch_source_bundle_for_stock(stock_code: str, timeout: int = 30, headless: bool = True) -> SourceBundle:
     code = clean_stock_code(stock_code)
-    render_bundle = fetch_render_api_bundle(code, timeout=timeout)
-    if render_bundle is not None:
-        return render_bundle
     mode = get_source_mode()
+    if os.getenv("CCASS_RENDER_FULL", "").strip().lower() in {"1", "true", "yes"}:
+        render_bundle = fetch_render_api_bundle(code, timeout=timeout)
+        if render_bundle is not None:
+            return render_bundle
     issue_id = issue_id_for_stock(code)
     if mode == "sdw":
         return fetch_sdw_bundle(code, issue_id=issue_id, timeout=timeout, mirror_status="disabled_by_config")
     if mode == "mirror":
         return fetch_mirror_bundle(code, issue_id="", timeout=timeout, headless=headless, mirror_status="forced")
-
-    probe_status = mirror_probe(code, issue_id, timeout=timeout, headless=headless)
-    if probe_status == "ok":
-        return fetch_mirror_bundle(code, issue_id="", timeout=timeout, headless=headless, mirror_status="ok")
-    if probe_status == "blocked_by_cloudflare":
-        bundle = fetch_sdw_bundle(code, issue_id=issue_id, timeout=timeout, mirror_status="blocked_by_cloudflare")
-        bundle.warnings.append("MIRROR_BLOCKED: Webb-site mirror returned 403/Cloudflare challenge; fell back to HKEX SDW + local DB.")
-        return bundle
-    bundle = fetch_sdw_bundle(code, issue_id=issue_id, timeout=timeout, mirror_status=probe_status)
-    bundle.warnings.append(f"Mirror probe status was {probe_status}; fell back to HKEX SDW + local DB.")
-    return bundle
+    return fetch_hybrid_bundle(code, timeout=timeout, headless=headless)

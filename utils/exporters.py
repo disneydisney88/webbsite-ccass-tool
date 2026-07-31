@@ -93,6 +93,13 @@ def extras_frames(parsed: ParsedCCASS, extras: dict | None) -> list[pd.DataFrame
 
 
 def combined_stock_csv(parsed: ParsedCCASS, results: dict[str, FetchResult], extras: dict | None = None) -> bytes:
+    """Create one self-describing CSV for a stock.
+
+    This is deliberately not merely a concatenation of successfully parsed
+    tables.  A downloaded file must remain useful to an API/MCP/AI workflow
+    when a source page is temporarily unavailable, so every section gets a
+    status record with its source and failure detail before any data rows.
+    """
     sections = [
         (
             "Holdings",
@@ -125,36 +132,92 @@ def combined_stock_csv(parsed: ParsedCCASS, results: dict[str, FetchResult], ext
             parsed.price_history_table,
         ),
     ]
-    frames = []
-    for section, description, data_date, df in sections:
-        if df is None or df.empty:
-            continue
-        result = results.get(section)
-        out = df.copy()
-        out.insert(0, "section", section)
-        out.insert(1, "row_meaning", description)
-        out.insert(2, "stock_code", parsed.stock_code)
-        out.insert(3, "stock_name", parsed.stock_name)
-        out.insert(4, "webbsite_issue_id", parsed.issue_id)
-        out.insert(5, "fetched_time", parsed.fetched_time)
-        out.insert(6, "data_date_or_latest_date", data_date)
-        out.insert(7, "source_url", result.final_url or result.url if result else "")
-        frames.append(out)
-    frames.extend(extras_frames(parsed, extras))
-    if not frames:
-        return pd.DataFrame(
+    base_columns = [
+        "section", "record_type", "row_meaning", "stock_code", "stock_name",
+        "webbsite_issue_id", "fetched_time", "data_date_or_latest_date",
+        "source_url", "fetch_status", "fetch_method", "http_status",
+        "error_type", "error_message", "fallback_method_used",
+    ]
+    frames = [
+        pd.DataFrame(
             [
                 {
-                    "section": "No parsed data",
-                    "row_meaning": "No parsed tables were available",
+                    "section": "Metadata",
+                    "record_type": "metadata",
+                    "row_meaning": "File-level source and identity metadata for this export",
                     "stock_code": parsed.stock_code,
                     "stock_name": parsed.stock_name,
                     "webbsite_issue_id": parsed.issue_id,
                     "fetched_time": parsed.fetched_time,
+                    "source": parsed.source,
+                    "mirror_status": parsed.mirror_status,
+                    "mirror_base_url": parsed.mirror_base_url,
+                    "history_depth_days": parsed.history_depth_days,
+                    "db_restored_from_backup": parsed.db_restored_from_backup,
                 }
             ]
-        ).to_csv(index=False).encode("utf-8-sig")
-    return pd.concat(frames, ignore_index=True, sort=False).to_csv(index=False).encode("utf-8-sig")
+        )
+    ]
+    for section, description, data_date, df in sections:
+        if df is None or df.empty:
+            df = pd.DataFrame()
+        result = results.get(section)
+        status_row = {
+            "section": section,
+            "record_type": "fetch_status",
+            "row_meaning": description,
+            "stock_code": parsed.stock_code,
+            "stock_name": parsed.stock_name,
+            "webbsite_issue_id": parsed.issue_id,
+            "fetched_time": parsed.fetched_time,
+            "data_date_or_latest_date": data_date,
+            "source_url": (result.final_url or result.url) if result else "",
+            "fetch_status": "success" if result and result.ok else "failed_or_no_parsed_table",
+            "fetch_method": result.method if result else "not_fetched",
+            "http_status": result.status if result else "",
+            "error_type": result.error_type if result else "NO_RESULT",
+            "error_message": result.error_message if result else "No fetch result was returned for this section.",
+            "fallback_method_used": result.fallback_method_used if result else "",
+        }
+        frames.append(pd.DataFrame([status_row]))
+        if df.empty:
+            continue
+        out = df.copy()
+        out.insert(0, "section", section)
+        out.insert(1, "record_type", "data")
+        out.insert(2, "row_meaning", description)
+        out.insert(3, "stock_code", parsed.stock_code)
+        out.insert(4, "stock_name", parsed.stock_name)
+        out.insert(5, "webbsite_issue_id", parsed.issue_id)
+        out.insert(6, "fetched_time", parsed.fetched_time)
+        out.insert(7, "data_date_or_latest_date", data_date)
+        out.insert(8, "source_url", result.final_url or result.url if result else "")
+        out.insert(9, "fetch_status", "success" if result and result.ok else "parsed_from_available_data")
+        out.insert(10, "fetch_method", result.method if result else "")
+        out.insert(11, "http_status", result.status if result else "")
+        out.insert(12, "error_type", result.error_type if result else "")
+        out.insert(13, "error_message", result.error_message if result else "")
+        out.insert(14, "fallback_method_used", result.fallback_method_used if result else "")
+        frames.append(out)
+    for warning in parsed.analysis_warnings:
+        frames.append(
+            pd.DataFrame(
+                [{
+                    "section": "Data Quality Warnings",
+                    "record_type": "warning",
+                    "row_meaning": "Warning that must be considered before analysis",
+                    "stock_code": parsed.stock_code,
+                    "stock_name": parsed.stock_name,
+                    "webbsite_issue_id": parsed.issue_id,
+                    "fetched_time": parsed.fetched_time,
+                    "error_message": warning,
+                }]
+            )
+        )
+    frames.extend(extras_frames(parsed, extras))
+    output = pd.concat(frames, ignore_index=True, sort=False)
+    ordered = base_columns + [column for column in output.columns if column not in base_columns]
+    return output.reindex(columns=ordered).to_csv(index=False).encode("utf-8-sig")
 
 
 def raw_preview_dataframe(results: dict[str, FetchResult]) -> pd.DataFrame:

@@ -10,7 +10,9 @@ from io import StringIO
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_BASE_URL = "https://webbsite.0xmd.com"
+# 0xmd is temporarily blocked by Cloudflare. Keep it configurable, but use the
+# compatible mirror until it becomes available again.
+DEFAULT_BASE_URL = "https://webb-database.com"
 BASE_URL = DEFAULT_BASE_URL
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

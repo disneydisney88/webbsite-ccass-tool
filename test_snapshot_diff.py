@@ -36,7 +36,7 @@ class ParseSnapshotTest(unittest.TestCase):
     def test_snapshot_url(self):
         self.assertEqual(
             snapshot_url("27470", "2026-06-11"),
-            "https://webbsite.0xmd.com/ccass/choldings.asp?d=2026-06-11&i=27470",
+            "https://webb-database.com/ccass/choldings.asp?d=2026-06-11&i=27470",
         )
 
 

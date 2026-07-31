@@ -46,7 +46,7 @@ class EventsParserTest(unittest.TestCase):
 
     def test_name_and_url(self):
         self.assertIn("Zhongke Group Holdings", parse_events_name(self.html))
-        self.assertEqual(events_url("27882"), "https://webbsite.0xmd.com/dbpub/events.asp?i=27882")
+        self.assertEqual(events_url("27882"), "https://webb-database.com/dbpub/events.asp?i=27882")
 
     def test_configured_mirror_base_url_is_used(self):
         with patch.dict(os.environ, {"CCASS_MIRROR_BASE_URL": "https://webb-database.com"}):
@@ -96,7 +96,7 @@ class OfficersParserTest(unittest.TestCase):
     def test_name_and_url(self):
         self.assertIn("中科集團控股", parse_officers_name(self.html))
         self.assertEqual(
-            officers_url("14909854"), "https://webbsite.0xmd.com/dbpub/officers.asp?p=14909854"
+            officers_url("14909854"), "https://webb-database.com/dbpub/officers.asp?p=14909854"
         )
 
     def test_officers_url_uses_configured_mirror_base_url(self):

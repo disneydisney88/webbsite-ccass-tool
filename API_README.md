@@ -53,16 +53,17 @@ Allowed values:
 - `mirror`: force the original Webb-site mirror code path. This keeps the old fetcher/parser intact and is useful when the mirror is unblocked.
 - `sdw`: use HKEX SDW plus local snapshots only.
 
-Optional mirror base URL:
-
-```text
-CCASS_MIRROR_BASE_URL=https://webbsite.0xmd.com
-```
-
-The default remains the original 0xmd mirror. To test the alternate mirror, set:
+The default mirror base URL is `https://webb-database.com` while 0xmd is
+temporarily unavailable. To explicitly set it:
 
 ```text
 CCASS_MIRROR_BASE_URL=https://webb-database.com
+```
+
+To switch back to the original 0xmd mirror after it becomes available again, set:
+
+```text
+CCASS_MIRROR_BASE_URL=https://webbsite.0xmd.com
 ```
 
 The same value can be set in `ccass_source_config.json` as `CCASS_MIRROR_BASE_URL` or `mirror_base_url`. Probe-cache entries are scoped to the configured mirror base URL, so a previous 0xmd blocked result will not suppress testing `webb-database.com`.
@@ -74,7 +75,7 @@ The API response keeps the existing JSON field names and only adds:
   "metadata": {
     "source": "mirror or sdw+local_db",
     "mirror_status": "ok, blocked_by_cloudflare, forced, disabled_by_config, or failed",
-    "mirror_base_url": "https://webbsite.0xmd.com",
+    "mirror_base_url": "https://webb-database.com",
     "history_depth_days": 1,
     "db_restored_from_backup": false
   }

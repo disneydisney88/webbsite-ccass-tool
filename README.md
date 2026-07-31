@@ -64,16 +64,18 @@ No Cloudflare bypass, CAPTCHA solver, stealth browser, or paid-wall circumventio
 
 ### Webb-site Mirror Base URL
 
-The original 0xmd mirror remains the default:
-
-```text
-CCASS_MIRROR_BASE_URL=https://webbsite.0xmd.com
-```
-
-To test another Webb-site-compatible mirror without deleting the SDW snapshot/backup path, set:
+The compatible `webb-database.com` mirror is the default while 0xmd is
+temporarily unavailable:
 
 ```text
 CCASS_MIRROR_BASE_URL=https://webb-database.com
+```
+
+To switch back to the original 0xmd mirror after it becomes available again,
+without deleting the SDW snapshot/backup path, set:
+
+```text
+CCASS_MIRROR_BASE_URL=https://webbsite.0xmd.com
 ```
 
 You can set it as an environment variable or in `ccass_source_config.json`:

@@ -26,6 +26,7 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 
 def ensure_playwright_chromium() -> tuple[bool, str]:
@@ -78,9 +79,11 @@ class FetchResult:
     url: str
     final_url: str = ""
     status: Optional[int] = None
+    status_reason: str = ""
     fetched_time: str = ""
     html: str = ""
     raw_text: str = ""
+    response_snippet: str = ""
     tables: list[pd.DataFrame] = field(default_factory=list)
     method: str = ""
     ok: bool = False
@@ -94,6 +97,7 @@ class FetchResult:
             "url": self.url,
             "final_url": self.final_url,
             "status_code": self.status,
+            "status_reason": self.status_reason,
             "fetched_time": self.fetched_time,
             "fetch_method": self.method,
             "fallback_method_used": self.fallback_method_used,
@@ -101,6 +105,7 @@ class FetchResult:
             "tables_found": len(self.tables),
             "error_type": self.error_type,
             "error_message": self.error_message,
+            "response_snippet": self.response_snippet,
         }
 
 
@@ -192,41 +197,119 @@ def html_to_text(html: str, limit: int = 8000) -> str:
     return text[:limit]
 
 
+def body_head(text: str, limit: int = 500) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()[:limit]
+
+
+def looks_like_js_cookie_challenge(html: str) -> bool:
+    text = (html or "").lower()
+    return bool(
+        ("setcookie()" in text and "location.reload" in text)
+        or ("document.cookie" in text and "location.reload" in text)
+        or ("please enable cookies" in text)
+    )
+
+
+def upstream_failure_message(result: FetchResult) -> str:
+    parts = []
+    if result.status is not None:
+        status_text = f"HTTP {result.status}"
+        if result.status_reason:
+            status_text += f" {result.status_reason}"
+        parts.append(status_text)
+    if result.final_url and result.final_url != result.url:
+        parts.append(f"final_url={result.final_url}")
+    else:
+        parts.append(f"url={result.url}")
+    if result.response_snippet:
+        parts.append(f"body_head={result.response_snippet}")
+    return "; ".join(parts)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
     import requests
 
+    attempts = max(1, _int_env("FETCH_RETRY_ATTEMPTS", 3))
+    backoff = max(0.0, _float_env("FETCH_RETRY_BACKOFF_SECONDS", 0.75))
     result = FetchResult(name=name, url=url, fetched_time=now_iso(), method="requests")
-    try:
-        response = requests.get(
-            url,
-            timeout=timeout,
-            headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-        )
-        result.status = response.status_code
-        result.final_url = response.url
-        response.raise_for_status()
-        if response.apparent_encoding:
-            response.encoding = response.apparent_encoding
-        result.html = response.text
-        result.raw_text = html_to_text(response.text)
-        challenge_text = f"{response.status_code} {response.text[:1000]}".lower()
-        if response.status_code == 403 or "cloudflare" in challenge_text or "turnstile" in challenge_text or "cf-chl" in challenge_text:
-            result.error_type = "MIRROR_BLOCKED"
-            result.error_message = "Webb-site mirror returned 403 or Cloudflare human verification challenge."
-            result.ok = False
+    last_error_type = ""
+    last_error_message = ""
+    for attempt in range(1, attempts + 1):
+        result.method = "requests" if attempt == 1 else f"requests retry {attempt}/{attempts}"
+        try:
+            response = requests.get(
+                url,
+                timeout=timeout,
+                headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+            )
+            result.status = response.status_code
+            result.status_reason = response.reason or ""
+            result.final_url = response.url
+            if response.apparent_encoding:
+                response.encoding = response.apparent_encoding
+            result.html = response.text
+            result.raw_text = html_to_text(response.text)
+            result.response_snippet = body_head(response.text)
+            challenge_text = f"{response.status_code} {response.text[:1000]}".lower()
+            if response.status_code == 403 or "cloudflare" in challenge_text or "turnstile" in challenge_text or "cf-chl" in challenge_text:
+                result.error_type = "MIRROR_BLOCKED"
+                result.error_message = f"Webb-site mirror returned 403 or human verification challenge. {upstream_failure_message(result)}"
+                result.ok = False
+                return result
+            if response.status_code >= 400:
+                result.error_type = "HTTPError"
+                result.error_message = upstream_failure_message(result)
+                result.ok = False
+                if response.status_code in RETRYABLE_STATUS_CODES and attempt < attempts:
+                    time.sleep(backoff * (2 ** (attempt - 1)))
+                    continue
+                return result
+            if looks_like_js_cookie_challenge(response.text):
+                result.error_type = "SOURCE_CHALLENGE"
+                result.error_message = f"Upstream returned a JavaScript cookie/reload challenge instead of data. {upstream_failure_message(result)}"
+                result.ok = False
+                return result
+            result.tables = extract_tables_from_html(response.text)
+            if not result.tables:
+                result.error_type = "ValueError"
+                result.error_message = f"no table found. {upstream_failure_message(result)}"
+                result.ok = False
+                return result
+            result.ok = True
             return result
-        result.tables = extract_tables_from_html(response.text)
-        if not result.tables:
-            raise ValueError("no table found")
-        result.ok = True
-    except Exception as exc:
-        if result.status == 403:
-            result.error_type = "MIRROR_BLOCKED"
-            result.error_message = "Webb-site mirror returned 403 or Cloudflare human verification challenge."
-        else:
-            result.error_type = type(exc).__name__
-            result.error_message = str(exc)
-        result.ok = False
+        except requests.RequestException as exc:
+            response = getattr(exc, "response", None)
+            if response is not None:
+                result.status = response.status_code
+                result.status_reason = response.reason or ""
+                result.final_url = response.url
+                result.response_snippet = body_head(getattr(response, "text", ""))
+            last_error_type = type(exc).__name__
+            last_error_message = str(exc)
+            if attempt < attempts:
+                time.sleep(backoff * (2 ** (attempt - 1)))
+                continue
+        except Exception as exc:
+            last_error_type = type(exc).__name__
+            last_error_message = str(exc)
+            break
+    result.error_type = last_error_type or result.error_type or "FetchError"
+    result.error_message = last_error_message or result.error_message or upstream_failure_message(result)
+    result.ok = False
     return result
 
 

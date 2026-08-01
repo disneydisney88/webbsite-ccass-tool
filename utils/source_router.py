@@ -114,7 +114,7 @@ def fetch_render_api_bundle(stock_code: str = "", issue_id: str = "", timeout: i
 
 def _is_cloudflare_challenge(result: FetchResult) -> bool:
     text = f"{result.status} {result.error_type} {result.error_message} {result.raw_text[:500]} {result.html[:500]}".lower()
-    return result.status == 403 or "cloudflare" in text or "turnstile" in text or "cf-chl" in text
+    return result.status == 403 or "source_challenge" in text or "cloudflare" in text or "turnstile" in text or "cf-chl" in text
 
 
 def _probe_cache_today() -> dict[str, object] | None:

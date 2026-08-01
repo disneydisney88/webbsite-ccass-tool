@@ -38,11 +38,13 @@ def classify_fetch_message(error_type: str | None, message: str | None) -> str:
         return "COLD_START"
     if "timeout" in text or "timed out" in text:
         return "SOURCE_TIMEOUT"
+    if "source_challenge" in text or "cookie/reload challenge" in text or "human verification" in text:
+        return "SOURCE_FETCH_FAILED"
     if "no table" in text or "no matching table" in text or "table format" in text:
         return "SOURCE_CHANGED"
     if "parsing failed" in text or "parse" in text:
         return "PARSE_ERROR"
-    if any(token in text for token in ("connection", "dns", "name resolution", "refused", "reset", "502", "503", "504")):
+    if any(token in text for token in ("connection", "dns", "name resolution", "refused", "reset", "402", "403", "429", "502", "503", "504")):
         return "SOURCE_FETCH_FAILED"
     if "403" in text or "forbidden" in text:
         return "SOURCE_FETCH_FAILED"

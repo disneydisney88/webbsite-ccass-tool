@@ -1,8 +1,10 @@
 """Tests for structured error codes (handover 1.2)."""
 
 import unittest
+from unittest.mock import patch
 
 import api
+from utils.fetcher import fetch_with_requests
 from utils.errors import classify_fetch_message, errors_from_fetch_summary, structured_error
 
 
@@ -13,6 +15,7 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(classify_fetch_message("ValueError", "no table found"), "SOURCE_CHANGED")
         self.assertEqual(classify_fetch_message("ConnectionError", "connection refused"), "SOURCE_FETCH_FAILED")
         self.assertEqual(classify_fetch_message("HTTPError", "403 Forbidden"), "SOURCE_FETCH_FAILED")
+        self.assertEqual(classify_fetch_message("SOURCE_CHALLENGE", "cookie/reload challenge"), "SOURCE_FETCH_FAILED")
 
     def test_structured_error_retry_flag(self):
         self.assertTrue(structured_error("COLD_START", "x")["retry_recommended"])
@@ -39,6 +42,31 @@ class UnauthorizedStructuredTest(unittest.TestCase):
         self.assertEqual(exc.status_code, 401)
         self.assertEqual(exc.detail["error_code"], "AUTH_FAILED")
         self.assertFalse(exc.detail["retry_recommended"])
+
+
+class FetchDiagnosticsTest(unittest.TestCase):
+    def test_js_cookie_challenge_is_reported_with_body_head(self):
+        class FakeResponse:
+            status_code = 200
+            reason = "OK"
+            url = "https://webb-database.com/ccass/choldings.asp?i=26603"
+            apparent_encoding = "utf-8"
+            text = "<script>setCookie(); location.reload();</script>"
+
+        with patch("requests.get", return_value=FakeResponse()):
+            result = fetch_with_requests("Holdings", FakeResponse.url, timeout=1)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_type, "SOURCE_CHALLENGE")
+        self.assertIn("JavaScript cookie/reload challenge", result.error_message)
+        self.assertIn("setCookie", result.response_snippet)
+
+
+class HealthUpstreamsTest(unittest.TestCase):
+    def test_health_can_include_upstream_probes(self):
+        with patch.object(api, "probe_upstreams", return_value={"probes": [{"source": "webbsite", "ok": False}]}):
+            payload = api.health(upstreams=True)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["upstreams"]["probes"][0]["source"], "webbsite")
 
 
 if __name__ == "__main__":

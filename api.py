@@ -52,6 +52,7 @@ from utils.parser import parse_date_value, parse_results, to_number
 from utils.source_router import fetch_mirror_bundle, fetch_source_bundle_for_stock
 from utils.fetch_sdw import fetch_sdw_snapshot
 from utils.fetch_yahoo import fetch_yahoo_price_history
+from utils.upstream_probe import probe_upstreams
 from utils.snapshot_db import (
     DB_PATH,
     db_restore_status,
@@ -67,9 +68,16 @@ from utils.snapshot_db import (
 )
 
 
+def int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 API_TITLE = "Webb-site CCASS Research API"
 API_VERSION = "1.11.0"
-CACHE_TTL_SECONDS = 600
+CACHE_TTL_SECONDS = max(0, int_env("API_CACHE_TTL_SECONDS", 86400))
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
 # Fetch the CCASS sections concurrently so a slow or late section (notably
@@ -131,6 +139,7 @@ class HealthResponse(BaseModel):
     ok: bool
     service: str
     version: str
+    upstreams: dict[str, Any] | None = None
 
 
 class StockMetadata(BaseModel):
@@ -1674,8 +1683,11 @@ def root() -> dict[str, Any]:
 
 
 @app.get("/health", response_model=HealthResponse)
-def health() -> dict[str, Any]:
-    return {"ok": True, "service": API_TITLE, "version": API_VERSION}
+def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and F10 upstreams.")) -> dict[str, Any]:
+    payload: dict[str, Any] = {"ok": True, "service": API_TITLE, "version": API_VERSION}
+    if upstreams:
+        payload["upstreams"] = probe_upstreams(timeout=5)
+    return payload
 
 
 @app.on_event("startup")

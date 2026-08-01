@@ -386,11 +386,25 @@ class ApiAuthTests(unittest.TestCase):
             warnings=[],
         )
         exported = fake_base_payload(row_count=5)["exported"]
-        with patch.object(api, "fetch_source_bundle_for_stock", return_value=bundle) as fetch_source:
-            with patch.object(api, "parse_results", return_value=object()):
-                with patch.object(api, "parsed_to_json_ready", return_value=exported):
-                    first = api.build_base_payload("01592", timeout=30)
-                    second = api.build_base_payload("01592", timeout=30)
+        with patch.object(
+            api,
+            "probe_url",
+            return_value={
+                "error_type": "",
+                "status_code": 200,
+                "reason": "OK",
+                "final_url": "https://webb-database.com/ccass/choldings.asp?i=12345",
+                "url": "https://webb-database.com/ccass/choldings.asp?i=12345",
+                "body_head": "",
+                "attempts": 1,
+                "error_message": "",
+            },
+        ):
+            with patch.object(api, "fetch_source_bundle_for_stock", return_value=bundle) as fetch_source:
+                with patch.object(api, "parse_results", return_value=object()):
+                    with patch.object(api, "parsed_to_json_ready", return_value=exported):
+                        first = api.build_base_payload("01592", timeout=30)
+                        second = api.build_base_payload("01592", timeout=30)
         self.assertEqual(first, second)
         self.assertEqual(fetch_source.call_count, 1)
 

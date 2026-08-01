@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import os
@@ -8,6 +9,8 @@ import secrets
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Empty, Queue
+from threading import Thread
 from typing import Annotated, Any
 
 import pandas as pd
@@ -49,10 +52,10 @@ from utils.officers import (
 )
 from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
-from utils.source_router import fetch_mirror_bundle, fetch_source_bundle_for_stock
+from utils.source_router import fetch_mirror_bundle, fetch_source_bundle_for_stock, issue_id_for_stock
 from utils.fetch_sdw import fetch_sdw_snapshot
 from utils.fetch_yahoo import fetch_yahoo_price_history
-from utils.upstream_probe import probe_upstreams
+from utils.upstream_probe import probe_url, probe_upstreams
 from utils.snapshot_db import (
     DB_PATH,
     db_restore_status,
@@ -446,6 +449,18 @@ def build_base_payload(stock_code: str, timeout: int, headless: bool = True) -> 
     if cached:
         return cached
 
+    known_issue_id = issue_id_for_stock(stock_code)
+    if known_issue_id:
+        probe = probe_url(
+            "webbsite_holdings",
+            issue_urls(known_issue_id)["Holdings"],
+            timeout=max(3, min(timeout, 6)),
+        )
+        if probe.get("error_type") in {"SOURCE_CHALLENGE", "MIRROR_BLOCKED"} or probe.get("status_code") in {402, 403}:
+            payload = probe_failure_base_payload(stock_code=stock_code, issue_id=known_issue_id, probe=probe)
+            cache_set(stock_code, payload)
+            return copy.deepcopy(payload)
+
     bundle = fetch_source_bundle_for_stock(stock_code, timeout=timeout, headless=headless)
     lookup = bundle.lookup
     warnings = []
@@ -515,6 +530,41 @@ def minimal_exported_payload(
         "fetch_summary": [result.to_log() for result in results.values()],
         "analysis_warnings": warnings,
     }
+
+
+def probe_failure_base_payload(stock_code: str, issue_id: str, probe: dict[str, Any]) -> dict[str, Any]:
+    error_type = str(probe.get("error_type") or "SOURCE_FETCH_FAILED")
+    status_code = probe.get("status_code")
+    status_reason = str(probe.get("reason") or "")
+    final_url = str(probe.get("final_url") or probe.get("url") or "")
+    body_head = str(probe.get("body_head") or "")
+    warnings = [
+        f"Webb-site probe failed: {error_type}",
+    ]
+    exported = minimal_exported_payload(stock_code=stock_code, issue_id=issue_id, warnings=warnings, results={})
+    exported["metadata"].update(
+        {
+            "source": "mirror",
+            "mirror_status": error_type,
+            "mirror_base_url": probe.get("url", "").split("/ccass/", 1)[0] if probe.get("url") else "",
+        }
+    )
+    exported["fetch_summary"] = [
+        {
+            "Section": "Holdings",
+            "Status": "failed",
+            "status_code": status_code,
+            "status_reason": status_reason,
+            "final_url": final_url,
+            "url": str(probe.get("url") or ""),
+            "Error type": error_type,
+            "Error": str(probe.get("error_message") or error_type),
+            "response_snippet": body_head,
+            "ok": False,
+            "attempts": int(probe.get("attempts") or 1),
+        }
+    ]
+    return {"exported": exported, "issue_id": issue_id}
 
 
 def numeric_value(record: dict[str, Any], keys: list[str]) -> float:
@@ -774,6 +824,79 @@ def mcp_exception_payload(tool: str, exc: Exception) -> dict[str, Any]:
         "message": message,
         "retry_recommended": retry,
     }
+
+
+def mcp_timeout_payload(tool: str, message: str = "Tool execution exceeded the MCP wall-clock budget.") -> dict[str, Any]:
+    return {
+        "ok": False,
+        "tool": tool,
+        "error_code": "SOURCE_TIMEOUT",
+        "message": message,
+        "retry_recommended": True,
+    }
+
+
+def mcp_probe_challenge_payload(tool: str, probe: dict[str, Any]) -> dict[str, Any]:
+    error_code = "SOURCE_CHALLENGE" if str(probe.get("error_type") or "") == "SOURCE_CHALLENGE" else "SOURCE_FETCH_FAILED"
+    return {
+        "ok": False,
+        "tool": tool,
+        "error_code": error_code,
+        "status_code": probe.get("status_code"),
+        "status_reason": probe.get("reason", ""),
+        "final_url": probe.get("final_url") or probe.get("url") or "",
+        "body_head": probe.get("body_head") or "",
+        "attempts": probe.get("attempts") or 1,
+        "message": probe.get("error_message") or "Webb-site upstream failed.",
+        "retry_recommended": False,
+    }
+
+
+async def run_ccass_tool_with_budget(
+    tool: str,
+    work,
+    *,
+    stock_code: str = "",
+    probe_timeout: int = 4,
+    tool_timeout: int = 8,
+) -> dict[str, Any]:
+    code = clean_stock_code(stock_code)
+    known_issue_id = issue_id_for_stock(code) if code else ""
+    if known_issue_id:
+        probe = probe_url(
+            "webbsite_holdings",
+            issue_urls(known_issue_id)["Holdings"],
+            timeout=max(3, min(probe_timeout, 6)),
+        )
+        if probe.get("error_type") in {"SOURCE_CHALLENGE", "MIRROR_BLOCKED"} or probe.get("status_code") in {402, 403}:
+            return mcp_probe_challenge_payload(tool, probe)
+
+    def run_in_daemon_thread() -> dict[str, Any]:
+        result_queue: Queue[tuple[str, Any]] = Queue(maxsize=1)
+
+        def runner() -> None:
+            try:
+                result_queue.put(("result", work()))
+            except Exception as exc:  # pragma: no cover - returned to caller below
+                result_queue.put(("error", exc))
+
+        thread = Thread(target=runner, daemon=True)
+        thread.start()
+        try:
+            kind, value = result_queue.get(timeout=tool_timeout)
+        except Empty:
+            return mcp_timeout_payload(tool)
+        if kind == "error":
+            raise value
+        return value
+
+    try:
+        return await asyncio.to_thread(run_in_daemon_thread)
+    except Exception as exc:
+        if isinstance(exc, TimeoutError):
+            logger.warning("%s exceeded MCP wall-clock budget", tool)
+            return mcp_timeout_payload(tool)
+        raise
 
 
 def build_stock_payload(
@@ -1558,7 +1681,7 @@ async def get_ccass_stock_data(
     big_changes_limit: Annotated[int, Field(ge=1, le=100)] = 10,
     concentration_limit: Annotated[int, Field(ge=1, le=100)] = 15,
 ) -> dict[str, Any]:
-    try:
+    def work() -> dict[str, Any]:
         return build_stock_payload(
             stock_code=code,
             timeout=20,
@@ -1568,6 +1691,9 @@ async def get_ccass_stock_data(
             concentration_limit=concentration_limit,
             headless=True,
         )
+
+    try:
+        return await run_ccass_tool_with_budget("get_ccass_stock_data", work, stock_code=code, tool_timeout=8)
     except Exception as exc:
         logger.exception("get_ccass_stock_data failed")
         return mcp_exception_payload("get_ccass_stock_data", exc)
@@ -1584,8 +1710,11 @@ async def get_webbsite_price_history(
     code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 03321.")],
     limit: Annotated[int, Field(ge=1, le=200)] = 80,
 ) -> dict[str, Any]:
-    try:
+    def work() -> dict[str, Any]:
         return build_price_history_payload(stock_code=code, limit=limit, timeout=20, headless=True)
+
+    try:
+        return await run_ccass_tool_with_budget("get_webbsite_price_history", work, stock_code=code, tool_timeout=8)
     except Exception as exc:
         logger.exception("get_webbsite_price_history failed")
         return mcp_exception_payload("get_webbsite_price_history", exc)
@@ -1668,8 +1797,13 @@ async def get_stock_capital(
 async def screen_stocks(
     codes: Annotated[list[str], Field(description="HK stock codes, e.g. ['01592','02028','06162']. Max 20.")],
 ) -> dict[str, Any]:
-    try:
+    first_code = clean_stock_code(codes[0]) if codes else ""
+
+    def work() -> dict[str, Any]:
         return build_screen_payload(codes=codes, timeout=12)
+
+    try:
+        return await run_ccass_tool_with_budget("screen_stocks", work, stock_code=first_code, tool_timeout=8)
     except Exception as exc:
         logger.exception("screen_stocks failed")
         return mcp_exception_payload("screen_stocks", exc)

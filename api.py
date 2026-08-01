@@ -76,7 +76,7 @@ def int_env(name: str, default: int) -> int:
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.12.0"
+API_VERSION = "1.12.1"
 CACHE_TTL_SECONDS = max(0, int_env("API_CACHE_TTL_SECONDS", 86400))
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]

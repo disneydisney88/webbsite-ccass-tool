@@ -196,8 +196,9 @@ class ApiAuthTests(unittest.TestCase):
             error_message="",
         )
         with patch.object(api, "build_base_payload", return_value=base):
-            with patch.object(api, "fetch_yahoo_price_history", return_value=yahoo_result):
-                payload = api.build_price_history_payload("01592", limit=2)
+            with patch.object(api, "load_stock_meta", return_value={"name": "Mock Stock", "issued_shares": "10,000,000", "issued_shares_as_of": "2026-06-05"}):
+                with patch.object(api, "fetch_yahoo_price_history", return_value=yahoo_result):
+                    payload = api.build_price_history_payload("01592", limit=2)
         self.assertEqual(payload["metadata"]["code"], "01592")
         self.assertIn("source", payload)
         self.assertIn("data_as_of", payload)
@@ -244,7 +245,7 @@ class ApiAuthTests(unittest.TestCase):
         ):
             payload = api.build_screen_payload(["03321"], timeout=1)
         largest = payload["results"][0]["largest_participant"]
-        self.assertEqual(payload["source"], "sdw+local_db")
+        self.assertEqual(payload["source"], "local_db")
         self.assertEqual(payload["data_as_of"], "2026-07-30")
         self.assertEqual(largest["name"], "KINGSTON SECURITIES LTD")
         self.assertEqual(largest["participant_id"], "C00019")

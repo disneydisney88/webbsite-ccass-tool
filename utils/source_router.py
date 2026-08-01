@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from .fetch_sdw import SDW_URL, fetch_sdw_snapshot
 from .fetch_yahoo import fetch_yahoo_price_history
 from .fetcher import (
     FetchResult,
@@ -23,7 +22,7 @@ from .fetcher import (
     orgdata_url,
     resolve_issue_id_from_stock,
 )
-from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, history_depth_days, load_price_history, snapshot_exists, stock_fetched_today, upsert_price_history, upsert_snapshot
+from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, history_depth_days, load_price_history, stock_fetched_today, upsert_price_history
 
 
 CONFIG_PATH = Path(os.getenv("CCASS_SOURCE_CONFIG", "ccass_source_config.json"))
@@ -172,7 +171,7 @@ def fetch_webb_price_history(
     """Fetch price history independently from the CCASS source decision.
 
     The Webb-site price page can remain available even when CCASS holdings pages
-    need browser rendering or the router has selected SDW for holdings.
+    need browser rendering or the router has selected local DB for holdings.
     """
     code = clean_stock_code(stock_code)
     if issue_id:
@@ -194,57 +193,41 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
     lookup = IssueLookup(
         stock_code=code,
         issue_id=issue_id or issue_id_for_stock(code),
-        method="known mapping fallback" if issue_id_for_stock(code) else "sdw stock code",
+        method="known mapping fallback" if issue_id_for_stock(code) else "local stock code",
         status="success" if code else "failed",
-        message="HKEX SDW source selected; Webb-site mirror historical pages are unavailable in this mode.",
+        message="Local CCASS snapshot DB selected; live HKEX SDW scraping is disabled.",
     )
     warnings: list[str] = []
     if not code:
         return SourceBundle(
             lookup=lookup,
             results={},
-            metadata={"source": "sdw+local_db", "mirror_status": mirror_status, "mirror_base_url": mirror_base_url()},
-            warnings=["Stock code is required for SDW mode."],
+            metadata={"source": "local_db", "mirror_status": mirror_status, "mirror_base_url": mirror_base_url()},
+            warnings=["Stock code is required for local DB mode."],
         )
 
     if not stock_fetched_today(code):
-        fetch_result = fetch_sdw_snapshot(code, timeout=timeout)
-        if fetch_result.ok and fetch_result.snapshot:
-            if not snapshot_exists(code, fetch_result.snapshot.date):
-                upsert_snapshot(fetch_result.snapshot, source="sdw")
+        warnings.append("Live HKEX SDW fetch is disabled; using existing local snapshot DB only.")
+
+    if load_price_history(code).empty:
+        price_result = fetch_yahoo_price_history(code, period_days=int(os.getenv("YAHOO_PRICE_PERIOD_DAYS", "90")))
+        if price_result.ok:
+            upsert_price_history(code, price_result.table, source="yahoo")
+            warnings.append(price_result.warning)
         else:
-            warnings.append(f"SDW fetch failed: {fetch_result.error_type} - {fetch_result.error_message}")
+            warnings.append(f"Yahoo price fetch failed: {price_result.error_type} - {price_result.error_message}")
 
-    mirror_price, price_lookup = fetch_webb_price_history(code, lookup.issue_id, timeout=timeout)
-    if price_lookup.issue_id and not lookup.issue_id:
-        lookup.issue_id = price_lookup.issue_id
-        lookup.method = price_lookup.method
-        lookup.status = price_lookup.status
-
-    if not mirror_price or not mirror_price.ok:
-        if load_price_history(code).empty:
-            price_result = fetch_yahoo_price_history(code, period_days=int(os.getenv("YAHOO_PRICE_PERIOD_DAYS", "90")))
-            if price_result.ok:
-                upsert_price_history(code, price_result.table, source="yahoo")
-                warnings.append(price_result.warning)
-            else:
-                warnings.append(f"Yahoo price fetch failed: {price_result.error_type} - {price_result.error_message}")
-        else:
-            warnings.append("Webb-site price fetch failed; showing locally cached price history.")
-
-    built = build_results_from_db(code, SDW_URL)
-    if mirror_price and mirror_price.ok:
-        built.results["Price History"] = mirror_price
+    built = build_results_from_db(code, "local_db://ccass_snapshots")
     warnings.extend(built.warnings or [])
     if built.stock_name:
-        lookup.message = f"{lookup.message} Stock name from SDW/local DB: {built.stock_name}"
+        lookup.message = f"{lookup.message} Stock name from local DB: {built.stock_name}"
     if built.history_depth_days <= 1 and built.latest_date:
         warnings.append(f"History limited to local snapshots since {built.latest_date}; mirror historical data unavailable")
     return SourceBundle(
         lookup=lookup,
         results=built.results,
         metadata={
-            "source": "sdw+local_db",
+            "source": "local_db",
             "mirror_status": mirror_status or "not_used",
             "mirror_base_url": mirror_base_url(),
             "history_depth_days": built.history_depth_days,
@@ -255,7 +238,7 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
 
 
 def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = True) -> SourceBundle:
-    """Fast path: SDW for broker holdings, direct mirror pages for Webb-only history."""
+    """Fast path: local DB for broker holdings, direct mirror pages for Webb-only history."""
     bundle = fetch_sdw_bundle(stock_code, timeout=timeout, mirror_status="hybrid")
     issue_id = bundle.lookup.issue_id
     if not issue_id:

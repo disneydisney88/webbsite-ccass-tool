@@ -53,7 +53,6 @@ from utils.officers import (
 from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
 from utils.source_router import fetch_mirror_bundle, fetch_sdw_bundle, fetch_source_bundle_for_stock, issue_id_for_stock
-from utils.fetch_sdw import fetch_sdw_snapshot
 from utils.fetch_yahoo import fetch_yahoo_price_history
 from utils.upstream_probe import probe_url, probe_upstreams
 from utils.snapshot_db import (
@@ -62,12 +61,10 @@ from utils.snapshot_db import (
     export_db_bytes,
     latest_snapshot_date,
     load_snapshot,
+    load_stock_meta,
     load_watchlist_entries,
     restore_snapshot_db_from_backup,
-    snapshot_exists,
-    stock_fetched_today,
     upsert_price_history,
-    upsert_snapshot,
 )
 
 
@@ -286,9 +283,15 @@ def collect_structured_errors(fetch_summary: list[dict[str, Any]], warnings: lis
 
 
 def with_source_fields(payload: dict[str, Any], data_as_of: Any = "", source: Any = "") -> dict[str, Any]:
-    """Attach the common MCP provenance fields without overwriting explicit values."""
-    payload.setdefault("data_as_of", data_as_of or "")
-    payload.setdefault("source", source or "")
+    """Attach common provenance fields, filling blank values when available."""
+    if not payload.get("data_as_of") and data_as_of:
+        payload["data_as_of"] = data_as_of
+    else:
+        payload.setdefault("data_as_of", "")
+    if not payload.get("source") and source:
+        payload["source"] = source
+    else:
+        payload.setdefault("source", "")
     return payload
 
 
@@ -876,7 +879,11 @@ def mcp_exception_payload(tool: str, exc: Exception) -> dict[str, Any]:
     return with_source_fields(payload, data_as_of="", source="")
 
 
-def mcp_timeout_payload(tool: str, message: str = "Tool execution exceeded the MCP wall-clock budget.") -> dict[str, Any]:
+def mcp_timeout_payload(
+    tool: str,
+    message: str = "Tool execution exceeded the MCP wall-clock budget.",
+    source: str = "",
+) -> dict[str, Any]:
     payload = {
         "ok": False,
         "tool": tool,
@@ -884,7 +891,7 @@ def mcp_timeout_payload(tool: str, message: str = "Tool execution exceeded the M
         "message": message,
         "retry_recommended": True,
     }
-    return with_source_fields(payload, data_as_of="", source="")
+    return with_source_fields(payload, data_as_of="", source=source)
 
 
 def mcp_probe_challenge_payload(tool: str, probe: dict[str, Any]) -> dict[str, Any]:
@@ -911,10 +918,12 @@ async def run_ccass_tool_with_budget(
     stock_code: str = "",
     probe_timeout: int = 4,
     tool_timeout: int = 8,
+    probe_webbsite: bool = True,
+    timeout_source: str = "",
 ) -> dict[str, Any]:
     code = clean_stock_code(stock_code)
     known_issue_id = issue_id_for_stock(code) if code else ""
-    if known_issue_id:
+    if probe_webbsite and known_issue_id:
         probe = probe_url(
             "webbsite_holdings",
             issue_urls(known_issue_id)["Holdings"],
@@ -937,7 +946,7 @@ async def run_ccass_tool_with_budget(
         try:
             kind, value = result_queue.get(timeout=tool_timeout)
         except Empty:
-            return mcp_timeout_payload(tool)
+            return mcp_timeout_payload(tool, source=timeout_source)
         if kind == "error":
             raise value
         return value
@@ -1072,7 +1081,7 @@ def build_stock_payload(
     with_source_fields(
         payload,
         data_as_of=payload["metadata"].get("data_as_of_trading_date", ""),
-        source=payload["metadata"].get("source", "") or "sdw+local_db_or_webbsite_fallback",
+        source=payload["metadata"].get("source", "") or "local_db_or_webbsite_fallback",
     )
     return json_safe(payload)
 
@@ -1293,7 +1302,7 @@ def build_screen_payload(codes: list[str], timeout: int = 25) -> dict[str, Any]:
             "results": ordered,
             "data_quality_warnings": warnings,
         }
-    with_source_fields(payload, data_as_of=max((str(item.get("data_date") or "") for item in ordered), default=""), source="sdw+local_db")
+    with_source_fields(payload, data_as_of=max((str(item.get("data_date") or "") for item in ordered), default=""), source="local_db")
     return json_safe(payload)
 
 
@@ -1381,17 +1390,27 @@ def build_participant_search_payload(participant_id: str, codes: list[str], time
             "results": ordered,
             "data_quality_warnings": warnings,
         }
-    with_source_fields(payload, data_as_of=max((str(item.get("data_date") or "") for item in ordered), default=""), source="sdw+local_db")
+    with_source_fields(payload, data_as_of=max((str(item.get("data_date") or "") for item in ordered), default=""), source="local_db")
     return json_safe(payload)
 
 
 def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int = 30, headless: bool = True) -> dict[str, Any]:
     code = clean_stock_code(stock_code)
     yahoo_result = fetch_yahoo_price_history(code, period_days=max(90, min(1825, int(limit) * 3)))
-    base = build_base_payload(stock_code=code, timeout=timeout, headless=headless, source_preference="sdw")
-    exported = base.get("exported", {})
-    metadata = exported.get("metadata", {})
     yahoo_ok = bool(getattr(yahoo_result, "ok", False))
+    base: dict[str, Any] = {}
+    exported: dict[str, Any] = {}
+    local_meta = load_stock_meta(code)
+    metadata: dict[str, Any] = {
+        "stock_code": code,
+        "stock_name": local_meta.get("name", ""),
+        "issue_id": issue_id_for_stock(code),
+        "issued_securities": local_meta.get("issued_shares", ""),
+    }
+    if not yahoo_ok:
+        base = build_base_payload(stock_code=code, timeout=timeout, headless=headless, source_preference="mirror")
+        exported = base.get("exported", {})
+        metadata.update(exported.get("metadata", {}))
     price_history = yahoo_result.table.to_dict(orient="records") if yahoo_ok else exported.get("price_history", [])
     issued_securities = metadata.get("issued_securities", "")
     compact_price_history = enrich_price_history(compact_records(price_history, "price_history", limit), issued_securities)
@@ -1414,7 +1433,7 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
         if str(row.get("Section") or row.get("section") or "").lower() == "price history"
     ]
 
-    price_source = "yahoo" if yahoo_ok else (metadata.get("price_source", "") or "webbsite_or_local_fallback")
+    price_source = "yahoo" if yahoo_ok else (metadata.get("price_source", "") or "webbsite_or_local_fallback_after_yahoo_failed")
     latest_record = compact_price_history[0] if compact_price_history else {}
     latest_date = latest_record.get("Date") or metadata.get("price_history_latest_date", "")
     latest_close = latest_record.get("Close", metadata.get("latest_price", ""))
@@ -1794,7 +1813,14 @@ async def get_webbsite_price_history(
         return build_price_history_payload(stock_code=code, limit=limit, timeout=20, headless=True)
 
     try:
-        return await run_ccass_tool_with_budget("get_webbsite_price_history", work, stock_code=code, tool_timeout=30)
+        return await run_ccass_tool_with_budget(
+            "get_webbsite_price_history",
+            work,
+            stock_code=code,
+            tool_timeout=30,
+            probe_webbsite=False,
+            timeout_source="yahoo (attempted); webbsite fallback not reached",
+        )
     except Exception as exc:
         logger.exception("get_webbsite_price_history failed")
         return mcp_exception_payload("get_webbsite_price_history", exc)
@@ -2153,28 +2179,16 @@ def snapshot_all(
     entries = load_watchlist_entries(group=group)
     for entry in entries:
         code = entry.code
-        if stock_fetched_today(code):
-            rows.append({"code": code, "name": entry.name, "group": ";".join(entry.groups), "ok": True, "skipped": True, "message": "Snapshot already fetched today."})
-        else:
-            result = fetch_sdw_snapshot(code, timeout=timeout)
-            if result.ok and result.snapshot:
-                already_exists = snapshot_exists(code, result.snapshot.date)
-                if not already_exists:
-                    upsert_snapshot(result.snapshot, source="sdw")
-                rows.append(
-                    {
-                        "code": code,
-                        "name": result.snapshot.stock_name or entry.name,
-                        "group": ";".join(entry.groups),
-                        "ok": True,
-                        "date": result.snapshot.date,
-                        "rows": len(result.snapshot.rows or []),
-                        "already_exists": already_exists,
-                    }
-                )
-            else:
-                rows.append({"code": code, "name": entry.name, "group": ";".join(entry.groups), "ok": False, "error_type": result.error_type, "error_message": result.error_message})
-                continue
+        rows.append(
+            {
+                "code": code,
+                "name": entry.name,
+                "group": ";".join(entry.groups),
+                "ok": True,
+                "skipped": True,
+                "message": "Live HKEX SDW snapshot fetch is disabled; existing local DB was not modified.",
+            }
+        )
 
         price_result = fetch_yahoo_price_history(code, period_days=7, sleep_seconds=1.0)
         if price_result.ok:

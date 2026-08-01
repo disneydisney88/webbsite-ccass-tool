@@ -139,13 +139,7 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
                 self.assertEqual(source_router.mirror_probe("01912", "28222", timeout=30), "ok")
                 browser_fetch.assert_called_once()
 
-    def test_sdw_bundle_prefers_webb_price_history_over_yahoo(self) -> None:
-        mirror_price = source_router.FetchResult(
-            name="Price History",
-            url="https://webb-database.com/dbpub/hpu.asp?i=11687",
-            ok=True,
-            tables=[pd.DataFrame({"Date": ["2026-07-30"], "Close": [1.23], "price_source": ["mirror"]})],
-        )
+    def test_sdw_bundle_uses_local_db_and_yahoo_without_live_sdw_or_webb_price(self) -> None:
         built = SimpleNamespace(
             results={"Price History": source_router.FetchResult(name="Price History", url="local_db://price_history", ok=False)},
             stock_name="",
@@ -153,18 +147,27 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
             latest_date="",
             warnings=[],
         )
-        price_lookup = source_router.IssueLookup("08191", "11687", "extracted from URL", "success")
+        yahoo_result = SimpleNamespace(
+            ok=True,
+            table=pd.DataFrame({"Date": ["2026-07-30"], "Close": [1.23], "price_source": ["yahoo"]}),
+            warning="estimated turnover",
+        )
         with (
-            patch.object(source_router, "stock_fetched_today", return_value=True),
-            patch.object(source_router, "fetch_webb_price_history", return_value=(mirror_price, price_lookup)),
+            patch.object(source_router, "stock_fetched_today", return_value=False),
+            patch.object(source_router, "fetch_webb_price_history") as webb_fetch,
+            patch.object(source_router, "load_price_history", return_value=pd.DataFrame()),
+            patch.object(source_router, "upsert_price_history") as upsert_price,
             patch.object(source_router, "build_results_from_db", return_value=built),
-            patch.object(source_router, "fetch_yahoo_price_history") as yahoo_fetch,
+            patch.object(source_router, "fetch_yahoo_price_history", return_value=yahoo_result) as yahoo_fetch,
         ):
             bundle = source_router.fetch_sdw_bundle("08191", timeout=30)
 
-        self.assertEqual(bundle.lookup.issue_id, "11687")
-        self.assertEqual(bundle.results["Price History"].url, mirror_price.url)
-        yahoo_fetch.assert_not_called()
+        self.assertEqual(bundle.metadata["source"], "local_db")
+        self.assertEqual(bundle.results["Price History"].url, "local_db://price_history")
+        webb_fetch.assert_not_called()
+        yahoo_fetch.assert_called_once()
+        upsert_price.assert_called_once()
+        self.assertTrue(any("Live HKEX SDW fetch is disabled" in warning for warning in bundle.warnings))
 
     def test_yahoo_ticker_conversion_keeps_hk_four_digit_symbol(self) -> None:
         self.assertEqual(yahoo_ticker_from_code("01449"), "1449.HK")

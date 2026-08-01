@@ -731,6 +731,51 @@ def section_failure_warnings(fetch_summary: list[dict[str, Any]]) -> list[str]:
     return warnings
 
 
+def primary_fetch_failure(fetch_summary: list[dict[str, Any]]) -> dict[str, Any]:
+    for row in fetch_summary or []:
+        status_text = str(row.get("Status") or row.get("ok") or "").lower()
+        error = row.get("Error") or row.get("error_message") or ""
+        if status_text in {"failed", "false"} or error:
+            return row
+    return {}
+
+
+def payload_status_fields(errors: list[dict[str, Any]], fetch_summary: list[dict[str, Any]]) -> dict[str, Any]:
+    if not errors:
+        return {"ok": True}
+    failure = primary_fetch_failure(fetch_summary)
+    error = errors[0]
+    return {
+        "ok": False,
+        "error_code": error.get("error_code", "SOURCE_FETCH_FAILED"),
+        "status_code": failure.get("status_code"),
+        "status_reason": failure.get("status_reason", ""),
+        "final_url": failure.get("final_url") or failure.get("url") or "",
+        "body_head": failure.get("response_snippet", ""),
+        "attempts": failure.get("attempts") or int_env("FETCH_RETRY_ATTEMPTS", 3),
+        "hint": error.get("message", ""),
+    }
+
+
+def mcp_exception_payload(tool: str, exc: Exception) -> dict[str, Any]:
+    detail = exc.detail if isinstance(exc, HTTPException) else f"{type(exc).__name__}: {exc}"
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail)
+        error_code = str(detail.get("error_code") or "TOOL_EXECUTION_FAILED")
+        retry = bool(detail.get("retry_recommended", False))
+    else:
+        message = str(detail)
+        error_code = "TOOL_EXECUTION_FAILED"
+        retry = False
+    return {
+        "ok": False,
+        "tool": tool,
+        "error_code": error_code,
+        "message": message,
+        "retry_recommended": retry,
+    }
+
+
 def build_stock_payload(
     stock_code: str,
     timeout: int = 30,
@@ -794,8 +839,8 @@ def build_stock_payload(
         ]
     )
 
-    return json_safe(
-        {
+    errors = collect_structured_errors(fetch_summary, warnings)
+    payload = {
             "metadata": {
                 "code": metadata.get("stock_code", clean_stock_code(stock_code)),
                 "name": metadata.get("stock_name", ""),
@@ -845,9 +890,10 @@ def build_stock_payload(
             "price_history": compact_price_history,
             "fetch_summary": fetch_summary,
             "data_quality_warnings": warnings,
-            "errors": collect_structured_errors(fetch_summary, warnings),
+            "errors": errors,
         }
-    )
+    payload.update(payload_status_fields(errors, fetch_summary))
+    return json_safe(payload)
 
 
 def _md_table(rows: list[dict[str, Any]], columns: list[tuple[str, str]]) -> str:
@@ -1058,6 +1104,7 @@ def build_screen_payload(codes: list[str], timeout: int = 25) -> dict[str, Any]:
     ordered = [results[code] for code in seen]
     return json_safe(
         {
+            "ok": not any(item.get("error") for item in ordered),
             "metadata": {
                 "requested_count": len(seen),
                 "returned_count": len(ordered),
@@ -1177,8 +1224,8 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
         if str(row.get("Section") or row.get("section") or "").lower() == "price history"
     ]
 
-    return json_safe(
-        {
+    errors = collect_structured_errors(fetch_summary, warnings)
+    payload = {
             "metadata": {
                 "code": metadata.get("stock_code", clean_stock_code(stock_code)),
                 "name": metadata.get("stock_name", ""),
@@ -1204,8 +1251,10 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
             "price_history": compact_price_history,
             "fetch_summary": price_fetch,
             "data_quality_warnings": warnings,
+            "errors": errors,
         }
-    )
+    payload.update(payload_status_fields(errors, fetch_summary))
+    return json_safe(payload)
 
 
 def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, limit: int = 100, timeout: int = 30) -> dict[str, Any]:
@@ -1509,15 +1558,19 @@ async def get_ccass_stock_data(
     big_changes_limit: Annotated[int, Field(ge=1, le=100)] = 10,
     concentration_limit: Annotated[int, Field(ge=1, le=100)] = 15,
 ) -> dict[str, Any]:
-    return build_stock_payload(
-        stock_code=code,
-        timeout=30,
-        holdings_limit=holdings_limit,
-        changes_limit=changes_limit,
-        big_changes_limit=big_changes_limit,
-        concentration_limit=concentration_limit,
-        headless=True,
-    )
+    try:
+        return build_stock_payload(
+            stock_code=code,
+            timeout=20,
+            holdings_limit=holdings_limit,
+            changes_limit=changes_limit,
+            big_changes_limit=big_changes_limit,
+            concentration_limit=concentration_limit,
+            headless=True,
+        )
+    except Exception as exc:
+        logger.exception("get_ccass_stock_data failed")
+        return mcp_exception_payload("get_ccass_stock_data", exc)
 
 
 @mcp_server.tool(
@@ -1531,7 +1584,11 @@ async def get_webbsite_price_history(
     code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 03321.")],
     limit: Annotated[int, Field(ge=1, le=200)] = 80,
 ) -> dict[str, Any]:
-    return build_price_history_payload(stock_code=code, limit=limit, timeout=30, headless=True)
+    try:
+        return build_price_history_payload(stock_code=code, limit=limit, timeout=20, headless=True)
+    except Exception as exc:
+        logger.exception("get_webbsite_price_history failed")
+        return mcp_exception_payload("get_webbsite_price_history", exc)
 
 
 @mcp_server.tool(
@@ -1611,7 +1668,11 @@ async def get_stock_capital(
 async def screen_stocks(
     codes: Annotated[list[str], Field(description="HK stock codes, e.g. ['01592','02028','06162']. Max 20.")],
 ) -> dict[str, Any]:
-    return build_screen_payload(codes=codes, timeout=25)
+    try:
+        return build_screen_payload(codes=codes, timeout=12)
+    except Exception as exc:
+        logger.exception("screen_stocks failed")
+        return mcp_exception_payload("screen_stocks", exc)
 
 
 @mcp_server.tool(

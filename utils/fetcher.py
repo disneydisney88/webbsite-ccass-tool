@@ -27,6 +27,8 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+DETERMINISTIC_FAILURE_TYPES = {"SOURCE_CHALLENGE", "MIRROR_BLOCKED"}
+DETERMINISTIC_FAILURE_STATUS_CODES = {402, 403}
 
 
 def ensure_playwright_chromium() -> tuple[bool, str]:
@@ -80,6 +82,7 @@ class FetchResult:
     final_url: str = ""
     status: Optional[int] = None
     status_reason: str = ""
+    attempts: int = 0
     fetched_time: str = ""
     html: str = ""
     raw_text: str = ""
@@ -98,6 +101,7 @@ class FetchResult:
             "final_url": self.final_url,
             "status_code": self.status,
             "status_reason": self.status_reason,
+            "attempts": self.attempts,
             "fetched_time": self.fetched_time,
             "fetch_method": self.method,
             "fallback_method_used": self.fallback_method_used,
@@ -249,6 +253,7 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
     last_error_type = ""
     last_error_message = ""
     for attempt in range(1, attempts + 1):
+        result.attempts = attempt
         result.method = "requests" if attempt == 1 else f"requests retry {attempt}/{attempts}"
         try:
             response = requests.get(
@@ -371,6 +376,8 @@ def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> 
 def fetch_page(name: str, url: str, timeout: int = 60, headless: bool = True) -> FetchResult:
     first = fetch_with_requests(name, url, timeout=timeout)
     if first.ok:
+        return first
+    if first.error_type in DETERMINISTIC_FAILURE_TYPES or first.status in DETERMINISTIC_FAILURE_STATUS_CODES:
         return first
 
     fallback_reasons = ("403", "timeout", "no table", "dns", "connection", "name resolution")

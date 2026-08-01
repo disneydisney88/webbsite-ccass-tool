@@ -52,7 +52,7 @@ from utils.officers import (
 )
 from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
-from utils.source_router import fetch_mirror_bundle, fetch_source_bundle_for_stock, issue_id_for_stock
+from utils.source_router import fetch_mirror_bundle, fetch_sdw_bundle, fetch_source_bundle_for_stock, issue_id_for_stock
 from utils.fetch_sdw import fetch_sdw_snapshot
 from utils.fetch_yahoo import fetch_yahoo_price_history
 from utils.upstream_probe import probe_url, probe_upstreams
@@ -79,7 +79,7 @@ def int_env(name: str, default: int) -> int:
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.11.0"
+API_VERSION = "1.12.0"
 CACHE_TTL_SECONDS = max(0, int_env("API_CACHE_TTL_SECONDS", 86400))
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -231,6 +231,9 @@ class ConcentrationSummary(BaseModel):
 
 
 class StockCompactResponse(BaseModel):
+    ok: bool = True
+    data_as_of: str = ""
+    source: str = ""
     metadata: StockMetadata
     holdings_summary: HoldingsSummary
     holdings: list[HoldingRecord]
@@ -280,6 +283,13 @@ def collect_structured_errors(fetch_summary: list[dict[str, Any]], warnings: lis
             seen.add(key)
             deduped.append(error)
     return deduped
+
+
+def with_source_fields(payload: dict[str, Any], data_as_of: Any = "", source: Any = "") -> dict[str, Any]:
+    """Attach the common MCP provenance fields without overwriting explicit values."""
+    payload.setdefault("data_as_of", data_as_of or "")
+    payload.setdefault("source", source or "")
+    return payload
 
 
 def mask_secret(value: str | None) -> str:
@@ -440,7 +450,12 @@ def fetch_compact_results(
     return results
 
 
-def build_base_payload(stock_code: str, timeout: int, headless: bool = True) -> dict[str, Any]:
+def build_base_payload(
+    stock_code: str,
+    timeout: int,
+    headless: bool = True,
+    source_preference: str = "auto",
+) -> dict[str, Any]:
     stock_code = clean_stock_code(stock_code)
     if not stock_code:
         raise HTTPException(status_code=400, detail="Provide stock_code.")
@@ -450,18 +465,27 @@ def build_base_payload(stock_code: str, timeout: int, headless: bool = True) -> 
         return cached
 
     known_issue_id = issue_id_for_stock(stock_code)
-    if known_issue_id:
+    source_preference = (source_preference or "auto").strip().lower()
+    if source_preference not in {"auto", "sdw", "mirror"}:
+        source_preference = "auto"
+
+    if source_preference == "auto" and known_issue_id:
         probe = probe_url(
             "webbsite_holdings",
             issue_urls(known_issue_id)["Holdings"],
             timeout=max(3, min(timeout, 6)),
         )
-        if probe.get("error_type") in {"SOURCE_CHALLENGE", "MIRROR_BLOCKED"} or probe.get("status_code") in {402, 403}:
+        if probe.get("error_type") == "MIRROR_BLOCKED" or probe.get("status_code") in {402, 403}:
             payload = probe_failure_base_payload(stock_code=stock_code, issue_id=known_issue_id, probe=probe)
             cache_set(stock_code, payload)
             return copy.deepcopy(payload)
 
-    bundle = fetch_source_bundle_for_stock(stock_code, timeout=timeout, headless=headless)
+    if source_preference == "sdw":
+        bundle = fetch_sdw_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, mirror_status="direct_pages_only")
+    elif source_preference == "mirror":
+        bundle = fetch_mirror_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, headless=headless)
+    else:
+        bundle = fetch_source_bundle_for_stock(stock_code, timeout=timeout, headless=headless)
     lookup = bundle.lookup
     warnings = []
     source_name = str(bundle.metadata.get("source") or "")
@@ -647,6 +671,31 @@ def enrich_price_history(records: list[dict[str, Any]], issued_securities: Any) 
     return enriched
 
 
+def yahoo_price_fetch_summary(result: Any) -> list[dict[str, Any]]:
+    status = "success" if getattr(result, "ok", False) else "failed"
+    return [
+        {
+            "Section": "Price History",
+            "URL": f"yahoo://{getattr(result, 'ticker', '')}",
+            "Status": status,
+            "Tables found": 1 if getattr(result, "ok", False) else 0,
+            "Selected table index": 1 if getattr(result, "ok", False) else "",
+            "Latest date / data date": latest_date_from_records(
+                getattr(result, "table", pd.DataFrame()).to_dict(orient="records")
+                if getattr(result, "table", None) is not None
+                else []
+            ),
+            "Error": "" if getattr(result, "ok", False) else f"{getattr(result, 'error_type', '')}: {getattr(result, 'error_message', '')}".strip(": "),
+        }
+    ]
+
+
+def latest_date_from_records(records: list[dict[str, Any]], key: str = "Date") -> str:
+    dates = [parse_date_value(row.get(key)) for row in records if isinstance(row, dict)]
+    dates = [date for date in dates if date is not None]
+    return max(dates).strftime("%Y-%m-%d") if dates else ""
+
+
 def announcement_event_tags(row: dict[str, Any]) -> list[str]:
     text = f"{row.get('Category', '')} {row.get('Title', '')}".lower()
     patterns = [
@@ -817,28 +866,30 @@ def mcp_exception_payload(tool: str, exc: Exception) -> dict[str, Any]:
         message = str(detail)
         error_code = "TOOL_EXECUTION_FAILED"
         retry = False
-    return {
+    payload = {
         "ok": False,
         "tool": tool,
         "error_code": error_code,
         "message": message,
         "retry_recommended": retry,
     }
+    return with_source_fields(payload, data_as_of="", source="")
 
 
 def mcp_timeout_payload(tool: str, message: str = "Tool execution exceeded the MCP wall-clock budget.") -> dict[str, Any]:
-    return {
+    payload = {
         "ok": False,
         "tool": tool,
         "error_code": "SOURCE_TIMEOUT",
         "message": message,
         "retry_recommended": True,
     }
+    return with_source_fields(payload, data_as_of="", source="")
 
 
 def mcp_probe_challenge_payload(tool: str, probe: dict[str, Any]) -> dict[str, Any]:
     error_code = "SOURCE_CHALLENGE" if str(probe.get("error_type") or "") == "SOURCE_CHALLENGE" else "SOURCE_FETCH_FAILED"
-    return {
+    payload = {
         "ok": False,
         "tool": tool,
         "error_code": error_code,
@@ -850,6 +901,7 @@ def mcp_probe_challenge_payload(tool: str, probe: dict[str, Any]) -> dict[str, A
         "message": probe.get("error_message") or "Webb-site upstream failed.",
         "retry_recommended": False,
     }
+    return with_source_fields(payload, data_as_of="", source="Webb-site")
 
 
 async def run_ccass_tool_with_budget(
@@ -868,7 +920,7 @@ async def run_ccass_tool_with_budget(
             issue_urls(known_issue_id)["Holdings"],
             timeout=max(3, min(probe_timeout, 6)),
         )
-        if probe.get("error_type") in {"SOURCE_CHALLENGE", "MIRROR_BLOCKED"} or probe.get("status_code") in {402, 403}:
+        if probe.get("error_type") == "MIRROR_BLOCKED" or probe.get("status_code") in {402, 403}:
             return mcp_probe_challenge_payload(tool, probe)
 
     def run_in_daemon_thread() -> dict[str, Any]:
@@ -907,8 +959,9 @@ def build_stock_payload(
     big_changes_limit: int = 10,
     concentration_limit: int = 15,
     headless: bool = True,
+    source_preference: str = "sdw",
 ) -> dict[str, Any]:
-    base = build_base_payload(stock_code=stock_code, timeout=timeout, headless=headless)
+    base = build_base_payload(stock_code=stock_code, timeout=timeout, headless=headless, source_preference=source_preference)
     exported = base.get("exported", {})
     metadata = exported.get("metadata", {})
 
@@ -1016,6 +1069,11 @@ def build_stock_payload(
             "errors": errors,
         }
     payload.update(payload_status_fields(errors, fetch_summary))
+    with_source_fields(
+        payload,
+        data_as_of=payload["metadata"].get("data_as_of_trading_date", ""),
+        source=payload["metadata"].get("source", "") or "sdw+local_db_or_webbsite_fallback",
+    )
     return json_safe(payload)
 
 
@@ -1225,8 +1283,7 @@ def build_screen_payload(codes: list[str], timeout: int = 25) -> dict[str, Any]:
                 results[code] = {"code": code, "error": f"{type(exc).__name__}: {exc}"}
 
     ordered = [results[code] for code in seen]
-    return json_safe(
-        {
+    payload = {
             "ok": not any(item.get("error") for item in ordered),
             "metadata": {
                 "requested_count": len(seen),
@@ -1236,7 +1293,8 @@ def build_screen_payload(codes: list[str], timeout: int = 25) -> dict[str, Any]:
             "results": ordered,
             "data_quality_warnings": warnings,
         }
-    )
+    with_source_fields(payload, data_as_of=max((str(item.get("data_date") or "") for item in ordered), default=""), source="sdw+local_db")
+    return json_safe(payload)
 
 
 PARTICIPANT_ID_PATTERN = re.compile(r"^[A-Ca-c]\d{5}$")
@@ -1311,8 +1369,7 @@ def build_participant_search_payload(participant_id: str, codes: list[str], time
     ordered = [results[code] for code in seen]
     holdings_found = [item for item in ordered if item.get("found")]
     holdings_found.sort(key=lambda item: item.get("stake_pct") or 0, reverse=True)
-    return json_safe(
-        {
+    payload = {
             "metadata": {
                 "participant_id": pid,
                 "searched_count": len(seen),
@@ -1324,18 +1381,28 @@ def build_participant_search_payload(participant_id: str, codes: list[str], time
             "results": ordered,
             "data_quality_warnings": warnings,
         }
-    )
+    with_source_fields(payload, data_as_of=max((str(item.get("data_date") or "") for item in ordered), default=""), source="sdw+local_db")
+    return json_safe(payload)
 
 
 def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int = 30, headless: bool = True) -> dict[str, Any]:
-    base = build_base_payload(stock_code=stock_code, timeout=timeout, headless=headless)
+    code = clean_stock_code(stock_code)
+    yahoo_result = fetch_yahoo_price_history(code, period_days=max(90, min(1825, int(limit) * 3)))
+    base = build_base_payload(stock_code=code, timeout=timeout, headless=headless, source_preference="sdw")
     exported = base.get("exported", {})
     metadata = exported.get("metadata", {})
-    price_history = exported.get("price_history", [])
+    yahoo_ok = bool(getattr(yahoo_result, "ok", False))
+    price_history = yahoo_result.table.to_dict(orient="records") if yahoo_ok else exported.get("price_history", [])
     issued_securities = metadata.get("issued_securities", "")
     compact_price_history = enrich_price_history(compact_records(price_history, "price_history", limit), issued_securities)
-    fetch_summary = exported.get("fetch_summary", [])
+    fetch_summary = yahoo_price_fetch_summary(yahoo_result) if yahoo_ok else exported.get("fetch_summary", [])
     warnings = list(exported.get("analysis_warnings", []))
+    if yahoo_ok:
+        yahoo_warning = getattr(yahoo_result, "warning", "")
+        if yahoo_warning and yahoo_warning not in warnings:
+            warnings.append(yahoo_warning)
+    else:
+        warnings.append(f"Yahoo price fetch failed; using Webb-site/local fallback: {getattr(yahoo_result, 'error_type', '')} {getattr(yahoo_result, 'error_message', '')}".strip())
     warnings.extend(warning for warning in section_failure_warnings(fetch_summary) if warning not in warnings)
     if any(str(row.get("price_source") or "").lower() == "yahoo" and row.get("vwap_est") not in (None, "") for row in compact_price_history):
         warning = "VWAP is estimated from estimated turnover"
@@ -1347,25 +1414,32 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
         if str(row.get("Section") or row.get("section") or "").lower() == "price history"
     ]
 
+    price_source = "yahoo" if yahoo_ok else (metadata.get("price_source", "") or "webbsite_or_local_fallback")
+    latest_record = compact_price_history[0] if compact_price_history else {}
+    latest_date = latest_record.get("Date") or metadata.get("price_history_latest_date", "")
+    latest_close = latest_record.get("Close", metadata.get("latest_price", ""))
+    latest_volume = latest_record.get("Volume", metadata.get("latest_price_volume", ""))
+    latest_turnover = latest_record.get("Turnover", metadata.get("latest_price_turnover", ""))
+    latest_vwap = latest_record.get("VWAP") or latest_record.get("vwap_est") or metadata.get("latest_price_vwap", "")
     errors = collect_structured_errors(fetch_summary, warnings)
     payload = {
             "metadata": {
-                "code": metadata.get("stock_code", clean_stock_code(stock_code)),
+                "code": metadata.get("stock_code", code),
                 "name": metadata.get("stock_name", ""),
                 "issue_id": metadata.get("issue_id", base.get("issue_id", "")),
             },
             "price_summary": {
-                "latest_date": metadata.get("price_history_latest_date", ""),
-                "latest_close": metadata.get("latest_price", ""),
-                "latest_volume": metadata.get("latest_price_volume", ""),
-                "latest_turnover": metadata.get("latest_price_turnover", ""),
-                "latest_vwap": metadata.get("latest_price_vwap", ""),
-                "price_source": metadata.get("price_source", ""),
+                "latest_date": latest_date,
+                "latest_close": latest_close,
+                "latest_volume": latest_volume,
+                "latest_turnover": latest_turnover,
+                "latest_vwap": latest_vwap,
+                "price_source": price_source,
                 "issued_securities": issued_securities,
-                "latest_market_cap": market_cap_value(metadata.get("latest_price", ""), issued_securities),
+                "latest_market_cap": market_cap_value(latest_close, issued_securities),
                 "latest_turnover_to_market_cap_pct": ratio_percent(
-                    metadata.get("latest_price_turnover", ""),
-                    market_cap_value(metadata.get("latest_price", ""), issued_securities),
+                    latest_turnover,
+                    market_cap_value(latest_close, issued_securities),
                 ),
                 "price_history_total_count": len(price_history),
                 "price_history_returned_count": len(compact_price_history),
@@ -1377,6 +1451,7 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
             "errors": errors,
         }
     payload.update(payload_status_fields(errors, fetch_summary))
+    with_source_fields(payload, data_as_of=latest_date, source=price_source)
     return json_safe(payload)
 
 
@@ -1405,8 +1480,7 @@ def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, lim
     ]
     timeline.sort(key=lambda item: str(item["date"]))
 
-    return json_safe(
-        {
+    payload = {
             "metadata": {
                 "code": result.stock_code,
                 "name": result.stock_name,
@@ -1429,7 +1503,8 @@ def build_hkex_announcements_payload(stock_code: str, period_years: int = 1, lim
             "timeline": timeline,
             "data_quality_warnings": [result.error] if result.error else [],
         }
-    )
+    with_source_fields(payload, data_as_of=result.to_date, source="HKEXnews")
+    return json_safe(payload)
 
 
 def build_events_payload(stock_code: str, limit: int = 30, timeout: int = 30, headless: bool = True) -> dict[str, Any]:
@@ -1439,14 +1514,14 @@ def build_events_payload(stock_code: str, limit: int = 30, timeout: int = 30, he
     lookup = resolve_issue_id_from_stock(code, timeout=min(timeout, 12), headless=headless)
     warnings: list[str] = []
     if lookup.status != "success" or not lookup.issue_id:
-        return json_safe(
-            {
+        payload = {
                 "metadata": {"code": code, "name": "", "issue_id": "", "source_url": ""},
                 "events_summary": {"total_count": 0, "returned_count": 0, "truncated": False},
                 "events": [],
                 "data_quality_warnings": [f"Issue lookup failed: {lookup.message or 'Webb-site issue ID not resolved.'}"],
             }
-        )
+        with_source_fields(payload, data_as_of="", source="Webb-site")
+        return json_safe(payload)
 
     url = events_url(lookup.issue_id)
     result = fetch_with_requests("Events", url, timeout=min(timeout, 20))
@@ -1461,8 +1536,7 @@ def build_events_payload(stock_code: str, limit: int = 30, timeout: int = 30, he
             warnings.append("No events were found for this stock (source table missing or empty).")
 
     limited = records[:limit]
-    return json_safe(
-        {
+    payload = {
             "metadata": {"code": code, "name": name, "issue_id": lookup.issue_id, "source_url": url},
             "events_summary": {
                 "total_count": len(records),
@@ -1472,7 +1546,8 @@ def build_events_payload(stock_code: str, limit: int = 30, timeout: int = 30, he
             "events": limited,
             "data_quality_warnings": warnings,
         }
-    )
+    with_source_fields(payload, data_as_of=max((str(row.get("announce_date") or row.get("ex_date") or row.get("date") or "") for row in limited), default=""), source="Webb-site")
+    return json_safe(payload)
 
 
 def fetch_f10_managers(code: str, timeout: int) -> tuple[list[dict[str, Any]], str, list[str]]:
@@ -1521,11 +1596,11 @@ def build_capital_payload(stock_code: str, changes_limit: int = 30, buybacks_lim
 
     limited_changes = changes[:changes_limit]
     limited_buybacks = buybacks[:buybacks_limit]
-    return json_safe(
-        {
+    latest_capital = latest_share_capital(changes)
+    payload = {
             "metadata": {"code": code, "source_url": url, "provider": "10jqka F10"},
             "capital_summary": {
-                "latest_share_capital": latest_share_capital(changes),
+                "latest_share_capital": latest_capital,
                 "share_changes_total_count": len(changes),
                 "share_changes_returned_count": len(limited_changes),
                 "buybacks_total_count": len(buybacks),
@@ -1536,7 +1611,8 @@ def build_capital_payload(stock_code: str, changes_limit: int = 30, buybacks_lim
             "buybacks": limited_buybacks,
             "data_quality_warnings": warnings,
         }
-    )
+    with_source_fields(payload, data_as_of=(latest_capital or {}).get("as_of", ""), source="10jqka F10")
+    return json_safe(payload)
 
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -1559,13 +1635,13 @@ def build_diff_payload(stock_code: str, date_a: str, date_b: str, timeout: int =
 
     lookup = resolve_issue_id_from_stock(code, timeout=min(timeout, 12), headless=True)
     if lookup.status != "success" or not lookup.issue_id:
-        return json_safe(
-            {
+        payload = {
                 "metadata": {"code": code, "issue_id": "", "date_a": date_a, "date_b": date_b},
                 "diff": None,
                 "data_quality_warnings": [f"Issue lookup failed: {lookup.message or 'Webb-site issue ID not resolved.'}"],
             }
-        )
+        with_source_fields(payload, data_as_of=date_b, source="Webb-site")
+        return json_safe(payload)
 
     urls = {"a": snapshot_url(lookup.issue_id, date_a), "b": snapshot_url(lookup.issue_id, date_b)}
     warnings: list[str] = []
@@ -1592,8 +1668,7 @@ def build_diff_payload(stock_code: str, date_a: str, date_b: str, timeout: int =
     if snapshots["a"] and snapshots["b"]:
         diff = diff_snapshots(snapshots["a"], snapshots["b"], date_a, date_b)
 
-    return json_safe(
-        {
+    payload = {
             "metadata": {
                 "code": code,
                 "issue_id": lookup.issue_id,
@@ -1606,7 +1681,8 @@ def build_diff_payload(stock_code: str, date_a: str, date_b: str, timeout: int =
             "diff": diff,
             "data_quality_warnings": warnings,
         }
-    )
+    with_source_fields(payload, data_as_of=date_b, source="Webb-site")
+    return json_safe(payload)
 
 
 def build_officers_payload(
@@ -1615,8 +1691,12 @@ def build_officers_payload(
     code = clean_stock_code(stock_code)
     if not code:
         raise HTTPException(status_code=400, detail="Provide code.")
-    lookup = resolve_issue_id_from_stock(code, timeout=min(timeout, 12), headless=headless)
     warnings: list[str] = []
+
+    managers, f10_name, f10_warnings = fetch_f10_managers(code, timeout)
+    warnings.extend(f10_warnings)
+
+    lookup = resolve_issue_id_from_stock(code, timeout=min(timeout, 12), headless=headless)
     org_id = extract_org_id_from_html(lookup.result.html if lookup.result else "")
 
     officers: list[dict[str, Any]] = []
@@ -1638,12 +1718,9 @@ def build_officers_payload(
             if not officers:
                 warnings.append("No officers were found for this stock (source table missing or empty).")
 
-    managers, f10_name, f10_warnings = fetch_f10_managers(code, timeout)
-    warnings.extend(f10_warnings)
-
     current = [officer for officer in officers if officer.get("is_current")]
-    return json_safe(
-        {
+    data_as_of = snapshot_date or "current_f10_and_webbsite_2025-03-31"
+    payload = {
             "metadata": {"code": code, "name": name or f10_name, "org_id": org_id, "source_url": url},
             "officers_summary": {
                 "total_count": len(officers),
@@ -1663,7 +1740,8 @@ def build_officers_payload(
             },
             "data_quality_warnings": warnings,
         }
-    )
+    with_source_fields(payload, data_as_of=data_as_of, source="10jqka F10 primary; Webb-site officers historical fallback")
+    return json_safe(payload)
 
 
 @mcp_server.tool(
@@ -1690,10 +1768,11 @@ async def get_ccass_stock_data(
             big_changes_limit=big_changes_limit,
             concentration_limit=concentration_limit,
             headless=True,
+            source_preference="sdw",
         )
 
     try:
-        return await run_ccass_tool_with_budget("get_ccass_stock_data", work, stock_code=code, tool_timeout=8)
+        return await run_ccass_tool_with_budget("get_ccass_stock_data", work, stock_code=code, tool_timeout=30)
     except Exception as exc:
         logger.exception("get_ccass_stock_data failed")
         return mcp_exception_payload("get_ccass_stock_data", exc)
@@ -1702,8 +1781,9 @@ async def get_ccass_stock_data(
 @mcp_server.tool(
     name="get_webbsite_price_history",
     description=(
-        "Fetch Webb-site price history for a Hong Kong listed stock. "
-        "Returns latest close, volume, turnover, VWAP and recent price_history rows."
+        "Fetch daily price history for a Hong Kong listed stock. Yahoo Finance is "
+        "primary; Webb-site/local cached price history is fallback. Returns latest "
+        "close, volume, turnover/estimated turnover, VWAP/estimated VWAP and recent rows."
     ),
 )
 async def get_webbsite_price_history(
@@ -1714,7 +1794,7 @@ async def get_webbsite_price_history(
         return build_price_history_payload(stock_code=code, limit=limit, timeout=20, headless=True)
 
     try:
-        return await run_ccass_tool_with_budget("get_webbsite_price_history", work, stock_code=code, tool_timeout=8)
+        return await run_ccass_tool_with_budget("get_webbsite_price_history", work, stock_code=code, tool_timeout=30)
     except Exception as exc:
         logger.exception("get_webbsite_price_history failed")
         return mcp_exception_payload("get_webbsite_price_history", exc)
@@ -1803,7 +1883,7 @@ async def screen_stocks(
         return build_screen_payload(codes=codes, timeout=12)
 
     try:
-        return await run_ccass_tool_with_budget("screen_stocks", work, stock_code=first_code, tool_timeout=8)
+        return await run_ccass_tool_with_budget("screen_stocks", work, stock_code=first_code, tool_timeout=45)
     except Exception as exc:
         logger.exception("screen_stocks failed")
         return mcp_exception_payload("screen_stocks", exc)

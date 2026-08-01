@@ -173,24 +173,39 @@ class ApiAuthTests(unittest.TestCase):
                 "issued_securities": "10,000,000",
             }
         )
-        base["exported"]["price_history"] = [
-            {
-                "Date": f"2026-06-{index:02d}",
-                "Close": index / 10 + 0.000000011920929,
-                "Volume": index * 1000,
-                "Turnover": index * index * 100 + 0.000000011920929,
-                "VWAP": None,
-                "price_source": "yahoo",
-                "turnover_est": index * index * 100 + 0.000000011920929,
-            }
-            for index in range(1, 6)
-        ]
+        yahoo_table = api.pd.DataFrame(
+            [
+                {
+                    "Date": f"2026-06-{index:02d}",
+                    "Close": index / 10 + 0.000000011920929,
+                    "Volume": index * 1000,
+                    "Turnover": index * index * 100 + 0.000000011920929,
+                    "VWAP": None,
+                    "price_source": "yahoo",
+                    "turnover_est": index * index * 100 + 0.000000011920929,
+                }
+                for index in range(1, 6)
+            ]
+        )
+        yahoo_result = SimpleNamespace(
+            ok=True,
+            ticker="1592.HK",
+            table=yahoo_table,
+            warning="Turnover is estimated as volume \u00d7 close, not actual turnover",
+            error_type="",
+            error_message="",
+        )
         with patch.object(api, "build_base_payload", return_value=base):
-            payload = api.build_price_history_payload("01592", limit=2)
+            with patch.object(api, "fetch_yahoo_price_history", return_value=yahoo_result):
+                payload = api.build_price_history_payload("01592", limit=2)
         self.assertEqual(payload["metadata"]["code"], "01592")
-        self.assertEqual(payload["price_summary"]["latest_date"], "2026-06-30")
+        self.assertIn("source", payload)
+        self.assertIn("data_as_of", payload)
+        self.assertEqual(payload["source"], "yahoo")
+        self.assertEqual(payload["data_as_of"], "2026-06-05")
+        self.assertEqual(payload["price_summary"]["latest_date"], "2026-06-05")
         self.assertEqual(payload["price_summary"]["latest_market_cap"], 5000000.0)
-        self.assertEqual(payload["price_summary"]["latest_turnover_to_market_cap_pct"], 10.0)
+        self.assertEqual(payload["price_summary"]["latest_turnover_to_market_cap_pct"], 0.05)
         self.assertEqual(payload["price_summary"]["price_history_returned_count"], 2)
         self.assertIn("Turnover / Market Cap %", payload["price_history"][0])
         self.assertEqual(payload["price_history"][0]["Close"], 0.5)
@@ -229,6 +244,8 @@ class ApiAuthTests(unittest.TestCase):
         ):
             payload = api.build_screen_payload(["03321"], timeout=1)
         largest = payload["results"][0]["largest_participant"]
+        self.assertEqual(payload["source"], "sdw+local_db")
+        self.assertEqual(payload["data_as_of"], "2026-07-30")
         self.assertEqual(largest["name"], "KINGSTON SECURITIES LTD")
         self.assertEqual(largest["participant_id"], "C00019")
         self.assertEqual(largest["category"], "bank")
@@ -264,6 +281,8 @@ class ApiAuthTests(unittest.TestCase):
         with patch.object(api, "fetch_announcements", return_value=result):
             payload = api.build_hkex_announcements_payload("03321", period_years=1, limit=100)
         self.assertEqual(payload["metadata"]["code"], "03321")
+        self.assertEqual(payload["source"], "HKEXnews")
+        self.assertEqual(payload["data_as_of"], "2026-07-02")
         self.assertEqual(payload["announcements_summary"]["returned_count"], 1)
         self.assertIn("share_consolidation", payload["announcements"][0]["Event tags"])
         self.assertIn("change_company_name", payload["announcements_summary"]["event_tags_found"])
@@ -351,6 +370,8 @@ class ApiAuthTests(unittest.TestCase):
                 status_code, payload = asgi_get("/api/stock?code=01592&key=correct-token")
         self.assertEqual(status_code, 200)
         self.assertTrue(required.issubset(payload))
+        self.assertIn("source", payload)
+        self.assertIn("data_as_of", payload)
         self.assertEqual(payload["metadata"]["name"], "Mock Stock")
         self.assertEqual(payload["metadata"]["holdings_date"], "2026-06-26")
         self.assertEqual(payload["metadata"]["changes_date"], "2026-06-26")

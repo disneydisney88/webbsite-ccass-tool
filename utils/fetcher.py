@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import time
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Optional
 
 # 0xmd is temporarily blocked by Cloudflare. Keep it configurable, but use the
@@ -29,6 +31,9 @@ USER_AGENT = (
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 DETERMINISTIC_FAILURE_TYPES = {"SOURCE_CHALLENGE", "MIRROR_BLOCKED"}
 DETERMINISTIC_FAILURE_STATUS_CODES = {402, 403}
+WEBB_DATABASE_CHALLENGE_COOKIE_NAME = "ayuus"
+WEBB_DATABASE_CHALLENGE_COOKIE_MAGIC = "94run15wglA7NegzhIu4D"
+WEBB_DATABASE_CHALLENGE_COOKIE_TTL_SECONDS = 600
 
 
 def ensure_playwright_chromium() -> tuple[bool, str]:
@@ -205,6 +210,22 @@ def body_head(text: str, limit: int = 500) -> str:
     return re.sub(r"\s+", " ", text or "").strip()[:limit]
 
 
+def webb_database_host(url: str) -> str:
+    return (urlparse(url).hostname or "").lower()
+
+
+def is_webb_database_url(url: str) -> bool:
+    host = webb_database_host(url)
+    return host == "webb-database.com" or host.endswith(".webb-database.com")
+
+
+def webb_database_cookie_value(user_agent: str, now_ms: Optional[int] = None) -> str:
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    day_bucket = str(int(current_ms / 1000 / 86400))
+    inner = hashlib.md5((day_bucket + user_agent + WEBB_DATABASE_CHALLENGE_COOKIE_MAGIC).encode("utf-8")).hexdigest()
+    return hashlib.md5((day_bucket + WEBB_DATABASE_CHALLENGE_COOKIE_MAGIC + inner).encode("utf-8")).hexdigest()
+
+
 def looks_like_js_cookie_challenge(html: str) -> bool:
     text = (html or "").lower()
     return bool(
@@ -252,23 +273,25 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
     result = FetchResult(name=name, url=url, fetched_time=now_iso(), method="requests")
     last_error_type = ""
     last_error_message = ""
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"})
+
+    def populate_from_response(response) -> None:
+        result.status = response.status_code
+        result.status_reason = response.reason or ""
+        result.final_url = response.url
+        if response.apparent_encoding:
+            response.encoding = response.apparent_encoding
+        result.html = response.text
+        result.raw_text = html_to_text(response.text)
+        result.response_snippet = body_head(response.text)
+
     for attempt in range(1, attempts + 1):
         result.attempts = attempt
         result.method = "requests" if attempt == 1 else f"requests retry {attempt}/{attempts}"
         try:
-            response = requests.get(
-                url,
-                timeout=timeout,
-                headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-            )
-            result.status = response.status_code
-            result.status_reason = response.reason or ""
-            result.final_url = response.url
-            if response.apparent_encoding:
-                response.encoding = response.apparent_encoding
-            result.html = response.text
-            result.raw_text = html_to_text(response.text)
-            result.response_snippet = body_head(response.text)
+            response = session.get(url, timeout=timeout)
+            populate_from_response(response)
             challenge_text = f"{response.status_code} {response.text[:1000]}".lower()
             if response.status_code == 403 or "cloudflare" in challenge_text or "turnstile" in challenge_text or "cf-chl" in challenge_text:
                 result.error_type = "MIRROR_BLOCKED"
@@ -284,10 +307,35 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
                     continue
                 return result
             if looks_like_js_cookie_challenge(response.text):
-                result.error_type = "SOURCE_CHALLENGE"
-                result.error_message = f"Upstream returned a JavaScript cookie/reload challenge instead of data. {upstream_failure_message(result)}"
-                result.ok = False
-                return result
+                if is_webb_database_url(url):
+                    cookie_value = webb_database_cookie_value(USER_AGENT)
+                    host = webb_database_host(url)
+                    session.cookies.set(WEBB_DATABASE_CHALLENGE_COOKIE_NAME, cookie_value, domain=host, path="/")
+                    if host.endswith(".webb-database.com") and host != "webb-database.com":
+                        session.cookies.set(
+                            WEBB_DATABASE_CHALLENGE_COOKIE_NAME,
+                            cookie_value,
+                            domain=".webb-database.com",
+                            path="/",
+                        )
+                    solved = session.get(url, timeout=timeout)
+                    populate_from_response(solved)
+                    if not looks_like_js_cookie_challenge(solved.text):
+                        response = solved
+                        result.fallback_method_used = "webb-database challenge cookie"
+                    else:
+                        result.error_type = "SOURCE_CHALLENGE"
+                        result.error_message = (
+                            "Upstream returned a JavaScript cookie/reload challenge even after challenge cookie retry. "
+                            f"{upstream_failure_message(result)}"
+                        )
+                        result.ok = False
+                        return result
+                else:
+                    result.error_type = "SOURCE_CHALLENGE"
+                    result.error_message = f"Upstream returned a JavaScript cookie/reload challenge instead of data. {upstream_failure_message(result)}"
+                    result.ok = False
+                    return result
             result.tables = extract_tables_from_html(response.text)
             if not result.tables:
                 result.error_type = "ValueError"

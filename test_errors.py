@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import api
-from utils.fetcher import fetch_with_requests
+from utils.fetcher import fetch_with_requests, webb_database_cookie_value
 from utils.errors import classify_fetch_message, errors_from_fetch_summary, structured_error
 
 
@@ -35,6 +35,17 @@ class FetchSummaryErrorsTest(unittest.TestCase):
         self.assertTrue(errors[0]["retry_recommended"])
         self.assertIn("Price History", errors[0]["message"])
 
+    def test_big_changes_local_history_gap_is_treated_as_warning(self):
+        summary = [
+            {
+                "Section": "Big Changes",
+                "Status": "failed",
+                "Error": "Big Changes require local history or mirror historical data; not enough SDW snapshots are available yet.",
+            }
+        ]
+        errors = errors_from_fetch_summary(summary)
+        self.assertEqual(errors, [])
+
 
 class UnauthorizedStructuredTest(unittest.TestCase):
     def test_401_detail_is_structured(self):
@@ -45,16 +56,77 @@ class UnauthorizedStructuredTest(unittest.TestCase):
 
 
 class FetchDiagnosticsTest(unittest.TestCase):
+    def test_webb_database_cookie_value_matches_the_challenge_formula(self):
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        self.assertEqual(
+            webb_database_cookie_value(ua, now_ms=1722470400000),
+            "fb9d6ebaead0c96585660a30a89cffbe",
+        )
+
+    def test_js_cookie_challenge_can_be_solved_with_session_retry(self):
+        class FakeResponse:
+            def __init__(self, text: str, url: str = "https://webb-database.com/ccass/choldings.asp?i=26603"):
+                self.status_code = 200
+                self.reason = "OK"
+                self.url = url
+                self.apparent_encoding = "utf-8"
+                self.text = text
+                self.encoding = None
+
+        class FakeCookies:
+            def __init__(self):
+                self.items = []
+
+            def set(self, name, value, domain=None, path="/"):
+                self.items.append((name, value, domain, path))
+
+        class FakeSession:
+            def __init__(self):
+                self.headers = {}
+                self.cookies = FakeCookies()
+                self.calls = 0
+
+            def get(self, url, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return FakeResponse("<script src='/432182.js'></script><script>setCookie();location.reload();</script>")
+                return FakeResponse("<table><tr><th>A</th></tr><tr><td>1</td></tr></table>")
+
+        fake_session = FakeSession()
+
+        with patch("requests.Session", return_value=fake_session):
+            result = fetch_with_requests("Holdings", "https://webb-database.com/ccass/choldings.asp?i=26603", timeout=1)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.attempts, 1)
+        self.assertEqual(result.fallback_method_used, "webb-database challenge cookie")
+        self.assertEqual(len(result.tables), 1)
+        self.assertGreaterEqual(len(fake_session.cookies.items), 1)
+
     def test_js_cookie_challenge_is_reported_with_body_head(self):
         class FakeResponse:
-            status_code = 200
-            reason = "OK"
-            url = "https://webb-database.com/ccass/choldings.asp?i=26603"
-            apparent_encoding = "utf-8"
-            text = "<script>setCookie(); location.reload();</script>"
+            def __init__(self):
+                self.status_code = 200
+                self.reason = "OK"
+                self.url = "https://example.com"
+                self.apparent_encoding = "utf-8"
+                self.text = "<script>setCookie(); location.reload();</script>"
+                self.encoding = None
 
-        with patch("requests.get", return_value=FakeResponse()):
-            result = fetch_with_requests("Holdings", FakeResponse.url, timeout=1)
+        class FakeCookies:
+            def set(self, *args, **kwargs):
+                pass
+
+        class FakeSession:
+            def __init__(self):
+                self.headers = {}
+                self.cookies = FakeCookies()
+
+            def get(self, url, timeout=None):
+                return FakeResponse()
+
+        with patch("requests.Session", return_value=FakeSession()):
+            result = fetch_with_requests("Holdings", "https://example.com", timeout=1)
         self.assertFalse(result.ok)
         self.assertEqual(result.error_type, "SOURCE_CHALLENGE")
         self.assertIn("JavaScript cookie/reload challenge", result.error_message)

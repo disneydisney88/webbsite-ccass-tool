@@ -43,6 +43,7 @@ from utils.f10_managers import f10_managers_url, parse_f10_managers_html, parse_
 from utils.snapshot import diff_snapshots, parse_holdings_snapshot, snapshot_url
 from utils.errors import errors_from_fetch_summary, errors_from_warnings, structured_error
 from utils.hkexnews import fetch_announcements
+from utils.hkex_announcement_pdf import fetch_announcement_pdf as fetch_hkex_announcement_pdf
 from utils.officers import (
     extract_org_id_from_html,
     officers_url,
@@ -52,7 +53,7 @@ from utils.officers import (
 )
 from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
-from utils.source_router import fetch_mirror_bundle, fetch_sdw_bundle, fetch_source_bundle_for_stock, issue_id_for_stock
+from utils.source_router import fetch_local_db_bundle, fetch_mirror_bundle, fetch_source_bundle_for_stock, issue_id_for_stock
 from utils.fetch_yahoo import fetch_yahoo_price_history
 from utils.upstream_probe import probe_url, probe_upstreams
 from utils.snapshot_db import (
@@ -76,7 +77,8 @@ def int_env(name: str, default: int) -> int:
 
 
 API_TITLE = "Webb-site CCASS Research API"
-API_VERSION = "1.12.1"
+API_SERVICE = "webbsite-ccass-api"
+API_VERSION = "1.13.0"
 CACHE_TTL_SECONDS = max(0, int_env("API_CACHE_TTL_SECONDS", 86400))
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -93,6 +95,7 @@ logger = logging.getLogger("webbsite_ccass_api")
 bearer_scheme = HTTPBearer(auto_error=False)
 _stock_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _mcp_session_context: Any = None
+_APP_STARTED_MONOTONIC = time.monotonic()
 
 app = FastAPI(
     title=API_TITLE,
@@ -139,6 +142,7 @@ class HealthResponse(BaseModel):
     ok: bool
     service: str
     version: str
+    uptime_seconds: int
     upstreams: dict[str, Any] | None = None
 
 
@@ -469,7 +473,9 @@ def build_base_payload(
 
     known_issue_id = issue_id_for_stock(stock_code)
     source_preference = (source_preference or "auto").strip().lower()
-    if source_preference not in {"auto", "sdw", "mirror"}:
+    if source_preference == "sdw":
+        source_preference = "local_db"
+    if source_preference not in {"auto", "local_db", "mirror"}:
         source_preference = "auto"
 
     if source_preference == "auto" and known_issue_id:
@@ -483,8 +489,8 @@ def build_base_payload(
             cache_set(stock_code, payload)
             return copy.deepcopy(payload)
 
-    if source_preference == "sdw":
-        bundle = fetch_sdw_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, mirror_status="direct_pages_only")
+    if source_preference == "local_db":
+        bundle = fetch_local_db_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, mirror_status="direct_pages_only")
     elif source_preference == "mirror":
         bundle = fetch_mirror_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, headless=headless)
     else:
@@ -699,6 +705,32 @@ def latest_date_from_records(records: list[dict[str, Any]], key: str = "Date") -
     return max(dates).strftime("%Y-%m-%d") if dates else ""
 
 
+def resolve_price_history_share_capital(stock_code: str, timeout: int = 30) -> tuple[Any, str, str, list[str]]:
+    code = clean_stock_code(stock_code)
+    if not code:
+        return "", "", "", ["Issued securities unavailable: stock code is required."]
+
+    capital_payload = build_capital_payload(stock_code=code, changes_limit=1, buybacks_limit=0, timeout=timeout)
+    latest_capital = capital_payload.get("capital_summary", {}).get("latest_share_capital") or {}
+    local_meta = load_stock_meta(code)
+    warnings = list(capital_payload.get("data_quality_warnings", []))
+
+    issued_securities = latest_capital.get("shares_approx")
+    issued_securities_source = "10jqka F10" if issued_securities not in (None, "") else ""
+    issued_securities_as_of = str(latest_capital.get("as_of") or "")
+
+    if issued_securities in (None, ""):
+        issued_securities = local_meta.get("issued_shares", "")
+        if issued_securities not in (None, ""):
+            issued_securities_source = "local_db snapshot fallback"
+            issued_securities_as_of = str(local_meta.get("issued_shares_as_of") or "")
+
+    if issued_securities in (None, ""):
+        warnings.append("Issued securities unavailable from 10jqka F10 and local snapshot DB; market cap cannot be computed.")
+
+    return issued_securities, issued_securities_source, issued_securities_as_of, warnings
+
+
 def announcement_event_tags(row: dict[str, Any]) -> list[str]:
     text = f"{row.get('Category', '')} {row.get('Title', '')}".lower()
     patterns = [
@@ -829,7 +861,23 @@ def section_failure_warnings(fetch_summary: list[dict[str, Any]]) -> list[str]:
         error = row.get("Error") or row.get("error_message") or ""
         failed = status_text in {"failed", "false"} or bool(error)
         if failed:
-            warnings.append(f"{section} failed or incomplete: {error or status_text}")
+            section_lower = str(section).strip().lower()
+            error_lower = str(error).lower()
+            if section_lower == "big changes" and any(
+                phrase in error_lower
+                for phrase in (
+                    "local history",
+                    "not enough sdw snapshots",
+                    "mirror historical data",
+                    "big changes require",
+                )
+            ):
+                warnings.append(
+                    "Big Changes unavailable: transfer / distribution inference confidence should be lowered "
+                    "because the large-move timing evidence is incomplete."
+                )
+            else:
+                warnings.append(f"{section} failed or incomplete: {error or status_text}")
     return warnings
 
 
@@ -1394,28 +1442,42 @@ def build_participant_search_payload(participant_id: str, codes: list[str], time
     return json_safe(payload)
 
 
-def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int = 30, headless: bool = True) -> dict[str, Any]:
+def build_price_history_payload(
+    stock_code: str,
+    limit: int = 80,
+    days: int = 1095,
+    start_date: str | None = None,
+    timeout: int = 30,
+    headless: bool = True,
+) -> dict[str, Any]:
     code = clean_stock_code(stock_code)
-    yahoo_result = fetch_yahoo_price_history(code, period_days=max(90, min(1825, int(limit) * 3)))
+    yahoo_result = fetch_yahoo_price_history(code, period_days=max(1, int(days)), start_date=start_date)
     yahoo_ok = bool(getattr(yahoo_result, "ok", False))
     base: dict[str, Any] = {}
     exported: dict[str, Any] = {}
     local_meta = load_stock_meta(code)
+    issued_securities, issued_securities_source, issued_securities_as_of, capital_warnings = resolve_price_history_share_capital(
+        code, timeout=min(timeout, 20)
+    )
     metadata: dict[str, Any] = {
         "stock_code": code,
         "stock_name": local_meta.get("name", ""),
         "issue_id": issue_id_for_stock(code),
-        "issued_securities": local_meta.get("issued_shares", ""),
+        "issued_securities": issued_securities,
+        "issued_securities_source": issued_securities_source,
+        "issued_securities_as_of": issued_securities_as_of,
     }
     if not yahoo_ok:
         base = build_base_payload(stock_code=code, timeout=timeout, headless=headless, source_preference="mirror")
         exported = base.get("exported", {})
         metadata.update(exported.get("metadata", {}))
     price_history = yahoo_result.table.to_dict(orient="records") if yahoo_ok else exported.get("price_history", [])
-    issued_securities = metadata.get("issued_securities", "")
     compact_price_history = enrich_price_history(compact_records(price_history, "price_history", limit), issued_securities)
     fetch_summary = yahoo_price_fetch_summary(yahoo_result) if yahoo_ok else exported.get("fetch_summary", [])
     warnings = list(exported.get("analysis_warnings", []))
+    for warning in capital_warnings:
+        if warning not in warnings:
+            warnings.append(warning)
     if yahoo_ok:
         yahoo_warning = getattr(yahoo_result, "warning", "")
         if yahoo_warning and yahoo_warning not in warnings:
@@ -1440,6 +1502,8 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
     latest_volume = latest_record.get("Volume", metadata.get("latest_price_volume", ""))
     latest_turnover = latest_record.get("Turnover", metadata.get("latest_price_turnover", ""))
     latest_vwap = latest_record.get("VWAP") or latest_record.get("vwap_est") or metadata.get("latest_price_vwap", "")
+    latest_market_cap = market_cap_value(latest_close, issued_securities)
+    latest_turnover_to_market_cap_pct = ratio_percent(latest_turnover, latest_market_cap)
     errors = collect_structured_errors(fetch_summary, warnings)
     payload = {
             "metadata": {
@@ -1455,10 +1519,19 @@ def build_price_history_payload(stock_code: str, limit: int = 80, timeout: int =
                 "latest_vwap": latest_vwap,
                 "price_source": price_source,
                 "issued_securities": issued_securities,
-                "latest_market_cap": market_cap_value(latest_close, issued_securities),
-                "latest_turnover_to_market_cap_pct": ratio_percent(
-                    latest_turnover,
-                    market_cap_value(latest_close, issued_securities),
+                "issued_securities_source": issued_securities_source,
+                "issued_securities_as_of": issued_securities_as_of,
+                "latest_market_cap": latest_market_cap,
+                "market_cap_source": (
+                    f"{issued_securities_source} + Yahoo Finance chart close"
+                    if latest_market_cap is not None and issued_securities_source
+                    else ""
+                ),
+                "latest_turnover_to_market_cap_pct": latest_turnover_to_market_cap_pct,
+                "turnover_to_market_cap_pct_source": (
+                    f"{issued_securities_source} + Yahoo Finance chart close"
+                    if latest_turnover_to_market_cap_pct is not None and issued_securities_source
+                    else ""
                 ),
                 "price_history_total_count": len(price_history),
                 "price_history_returned_count": len(compact_price_history),
@@ -1787,7 +1860,7 @@ async def get_ccass_stock_data(
             big_changes_limit=big_changes_limit,
             concentration_limit=concentration_limit,
             headless=True,
-            source_preference="sdw",
+            source_preference="local_db",
         )
 
     try:
@@ -1801,16 +1874,26 @@ async def get_ccass_stock_data(
     name="get_webbsite_price_history",
     description=(
         "Fetch daily price history for a Hong Kong listed stock. Yahoo Finance is "
-        "primary; Webb-site/local cached price history is fallback. Returns latest "
-        "close, volume, turnover/estimated turnover, VWAP/estimated VWAP and recent rows."
+        "primary; Webb-site/local cached price history is fallback. Use days or "
+        "start_date to widen the Yahoo window. Returns latest close, volume, "
+        "turnover/estimated turnover, VWAP/estimated VWAP, market cap and recent rows."
     ),
 )
 async def get_webbsite_price_history(
     code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code, e.g. 03321.")],
     limit: Annotated[int, Field(ge=1, le=200)] = 80,
+    days: Annotated[int, Field(ge=1, le=3650)] = 1095,
+    start_date: Annotated[str | None, Field(description="Optional YYYY-MM-DD start date for the Yahoo range.")] = None,
 ) -> dict[str, Any]:
     def work() -> dict[str, Any]:
-        return build_price_history_payload(stock_code=code, limit=limit, timeout=20, headless=True)
+        return build_price_history_payload(
+            stock_code=code,
+            limit=limit,
+            days=days,
+            start_date=start_date,
+            timeout=20,
+            headless=True,
+        )
 
     try:
         return await run_ccass_tool_with_budget(
@@ -1839,6 +1922,34 @@ async def get_hkex_announcements(
     limit: Annotated[int, Field(ge=1, le=200)] = 100,
 ) -> dict[str, Any]:
     return build_hkex_announcements_payload(stock_code=code, period_years=period_years, limit=limit, timeout=30)
+
+
+@mcp_server.tool(
+    name="fetch_announcement_pdf",
+    description=(
+        "Fetch a PDF announcement from an hkexnews.hk URL and extract readable text. "
+        "Only HTTPS HKEX announcement hosts are accepted. Results include publication "
+        "date, page/character counts, truncation state and cache status."
+    ),
+)
+async def fetch_announcement_pdf(
+    url: Annotated[str, Field(description="HTTPS URL on www1.hkexnews.hk, www.hkexnews.hk or hkexnews.hk.")],
+    max_chars: Annotated[int, Field(ge=1, le=500_000)] = 50_000,
+) -> dict[str, Any]:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(fetch_hkex_announcement_pdf, url, max_chars, timeout=20.0),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        return mcp_timeout_payload(
+            "fetch_announcement_pdf",
+            message="HKEX announcement PDF extraction exceeded the 20-second wall-clock budget.",
+            source="hkexnews",
+        )
+    except Exception as exc:
+        logger.exception("fetch_announcement_pdf failed")
+        return mcp_exception_payload("fetch_announcement_pdf", exc)
 
 
 @mcp_server.tool(
@@ -1983,9 +2094,14 @@ def root() -> dict[str, Any]:
     }
 
 
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and F10 upstreams.")) -> dict[str, Any]:
-    payload: dict[str, Any] = {"ok": True, "service": API_TITLE, "version": API_VERSION}
+    payload: dict[str, Any] = {
+        "ok": True,
+        "service": API_SERVICE,
+        "version": API_VERSION,
+        "uptime_seconds": int(max(0.0, time.monotonic() - _APP_STARTED_MONOTONIC)),
+    }
     if upstreams:
         payload["upstreams"] = probe_upstreams(timeout=5)
     return payload
@@ -2020,6 +2136,18 @@ def robots_txt() -> Response:
         "Disallow:\n",
         media_type="text/plain",
     )
+
+
+@app.get(
+    "/announcement/pdf",
+    operation_id="fetchAnnouncementPdf",
+    dependencies=[Depends(verify_api_token)],
+)
+def fetch_announcement_pdf_endpoint(
+    url: str = Query(..., description="HTTPS HKEX announcement PDF URL."),
+    max_chars: int = Query(50_000, description="Maximum extracted characters returned."),
+) -> dict[str, Any]:
+    return fetch_hkex_announcement_pdf(url, max_chars=max_chars, timeout=20.0)
 
 
 @app.get(
@@ -2109,12 +2237,21 @@ def get_stock_price_endpoint(
     code: str | None = Query(None, description="HK stock code, e.g. 02028."),
     stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
     limit: int = Query(80, ge=1, le=200, description="Maximum price-history rows returned."),
+    days: int = Query(1095, ge=1, le=3650, description="Yahoo lookback window in days."),
+    start_date: str | None = Query(None, description="Optional YYYY-MM-DD start date for the Yahoo range."),
     timeout: int = Query(30, ge=10, le=35, description="Fetch timeout budget in seconds."),
 ) -> dict[str, Any]:
     requested_code = code or stock_code or ""
     if not requested_code:
         raise HTTPException(status_code=400, detail="Provide code.")
-    return build_price_history_payload(stock_code=requested_code, limit=limit, timeout=timeout, headless=True)
+    return build_price_history_payload(
+        stock_code=requested_code,
+        limit=limit,
+        days=days,
+        start_date=start_date,
+        timeout=timeout,
+        headless=True,
+    )
 
 
 @app.get("/api/stock/announcements", operation_id="getStockAnnouncements", dependencies=[Depends(verify_api_token)])

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -125,8 +126,22 @@ class ApiAuthTests(unittest.TestCase):
         api._stock_cache.clear()
 
     def test_health_without_token_returns_200(self) -> None:
-        status_code, _ = asgi_get("/health")
+        with patch.object(api, "probe_upstreams") as probe:
+            status_code, payload = asgi_get("/health")
         self.assertEqual(status_code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["service"], api.API_SERVICE)
+        self.assertEqual(payload["version"], api.API_VERSION)
+        self.assertGreaterEqual(payload["uptime_seconds"], 0)
+        self.assertNotIn("upstreams", payload)
+        probe.assert_not_called()
+
+    def test_health_upstream_probe_is_opt_in(self) -> None:
+        with patch.object(api, "probe_upstreams", return_value={"probes": []}) as probe:
+            status_code, payload = asgi_get("/health?upstreams=true")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["upstreams"], {"probes": []})
+        probe.assert_called_once_with(timeout=5)
 
     def test_openapi_without_token_returns_200_and_declares_bearer(self) -> None:
         status_code, schema = asgi_get("/openapi.json")
@@ -157,6 +172,7 @@ class ApiAuthTests(unittest.TestCase):
         self.assertIn("get_ccass_stock_data", names)
         self.assertIn("get_webbsite_price_history", names)
         self.assertIn("get_hkex_announcements", names)
+        self.assertIn("fetch_announcement_pdf", names)
         self.assertEqual(schema["properties"]["code"]["pattern"], "^[0-9]{5}$")
         self.assertEqual(schema["properties"]["holdings_limit"]["maximum"], 100)
         self.assertEqual(schema["properties"]["concentration_limit"]["maximum"], 100)
@@ -195,10 +211,20 @@ class ApiAuthTests(unittest.TestCase):
             error_type="",
             error_message="",
         )
+        capital_payload = {
+            "capital_summary": {
+                "latest_share_capital": {
+                    "shares_approx": 10000000,
+                    "as_of": "2026-06-05",
+                }
+            },
+            "data_quality_warnings": [],
+        }
         with patch.object(api, "build_base_payload", return_value=base):
             with patch.object(api, "load_stock_meta", return_value={"name": "Mock Stock", "issued_shares": "10,000,000", "issued_shares_as_of": "2026-06-05"}):
-                with patch.object(api, "fetch_yahoo_price_history", return_value=yahoo_result):
-                    payload = api.build_price_history_payload("01592", limit=2)
+                with patch.object(api, "build_capital_payload", return_value=capital_payload):
+                    with patch.object(api, "fetch_yahoo_price_history", return_value=yahoo_result):
+                        payload = api.build_price_history_payload("01592", limit=2)
         self.assertEqual(payload["metadata"]["code"], "01592")
         self.assertIn("source", payload)
         self.assertIn("data_as_of", payload)
@@ -207,6 +233,7 @@ class ApiAuthTests(unittest.TestCase):
         self.assertEqual(payload["price_summary"]["latest_date"], "2026-06-05")
         self.assertEqual(payload["price_summary"]["latest_market_cap"], 5000000.0)
         self.assertEqual(payload["price_summary"]["latest_turnover_to_market_cap_pct"], 0.05)
+        self.assertEqual(payload["price_summary"]["issued_securities_source"], "10jqka F10")
         self.assertEqual(payload["price_summary"]["price_history_returned_count"], 2)
         self.assertIn("Turnover / Market Cap %", payload["price_history"][0])
         self.assertEqual(payload["price_history"][0]["Close"], 0.5)
@@ -294,6 +321,92 @@ class ApiAuthTests(unittest.TestCase):
         self.assertEqual(status_code, 401)
         self.assertEqual(payload["detail"]["error_code"], "AUTH_FAILED")
         self.assertFalse(payload["detail"]["retry_recommended"])
+
+
+class AnnouncementPdfTests(unittest.TestCase):
+    def setUp(self) -> None:
+        api._stock_cache.clear()
+
+    def test_pdf_url_validation_returns_structured_error(self) -> None:
+        from utils.hkex_announcement_pdf import fetch_announcement_pdf
+
+        for url in (
+            "http://www1.hkexnews.hk/2026/0730/test.pdf",
+            "https://evil.example/2026/0730/test.pdf",
+            "https://user:password@www1.hkexnews.hk/2026/0730/test.pdf",
+        ):
+            payload = fetch_announcement_pdf(url)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error_code"], "URL_NOT_ALLOWED")
+
+    def test_pdf_route_uses_structured_helper_response(self) -> None:
+        expected = {
+            "ok": False,
+            "error_code": "URL_NOT_ALLOWED",
+            "message": "Only https hkexnews.hk URLs without credentials are accepted.",
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(api, "fetch_hkex_announcement_pdf", return_value=expected) as fetch:
+                status_code, payload = asgi_get(
+                    "/announcement/pdf?url=https%3A%2F%2Fwww1.hkexnews.hk%2Ftest.pdf&max_chars=100"
+                )
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload, expected)
+        fetch.assert_called_once_with(
+            "https://www1.hkexnews.hk/test.pdf",
+            max_chars=100,
+            timeout=20.0,
+        )
+
+    def test_pdf_extracts_chinese_truncates_and_reuses_full_cache(self) -> None:
+        import fitz
+
+        from utils.hkex_announcement_pdf import fetch_announcement_pdf
+
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "\u914d\u552e \u6388\u6b0a \u80a1\u4efd", fontname="china-s")
+        pdf_bytes = document.tobytes()
+        document.close()
+        response = SimpleNamespace(
+            status_code=200,
+            reason="OK",
+            url="https://www1.hkexnews.hk/2026/0730/test.pdf",
+            content=pdf_bytes,
+        )
+        with tempfile.TemporaryDirectory() as cache_dir:
+            with patch.dict(os.environ, {"HKEX_PDF_CACHE_DIR": cache_dir}):
+                with patch("utils.hkex_announcement_pdf.requests.get", return_value=response) as get:
+                    first = fetch_announcement_pdf(response.url, max_chars=4)
+                    second = fetch_announcement_pdf(response.url, max_chars=100)
+
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["data_as_of"], "2026-07-30")
+        self.assertTrue(first["truncated"])
+        self.assertEqual(first["chars_returned"], 4)
+        self.assertIn("\u914d\u552e", first["text"])
+        self.assertTrue(second["ok"])
+        self.assertTrue(second["cached"])
+        self.assertFalse(second["truncated"])
+        self.assertIn("\u914d\u552e", second["text"])
+        self.assertIn("\u6388\u6b0a", second["text"])
+        self.assertIn("\u80a1\u4efd", second["text"])
+        get.assert_called_once()
+
+    def test_non_pdf_upstream_returns_body_head_without_raising(self) -> None:
+        from utils.hkex_announcement_pdf import fetch_announcement_pdf
+
+        response = SimpleNamespace(
+            status_code=200,
+            reason="OK",
+            url="https://www1.hkexnews.hk/2026/0730/test.pdf",
+            content=b"<html><body>setCookie(); location.reload();</body></html>",
+        )
+        with patch("utils.hkex_announcement_pdf.requests.get", return_value=response):
+            payload = fetch_announcement_pdf(response.url)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error_code"], "UPSTREAM_NOT_PDF")
+        self.assertIn("setCookie", payload["body_head"])
 
     def test_stock_with_wrong_token_returns_401(self) -> None:
         with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):

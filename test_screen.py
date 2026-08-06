@@ -32,7 +32,7 @@ def fake_payload(code: str) -> dict:
 
 class ScreenOneTest(unittest.TestCase):
     def test_summary_extraction(self):
-        with patch.object(api, "build_stock_payload", side_effect=lambda stock_code, timeout: fake_payload(stock_code)):
+        with patch.object(api, "build_stock_payload", side_effect=lambda stock_code, timeout, **kwargs: fake_payload(stock_code)):
             summary = api.screen_one_stock("01592", 25)
         self.assertEqual(summary["code"], "01592")
         self.assertEqual(summary["name"], "Stock 01592")
@@ -59,7 +59,7 @@ class ScreenOneTest(unittest.TestCase):
 
 class ScreenBatchTest(unittest.TestCase):
     def test_dedupes_and_preserves_order(self):
-        with patch.object(api, "build_stock_payload", side_effect=lambda stock_code, timeout: fake_payload(stock_code)):
+        with patch.object(api, "build_stock_payload", side_effect=lambda stock_code, timeout, **kwargs: fake_payload(stock_code)):
             payload = api.build_screen_payload(["02028", "01592", "02028", "6162"], timeout=25)
         codes = [r["code"] for r in payload["results"]]
         self.assertEqual(codes, ["02028", "01592", "06162"])
@@ -67,7 +67,7 @@ class ScreenBatchTest(unittest.TestCase):
 
     def test_caps_at_20(self):
         many = [f"{i:05d}" for i in range(1, 26)]
-        with patch.object(api, "build_stock_payload", side_effect=lambda stock_code, timeout: fake_payload(stock_code)):
+        with patch.object(api, "build_stock_payload", side_effect=lambda stock_code, timeout, **kwargs: fake_payload(stock_code)):
             payload = api.build_screen_payload(many, timeout=25)
         self.assertEqual(len(payload["results"]), 20)
         self.assertTrue(any("only the first 20" in w for w in payload["data_quality_warnings"]))

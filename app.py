@@ -41,7 +41,7 @@ from utils.events import events_url, parse_events_html, parse_events_name
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html
 from utils.f10_equity import f10_equity_url, parse_f10_buybacks, parse_f10_share_changes
 from utils.snapshot_db import DB_PATH, export_db_bytes
-from utils.source_router import fetch_mirror_bundle, fetch_render_api_bundle, fetch_sdw_bundle, fetch_source_bundle_for_stock, get_source_mode, stock_code_for_issue_id
+from utils.source_router import fetch_local_db_bundle, fetch_mirror_bundle, fetch_render_api_bundle, fetch_source_bundle_for_stock, get_source_mode, stock_code_for_issue_id
 
 exporters = importlib.reload(exporters)
 combined_stock_csv = exporters.combined_stock_csv
@@ -1390,7 +1390,7 @@ if fetch_clicked:
                 if render_bundle is not None:
                     bundle = render_bundle
                 elif get_source_mode() == "sdw" and stock_code:
-                    bundle = fetch_sdw_bundle(stock_code, issue_id=issue_id, timeout=int(timeout), mirror_status="disabled_by_config")
+                    bundle = fetch_local_db_bundle(stock_code, issue_id=issue_id, timeout=int(timeout), mirror_status="disabled_by_config")
                 else:
                     bundle = fetch_mirror_bundle(stock_code, issue_id=issue_id, timeout=int(timeout), headless=headless, mirror_status="manual_issue_id")
                 lookup = bundle.lookup
@@ -1480,6 +1480,7 @@ lookup = st.session_state.lookup
 hkex_announcements = st.session_state.hkex_announcements
 source_metadata = st.session_state.get("source_metadata", {})
 source_warnings = st.session_state.get("source_warnings", [])
+results = results or {}
 
 st.subheader("Resolved Metadata")
 meta_cols = st.columns(4)

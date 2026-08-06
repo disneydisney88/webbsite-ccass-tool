@@ -63,6 +63,18 @@ def errors_from_fetch_summary(fetch_summary: list[dict[str, Any]]) -> list[dict[
         failed = status_text in {"failed", "false"} or bool(error_message)
         if not failed:
             continue
+        section_lower = str(section).strip().lower()
+        error_lower = str(error_message).lower()
+        if section_lower == "big changes" and any(
+            phrase in error_lower
+            for phrase in (
+                "local history",
+                "not enough sdw snapshots",
+                "mirror historical data",
+                "big changes require",
+            )
+        ):
+            continue
         code = classify_fetch_message(error_type, error_message)
         errors.append(structured_error(code, f"{section}: {error_message or status_text}"))
     return errors

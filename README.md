@@ -163,7 +163,7 @@ The SQLite DB grows with `stock count x trading days x participant rows`. With 5
 
 ## Price History Fallback
 
-Mirror price history (`hpu.asp`) is still kept. When the mirror is available, it remains the preferred source because it includes actual turnover. When the mirror is blocked or the price table fails, the app falls back to Yahoo Finance through the `yfinance` library.
+Mirror price history (`hpu.asp`) is still kept. When the mirror is available, it remains the preferred source because it includes actual turnover. When the mirror is blocked or the price table fails, the app falls back to Yahoo Finance's chart endpoint over HTTP.
 
 Yahoo Finance is not an official HKEX source and may change behavior. Yahoo fallback rows keep the existing price-history columns and add:
 

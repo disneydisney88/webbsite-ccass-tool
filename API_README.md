@@ -11,9 +11,15 @@ python api.py
 Open:
 
 - `http://localhost:8000/health`
+- `http://localhost:8000/health?upstreams=true` (manual upstream diagnostics)
 - `http://localhost:8000/openapi.json`
 - `http://localhost:8000/api/stock?code=01592`
 - `http://localhost:8000/api/stock?code=01592&timeout=30&holdings_limit=15&changes_limit=20&big_changes_limit=10&concentration_limit=15`
+- `http://localhost:8000/announcement/pdf?url=https%3A%2F%2Fwww1.hkexnews.hk%2Flistedco%2Flistconews%2Fgem%2F2026%2F0730%2F2026073000367_c.pdf`
+
+The default `/health` endpoint is process-only and makes no outbound upstream
+requests, so it is safe for a five-minute uptime monitor. Add
+`?upstreams=true` only for a manual diagnostic probe.
 
 ## Optional API Token
 
@@ -137,7 +143,7 @@ During each snapshot run, the API also stores Yahoo Finance daily close/volume i
 The original Webb-site mirror price source (`hpu.asp`) is preserved. Source router behavior:
 
 - mirror price table available: use mirror rows with actual turnover
-- mirror blocked or price table unavailable: use Yahoo Finance via `yfinance`
+- mirror blocked or price table unavailable: use Yahoo Finance chart endpoint over HTTP
 
 Yahoo fallback keeps existing price-history column names and adds:
 
@@ -269,7 +275,9 @@ issued-share base — use it to cross-check stale bases flagged by
 
 MCP tools: `get_stock_events`, `get_stock_officers`, `get_stock_capital` (in
 addition to `get_ccass_stock_data`, `get_webbsite_price_history`,
-`get_hkex_announcements`).
+`get_hkex_announcements`, and `fetch_announcement_pdf`). The PDF tool accepts
+only HTTPS URLs on `hkexnews.hk` hosts, extracts text with PyMuPDF, and caches
+successful documents indefinitely by normalized URL hash.
 
 ## CHANGELOG
 

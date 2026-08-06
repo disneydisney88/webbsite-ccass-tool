@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 import os
@@ -13,6 +14,7 @@ import utils.source_router as source_router
 from utils.fetch_yahoo import (
     YAHOO_TURNOVER_WARNING,
     YAHOO_VWAP_WARNING,
+    fetch_yahoo_price_history,
     yahoo_period_for_days,
     yahoo_table_from_history,
     yahoo_ticker_from_code,
@@ -139,7 +141,7 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
                 self.assertEqual(source_router.mirror_probe("01912", "28222", timeout=30), "ok")
                 browser_fetch.assert_called_once()
 
-    def test_sdw_bundle_uses_local_db_and_yahoo_without_live_sdw_or_webb_price(self) -> None:
+    def test_local_db_bundle_uses_local_db_and_yahoo_without_live_sdw_or_webb_price(self) -> None:
         built = SimpleNamespace(
             results={"Price History": source_router.FetchResult(name="Price History", url="local_db://price_history", ok=False)},
             stock_name="",
@@ -160,14 +162,14 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
             patch.object(source_router, "build_results_from_db", return_value=built),
             patch.object(source_router, "fetch_yahoo_price_history", return_value=yahoo_result) as yahoo_fetch,
         ):
-            bundle = source_router.fetch_sdw_bundle("08191", timeout=30)
+            bundle = source_router.fetch_local_db_bundle("08191", timeout=30)
 
         self.assertEqual(bundle.metadata["source"], "local_db")
         self.assertEqual(bundle.results["Price History"].url, "local_db://price_history")
         webb_fetch.assert_not_called()
         yahoo_fetch.assert_called_once()
         upsert_price.assert_called_once()
-        self.assertTrue(any("Live HKEX SDW fetch is disabled" in warning for warning in bundle.warnings))
+        self.assertTrue(any("Live HKEX SDW scraping is disabled" in warning for warning in bundle.warnings))
 
     def test_yahoo_ticker_conversion_keeps_hk_four_digit_symbol(self) -> None:
         self.assertEqual(yahoo_ticker_from_code("01449"), "1449.HK")
@@ -176,6 +178,99 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
         self.assertEqual(yahoo_ticker_from_code("00005"), "0005.HK")
         self.assertEqual(yahoo_period_for_days(7), "1mo")
         self.assertEqual(yahoo_period_for_days(90), "3mo")
+
+    def test_fetch_yahoo_price_history_uses_chart_payload_without_optional_package(self) -> None:
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [
+                            int(pd.Timestamp("2026-07-30 16:00:00", tz="Asia/Hong_Kong").timestamp()),
+                            int(pd.Timestamp("2026-07-31 16:00:00", tz="Asia/Hong_Kong").timestamp()),
+                        ],
+                        "indicators": {
+                            "quote": [
+                                {
+                                    "open": [0.223, 0.220],
+                                    "high": [0.229, 0.223],
+                                    "low": [0.220, 0.211],
+                                    "close": [0.225, 0.221],
+                                    "volume": [1100000, 300000],
+                                }
+                            ]
+                        },
+                    }
+                ],
+                "error": None,
+            }
+        }
+        response = SimpleNamespace(status_code=200, text=json.dumps(payload), json=lambda: payload)
+        with patch("utils.fetch_yahoo.requests.get", return_value=response) as get_mock:
+            result = fetch_yahoo_price_history("01592", period_days=7)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.ticker, "1592.HK")
+        self.assertEqual(result.table.iloc[0]["Date"], "2026-07-31")
+        self.assertEqual(result.table.iloc[0]["price_source"], "yahoo")
+        self.assertEqual(result.table.iloc[0]["Close"], 0.221)
+        self.assertEqual(len(result.table), 2)
+        get_mock.assert_called_once()
+        _, kwargs = get_mock.call_args
+        self.assertIn("period1", kwargs["params"])
+        self.assertIn("period2", kwargs["params"])
+        self.assertNotIn("range", kwargs["params"])
+        self.assertGreater(kwargs["params"]["period2"], kwargs["params"]["period1"])
+
+    def test_price_history_payload_uses_f10_share_capital_for_market_cap(self) -> None:
+        import api
+
+        yahoo_result = SimpleNamespace(
+            ok=True,
+            table=pd.DataFrame(
+                [
+                    {
+                        "Date": "2026-07-31",
+                        "Close": 1.0,
+                        "Open": 1.0,
+                        "High": 1.0,
+                        "Low": 1.0,
+                        "Volume": 1000,
+                        "Turnover": 1000.0,
+                        "VWAP": "",
+                        "price_source": "yahoo",
+                        "turnover_est": 1000.0,
+                        "vwap_est": 1.0,
+                    }
+                ]
+            ),
+            warning="estimated turnover",
+        )
+        capital_payload = {
+            "capital_summary": {
+                "latest_share_capital": {
+                    "shares_approx": 77670000,
+                    "as_of": "2026-05-06",
+                }
+            },
+            "data_quality_warnings": [],
+        }
+        with (
+            patch.object(api, "fetch_yahoo_price_history", return_value=yahoo_result) as yahoo_fetch,
+            patch.object(api, "build_capital_payload", return_value=capital_payload) as capital_fetch,
+            patch.object(api, "build_base_payload") as base_fetch,
+        ):
+            payload = api.build_price_history_payload("03321", limit=5, days=1095, timeout=20, headless=True)
+
+        self.assertEqual(payload["price_summary"]["issued_securities"], 77670000)
+        self.assertEqual(payload["price_summary"]["issued_securities_source"], "10jqka F10")
+        self.assertEqual(payload["price_summary"]["issued_securities_as_of"], "2026-05-06")
+        self.assertEqual(payload["price_summary"]["latest_market_cap"], 77670000.0)
+        self.assertEqual(payload["price_summary"]["latest_turnover_to_market_cap_pct"], 0.0013)
+        self.assertIn("10jqka F10 + Yahoo Finance chart close", payload["price_summary"]["market_cap_source"])
+        self.assertIn("10jqka F10 + Yahoo Finance chart close", payload["price_summary"]["turnover_to_market_cap_pct_source"])
+        self.assertFalse(base_fetch.called)
+        yahoo_fetch.assert_called_once()
+        capital_fetch.assert_called_once()
 
     def test_yahoo_history_table_adds_estimated_turnover_columns(self) -> None:
         history = pd.DataFrame(

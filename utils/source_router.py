@@ -27,7 +27,7 @@ from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, hist
 
 CONFIG_PATH = Path(os.getenv("CCASS_SOURCE_CONFIG", "ccass_source_config.json"))
 PROBE_CACHE_PATH = Path(os.getenv("CCASS_MIRROR_PROBE_CACHE", "data/mirror_probe_status.json"))
-VALID_MODES = {"auto", "mirror", "sdw"}
+VALID_MODES = {"auto", "mirror", "local_db", "sdw"}
 RENDER_API_DEFAULT = "https://webbsite-ccass-api.onrender.com"
 
 
@@ -188,7 +188,7 @@ def fetch_webb_price_history(
     return result, lookup
 
 
-def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mirror_status: str = "") -> SourceBundle:
+def fetch_local_db_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mirror_status: str = "") -> SourceBundle:
     code = clean_stock_code(stock_code)
     lookup = IssueLookup(
         stock_code=code,
@@ -207,7 +207,7 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
         )
 
     if not stock_fetched_today(code):
-        warnings.append("Live HKEX SDW fetch is disabled; using existing local snapshot DB only.")
+        warnings.append("Live HKEX SDW scraping is disabled; using existing local snapshot DB only.")
 
     if load_price_history(code).empty:
         price_result = fetch_yahoo_price_history(code, period_days=int(os.getenv("YAHOO_PRICE_PERIOD_DAYS", "90")))
@@ -239,7 +239,7 @@ def fetch_sdw_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mir
 
 def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = True) -> SourceBundle:
     """Fast path: local DB for broker holdings, direct mirror pages for Webb-only history."""
-    bundle = fetch_sdw_bundle(stock_code, timeout=timeout, mirror_status="hybrid")
+    bundle = fetch_local_db_bundle(stock_code, timeout=timeout, mirror_status="hybrid")
     issue_id = bundle.lookup.issue_id
     if not issue_id:
         return bundle
@@ -253,7 +253,7 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
             bundle.warnings.append(f"Webb-site {section} fetch failed: {result.error_type} - {result.error_message}")
     bundle.metadata.update(
         {
-            "source": "hybrid_sdw_webb",
+            "source": "hybrid_local_db_webb",
             "mirror_status": "direct_pages_only",
             "mirror_base_url": mirror_base_url(),
         }
@@ -321,8 +321,8 @@ def fetch_source_bundle_for_stock(stock_code: str, timeout: int = 30, headless: 
         if render_bundle is not None:
             return render_bundle
     issue_id = issue_id_for_stock(code)
-    if mode == "sdw":
-        return fetch_sdw_bundle(code, issue_id=issue_id, timeout=timeout, mirror_status="disabled_by_config")
+    if mode in {"sdw", "local_db"}:
+        return fetch_local_db_bundle(code, issue_id=issue_id, timeout=timeout, mirror_status="disabled_by_config")
     if mode == "mirror":
         return fetch_mirror_bundle(code, issue_id="", timeout=timeout, headless=headless, mirror_status="forced")
     return fetch_hybrid_bundle(code, timeout=timeout, headless=headless)

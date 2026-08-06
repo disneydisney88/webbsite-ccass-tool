@@ -7,9 +7,11 @@ from typing import Any
 import requests
 
 from .f10_equity import f10_equity_url
-from .fetch_sdw import SDW_URL
 from .fetcher import USER_AGENT, body_head, issue_urls, mirror_base_url
 from .hkexnews import BASE_URL as HKEXNEWS_BASE_URL
+
+
+HKEX_SDW_URL = "https://www3.hkexnews.hk/sdw/search/searchsdw.aspx"
 
 
 HEADER_ALLOWLIST = {
@@ -96,7 +98,7 @@ def probe_upstreams(stock_code: str = "01592", issue_id: str = "26603", timeout:
         "mirror_base_url": mirror_base_url(),
         "probes": [
             probe_url("webbsite_holdings", issue_urls(issue_id)["Holdings"], timeout=timeout),
-            probe_url("hkex_sdw", SDW_URL, timeout=timeout),
+            probe_url("hkex_sdw", HKEX_SDW_URL, timeout=timeout),
             probe_url("hkexnews_active_stock", f"{HKEXNEWS_BASE_URL}/ncms/script/eds/activestock_sehk_c.json", timeout=timeout),
             probe_url("f10_equity", f10_equity_url(stock_code), timeout=timeout),
         ],

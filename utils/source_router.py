@@ -238,19 +238,43 @@ def fetch_local_db_bundle(stock_code: str, issue_id: str = "", timeout: int = 30
 
 
 def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = True) -> SourceBundle:
-    """Fast path: local DB for broker holdings, direct mirror pages for Webb-only history."""
+    """Use local snapshots as a fallback, plus public Webb pages when available.
+
+    A local snapshot database does not contain a Webb issue ID for every stock.
+    Resolve that ID from the public orgdata page before deciding that the
+    Webb-only history is unavailable.  This path deliberately uses requests
+    only: a failed Webb page leaves the local/Yahoo result intact rather than
+    requiring a browser runtime.
+    """
     bundle = fetch_local_db_bundle(stock_code, timeout=timeout, mirror_status="hybrid")
     issue_id = bundle.lookup.issue_id
     if not issue_id:
-        return bundle
+        resolved = resolve_issue_id_from_stock(stock_code, timeout=timeout, headless=headless)
+        if resolved.status == "success" and resolved.issue_id:
+            bundle.lookup = resolved
+            issue_id = resolved.issue_id
+            if resolved.result is not None:
+                bundle.results["Company / orgdata"] = resolved.result
+        else:
+            bundle.warnings.append(
+                "Webb-site issue ID could not be resolved from the public orgdata page; "
+                "continuing with local snapshot data only."
+            )
+            return bundle
 
     urls = issue_urls(issue_id)
-    for section in ("Big Changes", "Concentration"):
+    for section in ("Holdings", "Changes", "Big Changes", "Concentration", "Price History"):
         result = fetch_with_requests(section, urls[section], timeout=timeout)
         if result.ok:
+            if section == "Price History":
+                for table in result.tables:
+                    table["price_source"] = "mirror"
             bundle.results[section] = result
         else:
-            bundle.warnings.append(f"Webb-site {section} fetch failed: {result.error_type} - {result.error_message}")
+            bundle.warnings.append(
+                f"Webb-site {section} fetch failed: {result.error_type} - {result.error_message}. "
+                "Using available local fallback data for this section."
+            )
     bundle.metadata.update(
         {
             "source": "hybrid_local_db_webb",

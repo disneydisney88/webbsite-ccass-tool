@@ -171,6 +171,46 @@ class SDWParserAndSnapshotTests(unittest.TestCase):
         upsert_price.assert_called_once()
         self.assertTrue(any("Live HKEX SDW scraping is disabled" in warning for warning in bundle.warnings))
 
+    def test_hybrid_bundle_resolves_missing_issue_id_and_uses_public_webb_pages(self) -> None:
+        local_bundle = source_router.SourceBundle(
+            lookup=source_router.IssueLookup(stock_code="03301", status="success", method="local stock code"),
+            results={"Holdings": source_router.FetchResult(name="Holdings", url="local_db://ccass_snapshots", ok=True)},
+            metadata={"source": "local_db"},
+        )
+        company = source_router.FetchResult(
+            name="Company / orgdata",
+            url="https://webb-database.com/dbpub/orgdata.asp?code=03301&Submit=current",
+            ok=True,
+            tables=[pd.DataFrame({"Code": ["03301"], "Name": ["RONSHINE CHINA HOLDINGS LIMITED"]})],
+        )
+        resolved = source_router.IssueLookup(
+            stock_code="03301", issue_id="18546", method="extracted from orgdata", status="success", result=company
+        )
+
+        def direct_result(section: str, url: str, timeout: int):
+            return source_router.FetchResult(
+                name=section,
+                url=url,
+                ok=True,
+                tables=[pd.DataFrame({"Date": ["2026-08-06"], "value": [1]})],
+                method="requests",
+            )
+
+        with (
+            patch.object(source_router, "fetch_local_db_bundle", return_value=local_bundle),
+            patch.object(source_router, "resolve_issue_id_from_stock", return_value=resolved),
+            patch.object(source_router, "fetch_with_requests", side_effect=direct_result) as direct_fetch,
+        ):
+            bundle = source_router.fetch_hybrid_bundle("03301", timeout=20)
+
+        self.assertEqual(bundle.lookup.issue_id, "18546")
+        self.assertEqual(bundle.lookup.method, "extracted from orgdata")
+        self.assertEqual(bundle.metadata["source"], "hybrid_local_db_webb")
+        self.assertEqual(bundle.results["Company / orgdata"].url, company.url)
+        self.assertEqual(set(bundle.results).issuperset({"Holdings", "Changes", "Big Changes", "Concentration", "Price History"}), True)
+        self.assertEqual(direct_fetch.call_count, 5)
+        self.assertEqual(bundle.results["Price History"].tables[0].iloc[0]["price_source"], "mirror")
+
     def test_yahoo_ticker_conversion_keeps_hk_four_digit_symbol(self) -> None:
         self.assertEqual(yahoo_ticker_from_code("01449"), "1449.HK")
         self.assertEqual(yahoo_ticker_from_code("00388"), "0388.HK")

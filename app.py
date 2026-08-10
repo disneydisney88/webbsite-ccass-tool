@@ -184,45 +184,105 @@ def get_download_base(parsed) -> str:
     return parsed.stock_code or parsed.issue_id or "ccass"
 
 
-def render_download_buttons(parsed, results, report: str, key_prefix: str, extras: dict | None = None) -> None:
+def render_download_buttons(
+    parsed,
+    results,
+    report: str,
+    json_ready: dict,
+    key_prefix: str,
+    extras: dict | None = None,
+) -> None:
     base = get_download_base(parsed)
     all_csv = combined_stock_csv(parsed, results, extras)
-    st.caption("The main CSV combines all sections and labels what each row represents.")
-    st.download_button(
+
+    primary_col, excel_col = st.columns([2, 1])
+    primary_col.download_button(
         "Download All Data CSV",
         all_csv,
         f"{base}_all_ccass_data.csv",
         "text/csv",
         key=f"{key_prefix}_{base}_all_ccass_data_csv",
+        type="primary",
         use_container_width=True,
+        help="One analysis-ready CSV with section status, source, fetched time, date basis and data-quality flags.",
     )
-    with st.expander("CSV content preview", expanded=False):
-        csv_text = all_csv.decode("utf-8-sig", errors="replace")
-        preview_lines = "\n".join(csv_text.splitlines()[:80])
-        st.text_area("First 80 CSV lines", preview_lines, height=260, key=f"{key_prefix}_{base}_csv_preview")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.download_button("Holdings CSV", csv_bytes(parsed.holdings_table), f"{base}_holdings.csv", "text/csv", key=f"{key_prefix}_{base}_holdings_csv")
-    col2.download_button("Changes CSV", csv_bytes(parsed.changes_table), f"{base}_changes.csv", "text/csv", key=f"{key_prefix}_{base}_changes_csv")
-    col3.download_button("Big Changes CSV", csv_bytes(parsed.big_changes_table), f"{base}_bigchanges.csv", "text/csv", key=f"{key_prefix}_{base}_bigchanges_csv")
-    col4.download_button("Concentration CSV", csv_bytes(parsed.concentration_table), f"{base}_concentration.csv", "text/csv", key=f"{key_prefix}_{base}_concentration_csv")
-    col5.download_button("Price CSV", csv_bytes(parsed.price_history_table), f"{base}_price_history.csv", "text/csv", key=f"{key_prefix}_{base}_price_history_csv")
-
-    col5, col6, col7 = st.columns(3)
-    col5.download_button("Markdown Report", report.encode("utf-8"), f"{base}_report.md", "text/markdown", key=f"{key_prefix}_{base}_report_md")
-    col6.download_button(
-        "Excel - All Sections",
+    excel_col.download_button(
+        "Download Excel",
         excel_bytes(parsed, results, extras),
         f"{base}_all_sections.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"{key_prefix}_{base}_all_sections_xlsx",
+        use_container_width=True,
+        help="Workbook with separate sheets for each section.",
     )
-    col7.download_button(
-        "Raw Tables JSON",
-        json.dumps(json_ready, ensure_ascii=False, indent=2).encode("utf-8"),
-        f"{base}_raw_tables.json",
-        "application/json",
-        key=f"{key_prefix}_{base}_raw_tables_json",
+    st.caption(
+        "The main CSV includes CCASS sections, price history, HKEX announcements, "
+        "corporate events, capital changes and managers. Each row identifies its source and meaning."
     )
+
+    with st.expander("More download formats", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        col1.download_button(
+            "Markdown Report",
+            report.encode("utf-8"),
+            f"{base}_report.md",
+            "text/markdown",
+            key=f"{key_prefix}_{base}_report_md",
+            use_container_width=True,
+        )
+        col2.download_button(
+            "All Data JSON",
+            json.dumps(json_ready, ensure_ascii=False, indent=2).encode("utf-8"),
+            f"{base}_all_data.json",
+            "application/json",
+            key=f"{key_prefix}_{base}_all_data_json",
+            use_container_width=True,
+        )
+        if DB_PATH.exists():
+            col3.download_button(
+                "Snapshot DB Backup",
+                export_db_bytes(),
+                "ccass_snapshots.db",
+                "application/octet-stream",
+                key=f"{key_prefix}_snapshot_db_backup",
+                use_container_width=True,
+            )
+
+        st.markdown("**Individual section CSV files**")
+        section_columns = st.columns(5)
+        section_columns[0].download_button(
+            "Holdings", csv_bytes(parsed.holdings_table), f"{base}_holdings.csv",
+            "text/csv", key=f"{key_prefix}_{base}_holdings_csv", use_container_width=True,
+        )
+        section_columns[1].download_button(
+            "Changes", csv_bytes(parsed.changes_table), f"{base}_changes.csv",
+            "text/csv", key=f"{key_prefix}_{base}_changes_csv", use_container_width=True,
+        )
+        section_columns[2].download_button(
+            "Big Changes", csv_bytes(parsed.big_changes_table), f"{base}_bigchanges.csv",
+            "text/csv", key=f"{key_prefix}_{base}_bigchanges_csv", use_container_width=True,
+        )
+        section_columns[3].download_button(
+            "Concentration", csv_bytes(parsed.concentration_table), f"{base}_concentration.csv",
+            "text/csv", key=f"{key_prefix}_{base}_concentration_csv", use_container_width=True,
+        )
+        section_columns[4].download_button(
+            "Price History", csv_bytes(parsed.price_history_table), f"{base}_price_history.csv",
+            "text/csv", key=f"{key_prefix}_{base}_price_history_csv", use_container_width=True,
+        )
+
+        show_preview = st.toggle(
+            "Show first 80 lines of the main CSV",
+            value=False,
+            key=f"{key_prefix}_{base}_show_csv_preview",
+        )
+        if show_preview:
+            csv_text = all_csv.decode("utf-8-sig", errors="replace")
+            preview_lines = "\n".join(csv_text.splitlines()[:80])
+            st.text_area(
+                "CSV preview", preview_lines, height=260,
+                key=f"{key_prefix}_{base}_csv_preview",
+            )
 
 
 def render_all_parsed_tables(parsed) -> None:
@@ -1524,6 +1584,14 @@ parsed = parse_results(
 )
 apply_source_metadata(parsed, source_metadata, source_warnings)
 export_extras = {
+    "hkex_announcements": (
+        hkex_announcements.table.to_dict(orient="records")
+        if hkex_announcements is not None
+        and hkex_announcements.table is not None
+        and not hkex_announcements.table.empty
+        else []
+    ),
+    "hkex_announcements_url": getattr(hkex_announcements, "url", "") or "",
     "events": st.session_state.get("events", {}).get("records", []),
     "events_url": events_url(lookup.issue_id) if lookup.issue_id else "",
     "share_changes": st.session_state.get("capital", {}).get("share_changes", []),
@@ -1534,7 +1602,7 @@ export_extras = {
 }
 report = build_report(parsed, results, hkex_announcements=hkex_announcements, extras=export_extras)
 fetch_summary = build_fetch_summary(parsed, results)
-json_ready = parsed_to_json_ready(parsed, results)
+json_ready = parsed_to_json_ready(parsed, results, export_extras)
 
 with meta_cols[1]:
     st.caption("Stock name")
@@ -1554,6 +1622,32 @@ st.caption(
     "CCASS 係 T+2 結算數據 — 某日嘅買賣要兩個交易日後先反映落持倉;最近兩個交易日嘅變動未必已包含在內。"
 )
 
+st.divider()
+st.markdown('<div id="downloads"></div>', unsafe_allow_html=True)
+with st.container(border=True):
+    st.subheader("Downloads")
+    render_download_buttons(parsed, results, report, json_ready, "top", export_extras)
+
+nav_cols = st.columns(4)
+nav_cols[0].markdown("**Overview**  \n[Fetch Summary](#fetch-summary) · [Downloads](#downloads)")
+nav_cols[1].markdown("**CCASS**  \n[Holdings](#holdings) · [Changes](#changes) · [Big Changes](#big-changes)")
+nav_cols[2].markdown("**History**  \n[Concentration](#concentration) · [Price](#price-turnover)")
+nav_cols[3].markdown("**Research**  \n[Announcements](#hkex-announcements) · [Events](#corporate-events) · [Officers](#officers)")
+
+st.markdown('<div id="fetch-summary"></div>', unsafe_allow_html=True)
+with st.container(border=True):
+    st.subheader("Fetch Summary")
+    st.dataframe(compact_fetch_summary(fetch_summary), use_container_width=True, hide_index=True)
+    with st.expander("Source URLs", expanded=False):
+        st.dataframe(fetch_summary[["Section", "URL"]], use_container_width=True, hide_index=True)
+    if parsed.analysis_warnings:
+        with st.expander(
+            f"Data quality warnings ({len(parsed.analysis_warnings)})",
+            expanded=True,
+        ):
+            for warning in parsed.analysis_warnings:
+                st.warning(warning)
+
 events_state = st.session_state.get("events", {"records": [], "name": "", "warnings": []})
 officers_state = st.session_state.get("officers", {"records": [], "name": "", "warnings": []})
 
@@ -1569,58 +1663,9 @@ if parsed.stock_code:
     )
 
 st.divider()
-st.subheader("Download This Stock")
-st.caption("One CSV contains Holdings, Changes, Big Changes and Concentration with source URL, fetched time and data meaning.")
-top_dl1, top_dl2 = st.columns([2, 1])
-top_csv = combined_stock_csv(parsed, results, export_extras)
-with top_dl1:
-    st.download_button(
-        "Download All CCASS Data CSV",
-        top_csv,
-        f"{get_download_base(parsed)}_all_ccass_data.csv",
-        "text/csv",
-        key=f"top_{get_download_base(parsed)}_all_ccass_data_csv",
-        use_container_width=True,
-    )
-with top_dl2:
-    st.download_button(
-        "Download Excel",
-        excel_bytes(parsed, results, export_extras),
-        f"{get_download_base(parsed)}_all_sections.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"top_{get_download_base(parsed)}_all_sections_xlsx",
-        use_container_width=True,
-    )
-if DB_PATH.exists():
-    st.download_button(
-        "Download Snapshot DB Backup",
-        export_db_bytes(),
-        "ccass_snapshots.db",
-        "application/octet-stream",
-        key="top_snapshot_db_backup",
-        use_container_width=True,
-    )
-with st.expander("CSV content preview", expanded=False):
-    csv_text = top_csv.decode("utf-8-sig", errors="replace")
-    preview_lines = "\n".join(csv_text.splitlines()[:80])
-    st.text_area("First 80 CSV lines", preview_lines, height=260, key=f"top_{get_download_base(parsed)}_csv_preview")
-
-st.markdown(
-    """
-    **Jump to:** [Fetch Summary](#fetch-summary) | [All Tables](#all-tables) |
-    [DT Rainbow](#dt-rainbow) | [HKEX Announcements](#hkex-announcements) |
-    [財技事件 Events](#corporate-events) | [董事高管 Officers](#officers) |
-    [Price & Turnover](#price-turnover) |
-    [Company](#company) | [Holdings](#holdings) | [Changes](#changes) |
-    [Big Changes](#big-changes) | [Concentration](#concentration) | [Price History](#price-history) |
-    [Raw Previews](#raw-table-previews) | [Copy for ChatGPT](#copy-for-chatgpt) |
-    [Downloads](#download-files)
-    """
-)
-
-st.divider()
 st.markdown('<div id="dt-rainbow"></div>', unsafe_allow_html=True)
-render_dt_participant_rainbow(parsed, timeout, headless)
+with st.expander("Advanced: DT participant history chart", expanded=False):
+    render_dt_participant_rainbow(parsed, timeout, headless)
 
 st.divider()
 st.markdown('<div id="hkex-announcements"></div>', unsafe_allow_html=True)
@@ -1643,19 +1688,6 @@ render_officers(
     officers_state.get("warnings", []),
     officers_state.get("managers_f10", []),
 )
-
-st.markdown('<div id="fetch-summary"></div>', unsafe_allow_html=True)
-st.subheader("Fetch Summary")
-st.dataframe(compact_fetch_summary(fetch_summary), use_container_width=True)
-with st.expander("Source URLs", expanded=False):
-    st.dataframe(fetch_summary[["Section", "URL"]], use_container_width=True)
-if parsed.analysis_warnings:
-    for warning in parsed.analysis_warnings:
-        st.warning(warning)
-
-st.divider()
-st.markdown('<div id="all-tables"></div>', unsafe_allow_html=True)
-render_all_parsed_tables(parsed)
 
 st.divider()
 st.markdown('<div id="company"></div>', unsafe_allow_html=True)
@@ -1747,8 +1779,12 @@ render_section(
 st.divider()
 st.markdown('<div id="raw-table-previews"></div>', unsafe_allow_html=True)
 st.subheader("Raw Table Previews")
-for record in table_preview_records(results):
-    with st.expander(f"{record['section']} | table {record['table_index']} | {record['shape']}", expanded=False):
+st.caption("Debug information. Open only when automatic table selection or parsing needs investigation.")
+with st.expander("Open raw table previews", expanded=False):
+    for record in table_preview_records(results):
+        st.markdown(
+            f"**{record['section']} · table {record['table_index']} · {record['shape']}**"
+        )
         st.caption("Columns: " + ", ".join(record["columns"]))
         st.json(record["preview"])
 
@@ -1758,7 +1794,4 @@ st.markdown('<div id="copy-for-chat-gpt"></div>', unsafe_allow_html=True)
 st.subheader("Copy for ChatGPT")
 render_copy_report(report)
 
-st.divider()
-st.markdown('<div id="download-files"></div>', unsafe_allow_html=True)
-st.subheader("Download Files")
-render_download_buttons(parsed, results, report, "bottom", export_extras)
+

@@ -41,6 +41,18 @@ def value_or_reason(value: str, failed: bool, label: str) -> str:
     return "not available"
 
 
+def concentration_value_or_reason(value: str, holdings_failed: bool, concentration_failed: bool) -> str:
+    if value:
+        return value
+    if holdings_failed and concentration_failed:
+        return "not available because Holdings and Concentration table parsing failed"
+    if holdings_failed:
+        return "not available because Holdings parsing failed and Concentration supplied no value"
+    if concentration_failed:
+        return "not available because Concentration parsing failed and Holdings supplied no value"
+    return "not available"
+
+
 def bullet_list(items: list[str]) -> str:
     if not items:
         return "* not available"
@@ -149,10 +161,10 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * DB restored from backup: {parsed.db_restored_from_backup}
 * Holdings latest date: {value_or_reason(parsed.holdings_data_date, holdings_failed, "Holdings")}
 * Changes trading date: {value_or_reason(parsed.changes_trading_date, changes_failed, "Changes")}
-* Total in CCASS %: {parsed.total_in_ccass_pct}
-* Top 5 %: {parsed.top5_cumulative_pct}
-* Top 10 %: {parsed.top10_cumulative_pct}
-* Largest participant: {parsed.largest_participant}
+* Total in CCASS %: {value_or_reason(parsed.total_in_ccass_pct, holdings_failed, "Holdings")}
+* Top 5 %: {concentration_value_or_reason(parsed.top5_cumulative_pct, holdings_failed, conc_failed)}
+* Top 10 %: {concentration_value_or_reason(parsed.top10_cumulative_pct, holdings_failed, conc_failed)}
+* Largest participant: {value_or_reason(parsed.largest_participant, holdings_failed, "Holdings")}
 * Major increases:
 {bullet_list(parsed.major_increases)}
 * Major decreases:
@@ -205,22 +217,22 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 
 ## Holdings Summary
 
-* Issued securities: {parsed.issued_securities}
-* Total in CCASS: {parsed.total_in_ccass}
-* Total in CCASS %: {parsed.total_in_ccass_pct}
-* Securities not in CCASS: {parsed.securities_not_in_ccass}
-* Largest participant: {parsed.largest_participant}
-* Top 5: {parsed.top5_cumulative_pct}
-* Top 10: {parsed.top10_cumulative_pct}
+* Issued securities: {value_or_reason(parsed.issued_securities, holdings_failed, "Holdings")}
+* Total in CCASS: {value_or_reason(parsed.total_in_ccass, holdings_failed, "Holdings")}
+* Total in CCASS %: {value_or_reason(parsed.total_in_ccass_pct, holdings_failed, "Holdings")}
+* Securities not in CCASS: {value_or_reason(parsed.securities_not_in_ccass, holdings_failed, "Holdings")}
+* Largest participant: {value_or_reason(parsed.largest_participant, holdings_failed, "Holdings")}
+* Top 5: {concentration_value_or_reason(parsed.top5_cumulative_pct, holdings_failed, conc_failed)}
+* Top 10: {concentration_value_or_reason(parsed.top10_cumulative_pct, holdings_failed, conc_failed)}
 
 ## Changes
 
-* Date range: {parsed.changes_date_range}
-* Trading date: {parsed.changes_trading_date}
-* Volume: {parsed.volume}
-* Turnover: {parsed.turnover}
-* Average price: {parsed.average_price}
-* Total CCASS change: {parsed.total_ccass_change}
+* Date range: {value_or_reason(parsed.changes_date_range, changes_failed, "Changes")}
+* Trading date: {value_or_reason(parsed.changes_trading_date, changes_failed, "Changes")}
+* Volume: {value_or_reason(parsed.volume, changes_failed, "Changes")}
+* Turnover: {value_or_reason(parsed.turnover, changes_failed, "Changes")}
+* Average price: {value_or_reason(parsed.average_price, changes_failed, "Changes")}
+* Total CCASS change: {value_or_reason(parsed.total_ccass_change, changes_failed, "Changes")}
 
 {markdown_table(parsed.changes_table, REPORT_COLUMNS["changes"])}
 

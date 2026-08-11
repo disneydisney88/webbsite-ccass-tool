@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import api
-from utils.fetcher import fetch_with_requests, webb_database_cookie_value
+from utils.fetcher import body_head, extract_tables_from_html, fetch_with_requests, webb_database_cookie_value
 from utils.errors import classify_fetch_message, errors_from_fetch_summary, structured_error
 
 
@@ -56,6 +56,17 @@ class UnauthorizedStructuredTest(unittest.TestCase):
 
 
 class FetchDiagnosticsTest(unittest.TestCase):
+    def test_body_head_keeps_first_2000_characters(self):
+        self.assertEqual(len(body_head("x" * 2500)), 2000)
+
+    def test_hidden_webb_table_is_still_parsed(self):
+        tables = extract_tables_from_html(
+            "<table style='display:none'><tr><th>Participant</th><th>Holding</th></tr>"
+            "<tr><td>Broker A</td><td>1000</td></tr></table>"
+        )
+        self.assertEqual(len(tables), 1)
+        self.assertEqual(tables[0].iloc[0]["Participant"], "Broker A")
+
     def test_webb_database_cookie_value_matches_the_challenge_formula(self):
         ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         self.assertEqual(

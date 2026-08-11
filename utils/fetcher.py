@@ -92,6 +92,7 @@ class FetchResult:
     html: str = ""
     raw_text: str = ""
     response_snippet: str = ""
+    content_type: str = ""
     tables: list[pd.DataFrame] = field(default_factory=list)
     method: str = ""
     ok: bool = False
@@ -115,6 +116,8 @@ class FetchResult:
             "error_type": self.error_type,
             "error_message": self.error_message,
             "response_snippet": self.response_snippet,
+            "body_head": self.response_snippet,
+            "content_type": self.content_type,
         }
 
 
@@ -181,7 +184,23 @@ def extract_tables_from_html(html: str) -> list[pd.DataFrame]:
 
     if not html:
         return []
-    tables = pd.read_html(StringIO(html), flavor="lxml")
+    tables: list[pd.DataFrame] = []
+    try:
+        tables = pd.read_html(StringIO(html), flavor="lxml", displayed_only=False)
+    except ValueError:
+        # Some Webb-compatible pages contain valid tables that recent pandas
+        # versions skip during whole-document matching. Parse each table node
+        # independently before declaring the source changed.
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "lxml")
+        for node in soup.find_all("table"):
+            try:
+                tables.extend(
+                    pd.read_html(StringIO(str(node)), flavor="lxml", displayed_only=False)
+                )
+            except ValueError:
+                continue
     cleaned = []
     for table in tables:
         table = table.copy()
@@ -206,7 +225,7 @@ def html_to_text(html: str, limit: int = 8000) -> str:
     return text[:limit]
 
 
-def body_head(text: str, limit: int = 500) -> str:
+def body_head(text: str, limit: int = 2000) -> str:
     return re.sub(r"\s+", " ", text or "").strip()[:limit]
 
 
@@ -246,6 +265,8 @@ def upstream_failure_message(result: FetchResult) -> str:
         parts.append(f"final_url={result.final_url}")
     else:
         parts.append(f"url={result.url}")
+    if result.content_type:
+        parts.append(f"content_type={result.content_type}")
     if result.response_snippet:
         parts.append(f"body_head={result.response_snippet}")
     return "; ".join(parts)
@@ -280,6 +301,7 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
         result.status = response.status_code
         result.status_reason = response.reason or ""
         result.final_url = response.url
+        result.content_type = str(getattr(response, "headers", {}).get("content-type", "") or "")
         if response.apparent_encoding:
             response.encoding = response.apparent_encoding
         result.html = response.text
@@ -350,6 +372,7 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
                 result.status = response.status_code
                 result.status_reason = response.reason or ""
                 result.final_url = response.url
+                result.content_type = str(getattr(response, "headers", {}).get("content-type", "") or "")
                 result.response_snippet = body_head(getattr(response, "text", ""))
             last_error_type = type(exc).__name__
             last_error_message = str(exc)
@@ -404,7 +427,9 @@ def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> 
             page.wait_for_timeout(750)
             result.final_url = page.url
             result.status = response.status if response else None
+            result.content_type = str(response.headers.get("content-type", "") or "") if response else ""
             result.html = page.content()
+            result.response_snippet = body_head(result.html)
             result.raw_text = html_to_text(result.html)
             result.tables = extract_tables_from_html(result.html)
             browser.close()

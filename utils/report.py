@@ -2,6 +2,7 @@
 
 import pandas as pd
 
+from .date_semantics import date_semantics_header
 from .fetcher import FetchResult
 from .parser import ParsedCCASS, build_fetch_summary
 
@@ -148,6 +149,8 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
     price_failed = parsed.price_history_table.empty
 
     report = f"""# {parsed.stock_code or "Unknown stock code"} {parsed.stock_name or "Unknown stock name"}｜Webb-site CCASS 抽取結果
+
+{date_semantics_header(prefix="> ")}
 
 ## AI Analysis Ready Summary
 

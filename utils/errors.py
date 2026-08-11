@@ -14,10 +14,13 @@ RETRYABLE = {
     "COLD_START": True,
     "SOURCE_TIMEOUT": True,
     "SOURCE_FETCH_FAILED": True,
+    "MIRROR_BLOCKED": False,
     "SOURCE_CHALLENGE": False,
     "SOURCE_CHANGED": False,
     "PARSE_ERROR": False,
     "TOO_LARGE": False,
+    "LOCAL_SNAPSHOT_EMPTY": False,
+    "INVALID_DATE_RANGE": False,
     "INVALID_CODE": False,
     "AUTH_FAILED": False,
     "ISSUE_LOOKUP_FAILED": True,
@@ -85,7 +88,11 @@ def errors_from_warnings(warnings: list[str]) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
     for warning in warnings or []:
         lower = warning.lower()
-        if "issue lookup failed" in lower or "issue id" in lower:
+        if "mirror_blocked" in lower or "blocked_by_cloudflare" in lower:
+            code = "MIRROR_BLOCKED"
+        elif "local_snapshot_empty" in lower:
+            code = "LOCAL_SNAPSHOT_EMPTY"
+        elif "issue lookup failed" in lower or "issue id" in lower:
             code = "ISSUE_LOOKUP_FAILED"
         elif "budget exhausted" in lower or "cold" in lower:
             code = "COLD_START"

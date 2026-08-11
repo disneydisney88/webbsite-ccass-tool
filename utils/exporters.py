@@ -8,6 +8,7 @@ import pandas as pd
 from .date_semantics import (
     SECTION_DATE_BASIS as CCASS_SECTION_DATE_BASIS,
     SETTLEMENT_NOTE,
+    date_semantics_header,
     date_fields,
     derive_dates,
     unavailable_data_as_of,
@@ -68,11 +69,12 @@ def _data_as_of_trading_date(parsed: ParsedCCASS) -> str:
         (parsed.changes_trading_date, "trade"),
         (parsed.big_changes_latest_date, "settlement"),
     )
+    implied_dates = []
     for value, basis in candidates:
         derived = derive_dates(value, basis)
         if derived.implied_trade_date:
-            return derived.implied_trade_date
-    return unavailable_data_as_of("no dated CCASS section parsed")
+            implied_dates.append(derived.implied_trade_date)
+    return max(implied_dates, default=unavailable_data_as_of("no dated CCASS section parsed"))
 
 
 def _date_basis_map(parsed: ParsedCCASS) -> dict[str, str]:
@@ -563,6 +565,7 @@ def combined_stock_csv(
         "Turnover",
         "VWAP",
         "price_source",
+        "turnover_est",
         "vwap_est",
     ]
     ordered = (
@@ -574,7 +577,9 @@ def combined_stock_csv(
             if column not in COMMON_EXPORT_COLUMNS and column not in preferred_data_columns
         ]
     )
-    return output.reindex(columns=ordered).to_csv(index=False).encode("utf-8-sig")
+    csv_body = output.reindex(columns=ordered).to_csv(index=False)
+    semantic_header = date_semantics_header(prefix="# ")
+    return f"{semantic_header}\n{csv_body}".encode("utf-8-sig")
 
 
 def raw_preview_dataframe(results: dict[str, FetchResult]) -> pd.DataFrame:
@@ -625,4 +630,3 @@ def excel_bytes(parsed: ParsedCCASS, results: dict[str, FetchResult], extras: di
                 pd.DataFrame(records).to_excel(writer, sheet_name=sheet_name, index=False)
         raw_preview_dataframe(results).to_excel(writer, sheet_name="raw_table_previews", index=False)
     return buffer.getvalue()
-

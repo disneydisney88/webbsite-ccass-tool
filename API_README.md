@@ -1,379 +1,293 @@
-# ChatGPT / Custom GPT API
+# Webb-site CCASS Research API 1.14.0
 
-This project includes a read-only JSON API for Custom GPT Actions or other tools.
+Read-only FastAPI and MCP service for Hong Kong CCASS research. Existing response field names are preserved; date semantics and source diagnostics are additive.
 
-## Local Test
-
-```bash
-python api.py
-```
-
-Open:
-
-- `http://localhost:8000/health`
-- `http://localhost:8000/health?upstreams=true` (manual upstream diagnostics)
-- `http://localhost:8000/openapi.json`
-- `http://localhost:8000/api/stock?code=01592`
-- `http://localhost:8000/api/stock?code=01592&timeout=30&holdings_limit=15&changes_limit=20&big_changes_limit=10&concentration_limit=15`
-- `http://localhost:8000/announcement/pdf?url=https%3A%2F%2Fwww1.hkexnews.hk%2Flistedco%2Flistconews%2Fgem%2F2026%2F0730%2F2026073000367_c.pdf`
-
-The default `/health` endpoint is process-only and makes no outbound upstream
-requests, so it is safe for a five-minute uptime monitor. Add
-`?upstreams=true` only for a manual diagnostic probe.
-
-## Optional API Token
-
-If you want to protect the API, set this environment variable on the server:
+Production base URL:
 
 ```text
-API_TOKEN=<your-random-token>
+https://webbsite-ccass-api.onrender.com
 ```
 
-If `API_TOKEN` is not set, the read-only stock endpoint is public.
+Useful URLs:
 
-URL-only clients should pass the token as a query parameter:
+- `/health`
+- `/health?upstreams=true`
+- `/openapi.json`
+- `/api/stock?code=03301`
+- `/mcp`
+
+## Authentication
+
+If `API_TOKEN` is set, use one of:
 
 ```text
-GET /api/stock?code=01592&key=<your-random-token>
-GET /api/stock?code=01592&api_token=<your-random-token>
+GET /api/stock?code=03301&key=<token>
+GET /api/stock?code=03301&api_token=<token>
+Authorization: Bearer <token>
+X-API-Key: <token>
 ```
 
-Bearer and `X-API-Key` are still accepted for clients that support custom headers:
+Tokens must never be committed. GitHub Actions uses repository secret `CCASS_API_TOKEN`, whose value is the same as Render `API_TOKEN`.
+
+## GET /api/stock
+
+Operation ID: `getCCASSStockData`.
+
+| Parameter | Default | Description |
+| --- | ---: | --- |
+| `code` | required | Five-digit HK stock code; `stock_code` remains a compatible alias |
+| `timeout` | 30 | Overall budget, 10 to 35 seconds |
+| `holdings_limit` | 15 | 1 to 100 rows |
+| `changes_limit` | 20 | 1 to 100 rows |
+| `big_changes_limit` | 10 | 1 to 100 rows |
+| `concentration_limit` | 15 | 1 to 100 rows |
+| `changes_from` | empty | Changes range start, `YYYY-MM-DD` |
+| `changes_to` | empty | Changes range end, `YYYY-MM-DD` |
+| `big_changes_from` | empty | Big Changes range start, `YYYY-MM-DD` |
+| `big_changes_to` | empty | Big Changes range end, `YYYY-MM-DD` |
+| `date_input_basis` | `trade` | `trade` or `settlement` |
+| `format` | `json` | `json`, `markdown`, or `md` |
+
+Date ranges must start and end on XHKG trading sessions. The default maximum is 20 sessions, configurable with `CCASS_MAX_DATE_RANGE_SESSIONS`. A larger range returns HTTP 413 with `TOO_LARGE`.
+
+Example using trade dates:
 
 ```text
-Authorization: Bearer <your-random-token>
-X-API-Key: <your-random-token>
+GET /api/stock?code=03301&changes_from=2026-08-07&changes_to=2026-08-10&date_input_basis=trade
 ```
 
-## Emergency CCASS Source Router
+The router requests the corresponding Changes settlement pages:
 
-Set `CCASS_SOURCE_MODE` to control the CCASS data path:
+| Requested trade date | Queried settlement date |
+| --- | --- |
+| 2026-08-07 | 2026-08-11 |
+| 2026-08-10 | 2026-08-12 |
 
-```text
-CCASS_SOURCE_MODE=auto
-```
+No calendar-day `+2` guess is used.
 
-Allowed values:
+## Date Contract
 
-- `auto` (default): probe the Webb-site mirror once per day. If the mirror works, use the original mirror logic. If it returns 403 or a Cloudflare/Turnstile challenge, fall back to HKEX SDW plus the local SQLite snapshot DB.
-- `mirror`: force the original Webb-site mirror code path. This keeps the old fetcher/parser intact and is useful when the mirror is unblocked.
-- `sdw`: use HKEX SDW plus local snapshots only.
+| Section | `date_basis` | Row `ccass_date` |
+| --- | --- | --- |
+| Holdings | `settlement` | Page holding date |
+| Changes | `trade` | Page's explicit Trading date |
+| Big Changes | `settlement` | Source Date column |
+| Concentration | `settlement` | Source Date column |
+| Price History | `trade` | Trade date |
 
-The default mirror base URL is `https://webb-database.com` while 0xmd is
-temporarily unavailable. To explicitly set it:
-
-```text
-CCASS_MIRROR_BASE_URL=https://webb-database.com
-```
-
-To switch back to the original 0xmd mirror after it becomes available again, set:
-
-```text
-CCASS_MIRROR_BASE_URL=https://webbsite.0xmd.com
-```
-
-The same value can be set in `ccass_source_config.json` as `CCASS_MIRROR_BASE_URL` or `mirror_base_url`. Probe-cache entries are scoped to the configured mirror base URL, so a previous 0xmd blocked result will not suppress testing `webb-database.com`.
-
-The API response keeps the existing JSON field names and only adds:
+Every normalized record may include:
 
 ```json
 {
+  "ccass_date": "2026-08-12",
+  "implied_trade_date": "2026-08-10",
+  "implied_settlement_date": "2026-08-12",
+  "date_basis": "settlement"
+}
+```
+
+`data_as_of_trading_date` is the latest valid implied trade date among successfully dated CCASS sections. It is never silently replaced by a settlement date. If no dated section parsed, it contains a reason such as `not available: no dated CCASS section parsed`.
+
+Full evidence and holiday-calendar details: [docs/DATE_SEMANTICS.md](docs/DATE_SEMANTICS.md).
+
+## Response Example
+
+Values below are illustrative; clients must inspect `fetch_summary` and warnings on every request.
+
+```json
+{
+  "ok": true,
+  "data_as_of": "2026-08-10",
+  "source": "hybrid_local_db_webb",
   "metadata": {
-    "source": "mirror or sdw+local_db",
-    "mirror_status": "ok, blocked_by_cloudflare, forced, disabled_by_config, or failed",
+    "code": "03301",
+    "name": "Ronshine China Holdings Limited",
+    "issue_id": "18546",
+    "holdings_date": "2026-08-12",
+    "holdings_implied_trade_date": "2026-08-10",
+    "changes_date": "2026-08-10",
+    "changes_implied_trade_date": "2026-08-10",
+    "big_changes_date": "2026-08-12",
+    "big_changes_implied_trade_date": "2026-08-10",
+    "concentration_date": "2026-08-12",
+    "concentration_implied_trade_date": "2026-08-10",
+    "data_as_of_trading_date": "2026-08-10",
+    "date_basis_by_section": {
+      "holdings": "settlement",
+      "changes": "trade",
+      "big_changes": "settlement",
+      "concentration": "settlement"
+    },
+    "date_input_basis": "trade",
+    "changes_requested_from": "",
+    "changes_requested_to": "",
+    "changes_queried_settlement_from": "",
+    "changes_queried_settlement_to": "",
+    "settlement_note": "CCASS uses T+2 settlement...",
+    "source": "hybrid_local_db_webb",
+    "mirror_status": "direct_pages_only",
     "mirror_base_url": "https://webb-database.com",
-    "history_depth_days": 1,
-    "db_restored_from_backup": false
-  }
-}
-```
-
-When SDW history is limited, warnings include:
-
-```text
-History limited to local snapshots since YYYY-MM-DD; mirror historical data unavailable
-```
-
-## Snapshot DB Backup
-
-Snapshots are stored in `data/ccass_snapshots.db` by default. Render Free uses an ephemeral filesystem, so this DB can disappear after redeploys or instance replacement. Back it up regularly:
-
-```text
-GET /api/snapshots/export?key=<your-random-token>
-```
-
-The Streamlit app also shows a `Download Snapshot DB Backup` button when the DB file exists.
-
-## Daily Snapshot Endpoint
-
-Use an external uptime monitor or scheduler to call:
-
-```text
-GET /api/snapshot_all?key=<your-random-token>
-GET /api/snapshot_all?group=caiji&key=<your-random-token>
-GET /api/snapshot_all?group=lshape&key=<your-random-token>
-```
-
-The watchlist is `data/watchlist.csv` with `code,name,group`. Valid groups are `caiji` and `lshape`; a stock can belong to both with `caiji;lshape`. Each stock is skipped if it has already been fetched today.
-
-## GitHub Actions Backup
-
-The workflow `.github/workflows/daily_snapshot.yml` runs daily at 13:30 UTC / 21:30 Hong Kong time and can also be started with `workflow_dispatch`.
-
-Required repo secret:
-
-```text
-CCASS_API_TOKEN=<same value as Render API_TOKEN>
-```
-
-The workflow downloads the exported SQLite DB to:
-
-```text
-data/backups/ccass_snapshots_latest.db
-```
-
-On Sundays it also writes `data/backups/ccass_snapshots_YYYYMMDD.db` and keeps the latest 8 weekly backups.
-
-Backup commits use `[skip render]` to avoid triggering a Render auto-deploy loop.
-
-During each snapshot run, the API also stores Yahoo Finance daily close/volume in the SQLite `price_history` table. This builds a local price history over time so the API does not need to request long Yahoo ranges forever.
-
-## Price History Fallback
-
-The original Webb-site mirror price source (`hpu.asp`) is preserved. Source router behavior:
-
-- mirror price table available: use mirror rows with actual turnover
-- mirror blocked or price table unavailable: use Yahoo Finance chart endpoint over HTTP
-
-Yahoo fallback keeps existing price-history column names and adds:
-
-```json
-{
-  "price_source": "yahoo",
-  "turnover_est": 123456.78
-}
-```
-
-For Yahoo fallback, `Turnover` is also estimated as `volume x close`, and warnings include:
-
-```text
-Turnover is estimated as volume × close, not actual turnover
-```
-
-Yahoo Finance is not an official HKEX interface and may change behavior.
-
-## Restore Metadata
-
-On startup, if `data/ccass_snapshots.db` is missing and `data/backups/ccass_snapshots_latest.db` exists, the API restores the DB automatically.
-
-The stock response metadata includes:
-
-```json
-{
-  "metadata": {
-    "db_restored_from_backup": true
-  }
-}
-```
-
-When backup DB files approach 50MB, move snapshot storage to external object storage or a managed database.
-
-## Switching Back After Mirror Unblocks
-
-1. Set `CCASS_SOURCE_MODE=mirror` on Render or Streamlit Cloud.
-2. Redeploy/restart the service.
-3. Test `/api/stock?code=03321&key=<token>` and confirm `metadata.source` is `mirror`.
-
-## Custom GPT Action
-
-ChatGPT cannot call your local `localhost` directly. Deploy this API to Render or another HTTPS host.
-
-Then import this URL into a Custom GPT Action:
-
-```text
-https://your-domain/openapi.json
-```
-
-The main action endpoint is:
-
-```text
-GET /api/stock?code=01592
-```
-
-It returns one pure JSON response from a single HTTP GET. The response includes:
-
-```json
-{
-  "metadata": {
-    "code": "01592",
-    "name": "...",
-    "issue_id": "...",
-    "holdings_date": "...",
-    "changes_date": "...",
-    "source": "sdw+local_db",
-    "mirror_status": "blocked_by_cloudflare",
-    "history_depth_days": 1,
-    "db_restored_from_backup": false
+    "history_depth_days": 2,
+    "db_restored_from_backup": true,
+    "price_source": "mirror"
   },
-  "holdings_summary": {},
+  "holdings_summary": {
+    "total_in_ccass": "1278778238",
+    "total_in_ccass_pct": "75.96%",
+    "securities_not_in_ccass": "404652679",
+    "largest_participant": "THE HONGKONG AND SHANGHAI BANKING",
+    "holdings_total_count": 36,
+    "holdings_returned_count": 15,
+    "changes_total_count": 20,
+    "changes_returned_count": 20,
+    "big_changes_total_count": 329,
+    "big_changes_returned_count": 10,
+    "concentration_total_count": 1980,
+    "concentration_returned_count": 15,
+    "truncated": true
+  },
   "holdings": [],
   "changes": [],
   "big_changes": [],
-  "price_history": [],
   "concentration": {
-    "top5_pct": "...",
-    "top10_pct": "...",
-    "latest_date": "...",
+    "top5_pct": "71.55%",
+    "top10_pct": "83.18%",
+    "latest_date": "2026-08-12",
     "records": []
   },
+  "price_history": [],
   "fetch_summary": [],
-  "data_quality_warnings": []
+  "data_quality_warnings": [],
+  "errors": []
 }
 ```
 
-## Additional endpoints
+If Holdings fails but Concentration succeeds, Top 5 and Top 10 remain populated from Concentration. Holdings-only values such as `largest_participant` and `total_in_ccass_pct` contain an explicit unavailable reason rather than an empty string.
 
-Same auth as `/api/stock` (`?key=`, `?api_token=`, Bearer or `X-API-Key`).
+## Fetch Diagnostics
 
-### Corporate events — `GET /api/stock/events?code=03321`
+Each `fetch_summary`／`fetch_log` row can include:
 
-Webb-site capital actions and distributions: dividends, splits/consolidations,
-bonus issues, rights, etc. Each event carries `announced`, `year_end`, `type`,
-`amount`, `new_old` (e.g. `1:10` for a 10-into-1 consolidation), `ex_date`,
-`distribution`, `notes`, plus `event_id` and `event_details_url`.
+- section and URL
+- final URL
+- fetch status and HTTP status
+- content type
+- tables found and selected table
+- method and fallback method
+- error type and error message
+- first 2,000 normalized response characters as `body_head`／`response_snippet`
 
-Optional: `limit` (default 30, max 200).
+One failed section does not stop successful sections. Empty local data is not proof that upstream CCASS data do not exist.
 
-### Directors & officers — `GET /api/stock/officers?code=03321`
+## Source Router
 
-Webb-site board and management: `name`, `person_id`, `person_url`, `sex`, `age`,
-`position_code` (e.g. `ED`, `INED`, `NED`, `CoSec`, `CFO`), `position` (full
-title), `from_date`, `until_date`, `is_current` and `table_group` (e.g.
-`Main board` vs `Manager/adviser/other`).
+```text
+CCASS_SOURCE_MODE=auto|mirror|sdw|local_db
+CCASS_MIRROR_BASE_URL=https://webb-database.com
+```
 
-Optional: `snapshot_date` (`YYYY-MM-DD`). Note: Webb-site stopped updating
-officer data after 2025-03-31; that source notice is echoed in
-`data_quality_warnings`.
+- `auto` is the REST and MCP default.
+- Cache keys include stock code, source preference and mirror base URL.
+- `mirror` preserves the original fetcher/parser.
+- `sdw`／`local_db` reads accumulated SQLite snapshots.
+- Cloudflare/Turnstile receives no bypass. A 403 fails loudly and available local data are returned where possible.
 
-The same response also carries `managers_f10`: current management sourced from
-同花順 F10 (`basic.10jqka.com.cn/HK<code>/manager.html`) with `name`,
-`positions`, `tenure_from`/`tenure_to`, `is_current`, `sex`, `age`,
-`education`, `salary` and the full `biography` — this covers appointments after
-the Webb-site freeze. `managers_f10_source` documents the provider and URL.
-Fields the source omits are null.
+MCP `get_ccass_stock_data` and REST `/api/stock` now both call `build_stock_payload(..., source_preference="auto")`.
 
-### Share capital & buybacks — `GET /api/stock/capital?code=02028`
+## Structured Errors
 
-同花順 F10 supply-side history: `share_capital_changes` (announce/change date,
-issued shares in millions + approximate absolute count, reason and canonical
-`reason_tags`: `placement` / `option_exercise` / `buyback_cancellation` /
-`rights_issue` / `consolidation` / ...) and `buybacks` (per-day amount, share
-count, price range). `capital_summary.latest_share_capital` gives the newest
-issued-share base — use it to cross-check stale bases flagged by
-`issued_shares_may_be_stale` in concentration. Optional: `changes_limit`
-(default 30), `buybacks_limit` (default 20).
+```json
+{
+  "error_code": "SOURCE_TIMEOUT",
+  "message": "Holdings: request timed out",
+  "retry_recommended": true
+}
+```
 
-MCP tools: `get_stock_events`, `get_stock_officers`, `get_stock_capital` (in
-addition to `get_ccass_stock_data`, `get_webbsite_price_history`,
-`get_hkex_announcements`, and `fetch_announcement_pdf`). The PDF tool accepts
-only HTTPS URLs on `hkexnews.hk` hosts, extracts text with PyMuPDF, and caches
-successful documents indefinitely by normalized URL hash.
+| Error code | Meaning | Retry recommended |
+| --- | --- | --- |
+| `COLD_START` | Hosting wake-up or total budget exhausted | yes |
+| `SOURCE_TIMEOUT` | Upstream timeout | yes |
+| `SOURCE_FETCH_FAILED` | DNS/network/5xx failure | yes, once |
+| `MIRROR_BLOCKED` | 403 or human verification | no |
+| `SOURCE_CHALLENGE` | JavaScript/human verification challenge | no |
+| `SOURCE_CHANGED` | No matching table or source layout changed | no |
+| `PARSE_ERROR` | Response fetched but parser could not normalize it | no |
+| `LOCAL_SNAPSHOT_EMPTY` | Local DB has no snapshot for this code | no; this does not mean no CCASS data exist |
+| `ISSUE_LOOKUP_FAILED` | Webb issue ID resolution failed | normally no high-frequency retry |
+| `INVALID_DATE_RANGE` | Invalid/non-session date bound | no |
+| `TOO_LARGE` | More sessions/rows than allowed | no; reduce range |
+| `AUTH_FAILED` | Token missing or incorrect | no |
 
-## CHANGELOG
+## Other REST Endpoints
 
-Breaking or behavioural changes are recorded here. Existing field names are kept
-for at least one version when new fields are added, because downstream analysis
-flows depend on the current schema.
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/screen?codes=...` | Compact screening of up to 20 stocks |
+| `GET /api/participant?id=...&codes=...` | Participant footprint across supplied codes |
+| `GET /api/stock/price?code=...` | Webb/Yahoo price history |
+| `GET /api/stock/announcements?code=...` | HKEX announcements |
+| `GET /api/stock/events?code=...` | Webb corporate events |
+| `GET /api/stock/officers?code=...` | Webb officers plus current F10 managers |
+| `GET /api/stock/capital?code=...` | F10 share capital changes and buybacks |
+| `GET /api/stock/diff?code=...&date_a=...&date_b=...` | Local snapshot diff |
+| `GET /announcement/pdf?url=...` | Text extraction for allowlisted HKEX PDFs |
+| `GET /api/snapshot_all?group=...` | Daily watchlist snapshot trigger |
+| `GET /api/snapshots/export` | Download SQLite backup |
 
-### Unreleased
+The four unaffected paths remain separate: HKEX announcements, HKEX PDF extraction, Yahoo price fallback and F10 capital/management.
 
-- **Structured error codes (handover 1.2):** the compact `/api/stock` response
-  gains an `errors` array of `{error_code, message, retry_recommended}`
-  (COLD_START / SOURCE_TIMEOUT / SOURCE_FETCH_FAILED / SOURCE_CHANGED /
-  PARSE_ERROR / ISSUE_LOOKUP_FAILED / AUTH_FAILED); the 401 body uses the same
-  shape so retry logic can act on it.
-- **Cross-stock participant search (handover 3.4):** `GET /api/participant?id=B01660&codes=...`
-  (`searchParticipantHoldings`) and MCP `search_participant_holdings` report a
-  participant's holding % and rank across up to 20 supplied stocks — a broker's
-  warehouse footprint across a watchlist. No market-wide reverse lookup exists,
-  so results are limited to the codes given.
-- **Announcement event chain (handover 3.5):** more tags (`convertible_bonds`,
-  `very_substantial_acquisition`, `resumption_of_public_float`,
-  `high_concentration_warning`, takeovers-code `general_offer`,
-  `results_announcement`) and a `timeline` output (date + tags + title, oldest
-  first, tagged rows only) on the announcements payload.
-- **Markdown output (handover 3.6):** `GET /api/stock?code=...&format=markdown`
-  returns the compact data as a `text/markdown` report (Metadata / Holdings
-  Summary / Holdings / Changes / Big Changes / Concentration / Warnings).
-- **Batch screening (handover 3.1):** `GET /api/screen?codes=01592,02028,06162`
-  (`screenStocks`) and MCP tool `screen_stocks` screen up to 20 watchlist codes
-  at once, returning a lightweight summary per stock — name, data date, CCASS
-  total %, Top5/Top10 (both bases), largest participant (name + category +
-  stake), and the biggest single-participant recent move — fetched with bounded
-  parallelism. Per-stock failures are reported inline as `{code, error}` rather
-  than failing the batch.
-- **REST parity with MCP:** new REST endpoints `GET /api/stock/price`
-  (`getStockPriceHistory`) and `GET /api/stock/announcements`
-  (`getStockAnnouncements`) expose the price-history and HKEX-announcement
-  payloads that were previously MCP-only, so GPT Actions can use them too.
-- **CCASS snapshot diff:** `GET /api/stock/diff?code=...&date_a=...&date_b=...`
-  (`getCCASSDiff`) and MCP tool `get_ccass_diff` compare full holdings
-  snapshots between two dates: per-participant share/stake changes with
-  status (new / exited / increased / decreased), Top5/Top10 stake on both
-  dates, and net share flow aggregated by participant category — the
-  before/after view for placements and warehouse transfers.
-- **Higher limit caps:** `holdings_limit` / `changes_limit` /
-  `big_changes_limit` / `concentration_limit` maxima raised from 50/60 to 100
-  (defaults unchanged).
-- **Copy report / CSV / Excel now carry the new data:** the Streamlit
-  Copy-for-ChatGPT report, combined CSV and Excel export include corporate
-  events, share-capital changes, buybacks and F10 current management (with
-  biographies in the report).
-- **Participant categories:** C-prefixed CCASS IDs (custodians) now default to
-  `bank` when no explicit mapping matches.
-- **Explicit response schema:** `holdings`, `changes`, `big_changes` and
-  `concentration.records` items are now typed models in `/openapi.json`, so the
-  normalized fields (`participant_id`, `change_shares`, `change_pct`, `category`
-  and the concentration dual-basis fields) are discoverable by GPT/Claude
-  Actions instead of relying on `additionalProperties`. Arbitrary source columns
-  (e.g. `Stake %`, `CCASS ID`) still pass through unchanged. Re-import
-  `/openapi.json` to pick up the fuller schema.
-- **Participant categories:** every holdings, changes and big-changes row now
-  carries a `category` (`retail` / `bank` / `boutique` / `intl_broker` /
-  `unknown`) to make collecting vs distributing flows readable at a glance. The
-  mapping lives in `config/participant_categories.json` — add a CCASS ID under
-  `by_ccass_id` (most reliable) or a distinctive name fragment under
-  `by_name_keyword` to classify a new broker; no code change needed.
-- **Settlement metadata:** `metadata` now includes `data_as_of_trading_date`
-  and `settlement_note` (CCASS is T+2), so consumers do not have to reason about
-  the settlement lag themselves.
-- **Concentration dual-basis:** the `concentration` block and every record now
-  carry both `top5_pct_of_ccass` / `top10_pct_of_ccass` (the source page's basis,
-  % of shares in CCASS) and `top5_pct_of_issued` / `top10_pct_of_issued` (% of
-  total issued shares), plus `issued_shares` and `issued_shares_as_of`. When a
-  % of issued exceeds 100% (stale issued-share base after a placement/
-  consolidation) the record and the summary set `issued_shares_may_be_stale` and
-  a warning is added. The legacy `top5_pct` / `top10_pct` (of issued) are
-  unchanged.
-- **New data — Corporate events** (`GET /api/stock/events`, MCP `get_stock_events`):
-  Webb-site dividends, splits/consolidations, bonus, rights and other capital
-  actions, keyed by issue id.
-- **New data — Directors & officers** (`GET /api/stock/officers`, MCP
-  `get_stock_officers`): Webb-site board and management with positions and tenure,
-  keyed by the Webb-site organisation id. Includes the source's post-2025-03-31
-  update-freeze notice as a data-quality warning.
-- **Reliability:** CCASS sections (Holdings, Changes, Big Changes, Concentration,
-  Price History) are now fetched **concurrently** instead of serially. Previously
-  Price History — always fetched last — was frequently starved of the shared
-  timeout budget and returned `Timeout budget exhausted before this section was
-  fetched`. Concurrency removes that starvation and lowers warm-request latency.
-  Tune worker count with the `FETCH_MAX_WORKERS` env var (default = number of
-  sections).
-- **Lower default limits** (callers can still request more, up to the same maxima):
-  `holdings_limit` 20 → **15**, `changes_limit` 30 → **20**, `big_changes_limit`
-  20 → **10**, `concentration_limit` 30 → **15**.
-- **Big Changes enrichment (additive):** each big-change row now also carries
-  `participant_id` (joined from the Holdings table; `null` when the name cannot be
-  matched — never fabricated), `participant_name`, `change_shares` (numeric, `null`
-  when the source omits a share-count column) and `change_pct`. The original
-  `Date`, `Participant`, `Change %` and `Change in shares` keys are unchanged.
+## MCP Tools
+
+Main tools include:
+
+- `get_ccass_stock_data`
+- `screen_stocks`
+- `search_participant_holdings`
+- `get_ccass_diff`
+- `get_webbsite_price_history`
+- `get_hkex_announcements`
+- `fetch_announcement_pdf`
+- `get_stock_events`
+- `get_stock_officers`
+- `get_stock_capital`
+
+`get_ccass_stock_data` accepts the same date range arguments as REST: `changes_from`, `changes_to`, `big_changes_from`, `big_changes_to`, `date_input_basis`.
+
+## Snapshot Persistence
+
+Default DB: `data/ccass_snapshots.db`. Render Free filesystem is ephemeral, so `.github/workflows/daily_snapshot.yml` exports the DB into the repository backup path and startup restores it when the working DB is missing.
+
+```text
+GET /api/snapshot_all?group=caiji&key=<token>
+GET /api/snapshot_all?group=lshape&key=<token>
+GET /api/snapshots/export?key=<token>
+```
+
+Metadata fields `history_depth_days` and `db_restored_from_backup` show the available local history and restore state. This backup mechanism reduces loss but is not a true persistent database. Consider persistent disk, Turso, Neon or Supabase before the DB exceeds about 50 MB.
+
+## Price Fallback
+
+Mirror `hpu.asp` is preferred because it includes actual turnover. Yahoo fallback adds `price_source=yahoo`, `turnover_est` and `vwap_est`; warnings state that these are estimates. Prices are rounded to three decimals and estimated turnover to two decimals at the output layer.
+
+## Custom GPT Setup
+
+Import:
+
+```text
+https://webbsite-ccass-api.onrender.com/openapi.json
+```
+
+Configure API-key authentication with the same server token. Re-import OpenAPI after deployment so the GPT sees row-level date fields and the new range parameters.
+
+## Changelog
+
+### 1.14.0
+
+- Explicit trade/settlement contract and XHKG T+2 conversion.
+- Row fields `ccass_date`, `implied_trade_date`, `implied_settlement_date`, `date_basis`.
+- Metadata `data_as_of_trading_date`, section basis map and query/settlement ranges.
+- Date range requests for Changes and Big Changes.
+- Shared REST/MCP/Streamlit auto source router and source-aware caching.
+- Extended raw diagnostics and partial-success summary behavior.
+

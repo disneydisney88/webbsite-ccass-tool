@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 import api
 from utils.fetcher import body_head, extract_tables_from_html, fetch_with_requests, webb_database_cookie_value
-from utils.errors import classify_fetch_message, errors_from_fetch_summary, structured_error
+from utils.errors import (
+    classify_fetch_message,
+    errors_from_fetch_summary,
+    errors_from_warnings,
+    structured_error,
+)
 
 
 class ClassifyTest(unittest.TestCase):
@@ -21,6 +26,19 @@ class ClassifyTest(unittest.TestCase):
         self.assertTrue(structured_error("COLD_START", "x")["retry_recommended"])
         self.assertFalse(structured_error("PARSE_ERROR", "x")["retry_recommended"])
         self.assertFalse(structured_error("AUTH_FAILED", "x")["retry_recommended"])
+
+    def test_local_snapshot_empty_is_distinct_from_no_upstream_data(self):
+        errors = errors_from_warnings(
+            ["LOCAL_SNAPSHOT_EMPTY: no SDW snapshot is available for this stock."]
+        )
+        self.assertEqual(errors[0]["error_code"], "LOCAL_SNAPSHOT_EMPTY")
+        self.assertFalse(errors[0]["retry_recommended"])
+
+    def test_mirror_blocked_warning_has_dedicated_code(self):
+        errors = errors_from_warnings(
+            ["MIRROR_BLOCKED: automatic mirror probe returned 403/human verification."]
+        )
+        self.assertEqual(errors[0]["error_code"], "MIRROR_BLOCKED")
 
 
 class FetchSummaryErrorsTest(unittest.TestCase):

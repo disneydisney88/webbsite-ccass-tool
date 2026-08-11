@@ -36,10 +36,18 @@ SETTLEMENT_NOTE = (
     "XHKG trading sessions, including Hong Kong market holidays."
 )
 
-DATE_SEMANTICS_SUMMARY = (
-    "日期基準：Holdings/Big Changes/Concentration = 持股日（結算日，T+2）；"
-    "Changes = 頁面明列交易日。成交日與結算日以港股交易日曆相隔兩個交易日換算。"
+DATE_SEMANTICS_HEADER_LINES = (
+    "日期基準：Holdings/Big Changes/Concentration = 持股日（結算日，T+2）",
+    "         Changes = 頁面明列交易日",
+    "成交日 = 持股日 - 2 個交易日（已計港股假期）",
+    "每行另有 implied_trade_date 欄",
 )
+
+DATE_SEMANTICS_SUMMARY = " ".join(line.strip() for line in DATE_SEMANTICS_HEADER_LINES)
+
+
+def date_semantics_header(prefix: str = "# ") -> str:
+    return "\n".join(f"{prefix}{line}" for line in DATE_SEMANTICS_HEADER_LINES)
 
 
 @dataclass(frozen=True)

@@ -67,6 +67,7 @@ class StockDateRangeTest(unittest.TestCase):
         self.assertEqual(metadata["changes_queried_settlement_to"], "2026-08-12")
         self.assertEqual(metadata["big_changes_queried_settlement_from"], "2026-08-11")
         self.assertEqual(metadata["big_changes_queried_settlement_to"], "2026-08-12")
+        self.assertEqual(metadata["data_as_of_trading_date"], "2026-08-11")
         self.assertEqual(len(payload["changes"]), 2)
         self.assertEqual(
             {row["ccass_date"] for row in payload["big_changes"]},
@@ -84,6 +85,20 @@ class StockDateRangeTest(unittest.TestCase):
                 )
         self.assertEqual(raised.exception.status_code, 422)
         self.assertEqual(raised.exception.detail["error_code"], "INVALID_DATE_RANGE")
+
+    def test_range_over_session_limit_returns_too_large(self):
+        with patch.object(api, "build_base_payload", return_value=base_payload()), patch.object(
+            api, "MAX_DATE_RANGE_SESSIONS", 1
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                api.build_stock_payload(
+                    "03301",
+                    changes_from="2026-08-07",
+                    changes_to="2026-08-10",
+                    source_preference="local_db",
+                )
+        self.assertEqual(raised.exception.status_code, 413)
+        self.assertEqual(raised.exception.detail["error_code"], "TOO_LARGE")
 
 
 if __name__ == "__main__":

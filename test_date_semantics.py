@@ -2,6 +2,7 @@ import unittest
 
 from utils.date_semantics import (
     annotate_records,
+    build_date_query_plan,
     derive_dates,
     shift_trading_date,
 )
@@ -69,6 +70,34 @@ class RowDateSemanticsTest(unittest.TestCase):
         self.assertEqual(rows[0]["implied_trade_date"], "2026-08-07")
         self.assertEqual(rows[0]["implied_settlement_date"], "2026-08-11")
         self.assertEqual(rows[0]["date_basis"], "trade")
+
+
+class DateQueryPlanTest(unittest.TestCase):
+    def test_trade_range_converts_to_required_settlement_dates(self):
+        plan, _warning = build_date_query_plan("2026-08-07", "2026-08-10", "trade")
+        self.assertEqual(
+            plan,
+            [
+                {
+                    "input_date": "2026-08-07",
+                    "trade_date": "2026-08-07",
+                    "settlement_date": "2026-08-11",
+                },
+                {
+                    "input_date": "2026-08-10",
+                    "trade_date": "2026-08-10",
+                    "settlement_date": "2026-08-12",
+                },
+            ],
+        )
+
+    def test_settlement_input_keeps_settlement_bounds(self):
+        plan, _warning = build_date_query_plan("2026-08-11", "2026-08-12", "settlement")
+        self.assertEqual([row["trade_date"] for row in plan], ["2026-08-07", "2026-08-10"])
+
+    def test_weekend_bound_fails_loud(self):
+        with self.assertRaisesRegex(ValueError, "XHKG trading sessions"):
+            build_date_query_plan("2026-08-08", "2026-08-10", "trade")
 
 
 if __name__ == "__main__":

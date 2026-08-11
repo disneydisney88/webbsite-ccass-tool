@@ -158,6 +158,50 @@ def trading_sessions_between(start_value: Any, end_value: Any) -> tuple[list[str
     return [item.isoformat() for item in sessions], warning
 
 
+def build_date_query_plan(
+    start_value: Any,
+    end_value: Any,
+    input_basis: str = "trade",
+    max_sessions: int = 31,
+) -> tuple[list[dict[str, str]], str]:
+    basis = str(input_basis or "trade").strip().lower()
+    if basis not in {"trade", "settlement"}:
+        raise ValueError("date_input_basis must be 'trade' or 'settlement'.")
+    start_iso = normalize_date(start_value or end_value)
+    end_iso = normalize_date(end_value or start_value)
+    if not start_iso or not end_iso:
+        if not start_value and not end_value:
+            return [], ""
+        raise ValueError("Date range values must use YYYY-MM-DD.")
+    if start_iso > end_iso:
+        raise ValueError("Date range start must not be later than date range end.")
+    sessions, warning = trading_sessions_between(start_iso, end_iso)
+    if not sessions:
+        raise ValueError(warning or "Date range contains no XHKG trading sessions.")
+    if sessions[0] != start_iso or sessions[-1] != end_iso:
+        raise ValueError("Date range bounds must be XHKG trading sessions.")
+    if len(sessions) > max_sessions:
+        raise ValueError(
+            f"Date range contains {len(sessions)} trading sessions; maximum is {max_sessions}."
+        )
+
+    plan: list[dict[str, str]] = []
+    for session in sessions:
+        if basis == "trade":
+            settlement_date, item_warning = shift_trading_date(session, 2)
+            if not settlement_date:
+                raise ValueError(item_warning or f"Could not derive settlement date for {session}.")
+            plan.append({"input_date": session, "trade_date": session, "settlement_date": settlement_date})
+        else:
+            trade_date, item_warning = shift_trading_date(session, -2)
+            if not trade_date:
+                raise ValueError(item_warning or f"Could not derive trade date for {session}.")
+            plan.append({"input_date": session, "trade_date": trade_date, "settlement_date": session})
+        if item_warning and item_warning not in warning:
+            warning = f"{warning} {item_warning}".strip()
+    return plan, warning
+
+
 def shift_trading_date(value: Any, offset: int) -> tuple[str, str]:
     source_iso = normalize_date(value)
     if not source_iso:

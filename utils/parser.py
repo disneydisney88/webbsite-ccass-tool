@@ -7,6 +7,13 @@ from typing import Any, Optional
 import pandas as pd
 from bs4 import BeautifulSoup
 
+from .date_semantics import (
+    SECTION_DATE_BASIS,
+    SETTLEMENT_NOTE,
+    annotate_records,
+    derive_dates,
+    unavailable_data_as_of,
+)
 from .fetcher import FetchResult
 
 
@@ -37,11 +44,18 @@ class ParsedCCASS:
     db_restored_from_backup: bool = False
     fetched_time: str = ""
     holdings_data_date: str = ""
+    holdings_implied_trade_date: str = ""
     changes_date_range: str = ""
     changes_trading_date: str = ""
+    changes_implied_trade_date: str = ""
     big_changes_latest_date: str = ""
+    big_changes_implied_trade_date: str = ""
     concentration_latest_date: str = ""
+    concentration_implied_trade_date: str = ""
     price_history_latest_date: str = ""
+    data_as_of_trading_date: str = ""
+    date_basis_by_section: dict[str, str] = field(default_factory=dict)
+    settlement_note: str = SETTLEMENT_NOTE
     price_source: str = ""
     issued_securities: str = ""
     total_in_ccass: str = ""
@@ -368,457 +382,4 @@ def parse_holdings(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str
     parsed.holdings_table = output
 
     if parsed.holdings_table.empty:
-        parse.status = "no matching table"
-        parse.error = "Holdings table parsing failed. Raw table previews are shown below."
-        return
-
-    parse.latest_date = parsed.holdings_data_date
-    parsed.largest_participant = safe_str(parsed.holdings_table.iloc[0]["Participant"])
-    if len(parsed.holdings_table) >= 5:
-        parsed.top5_cumulative_pct = percent_text(parsed.holdings_table.iloc[4]["Cumulative %"])
-    if len(parsed.holdings_table) >= 10:
-        parsed.top10_cumulative_pct = percent_text(parsed.holdings_table.iloc[9]["Cumulative %"])
-
-
-def parse_changes(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
-    parse = SectionParse("Changes")
-    parsed.section_parses[parse.section] = parse
-    table = get_selected_table(parse.section, result, overrides, parse)
-    if table.empty:
-        return
-
-    text = result.raw_text
-    parsed.changes_date_range = first_match(text, [r"From ([0-9]{4}-[0-9]{2}-[0-9]{2} to [0-9]{4}-[0-9]{2}-[0-9]{2})", r"Date range[:\s]+([0-9]{4}-[0-9]{2}-[0-9]{2}.+?[0-9]{4}-[0-9]{2}-[0-9]{2})"])
-    parsed.changes_trading_date = first_match(text, [r"Trading date[:\s]+([0-9]{4}-[0-9]{2}-[0-9]{2})"])
-    parsed.volume = first_match(text, [r"Volume[:\s]+([0-9,]+)"])
-    parsed.turnover = first_match(text, [r"Turnover[:\s]+([$A-Z0-9,.\s]+)"])
-    parsed.average_price = first_match(text, [r"Average price[:\s]+([$A-Z0-9,.]+)"])
-    parsed.total_ccass_change = first_match(text, [r"Total securities in CCASS change[:\s]+([-+0-9,]+)", r"Total CCASS change[:\s]+([-+0-9,]+)"])
-    for raw_table in result.tables:
-        kv_table = normalize_columns(raw_table)
-        if kv_table.shape[1] < 2:
-            continue
-        first_col, second_col = kv_table.columns[0], kv_table.columns[1]
-        pairs = {safe_str(row[first_col]).lower(): safe_str(row[second_col]) for _, row in kv_table.iterrows()}
-        parsed.changes_trading_date = pairs.get("trading date", parsed.changes_trading_date)
-        parsed.volume = pairs.get("volume", parsed.volume)
-        parsed.turnover = pairs.get("turnover", parsed.turnover)
-        parsed.average_price = pairs.get("average price", parsed.average_price)
-
-    participant_col = pick_first_column(table, [["participant"], ["name of ccass participant"], ["name"]])
-    change_col = pick_first_column(table, [["change in shares"], ["change"]])
-    change_pct_col = next((col for col in table.columns if "Î”" in str(col) or "delta" in norm(col)), None)
-    change_pct_col = change_pct_col or pick_first_column(table, [["change %"], ["% change"], ["stake change"]])
-    holding_after_col = pick_first_column(table, [["holding after"], ["holding"]])
-    stake_after_col = pick_first_column(table, [["stake after"], ["stake"]])
-
-    if any(col is None for col in [participant_col, change_col]):
-        parse.status = "no matching table"
-        parse.error = "Changes table parsing failed. Raw table previews are shown below."
-        return
-
-    output = pd.DataFrame()
-    output["Participant"] = table[participant_col]
-    output["Change"] = table[change_col]
-    output["Change %"] = table[change_pct_col] if change_pct_col else table[change_col]
-    output["Holding after"] = table[holding_after_col] if holding_after_col else ""
-    output["Stake after"] = table[stake_after_col] if stake_after_col else ""
-    output = output.dropna(how="all")
-    output = output[output["Participant"].astype(str).str.strip().ne("")]
-    parsed.changes_table = output
-
-    if parsed.changes_table.empty:
-        parse.status = "no matching table"
-        parse.error = "Changes table parsing failed. Raw table previews are shown below."
-        return
-
-    parse.latest_date = parsed.changes_trading_date or parsed.changes_date_range
-    ranked = parsed.changes_table.assign(_change=parsed.changes_table["Change"].map(to_number)).dropna(subset=["_change"])
-    increases = ranked.sort_values("_change", ascending=False).head(5)
-    decreases = ranked.sort_values("_change", ascending=True).head(5)
-    parsed.major_increases = [f"{row['Participant']}: {row['Change']}" for _, row in increases.iterrows() if row["_change"] > 0]
-    parsed.major_decreases = [f"{row['Participant']}: {row['Change']}" for _, row in decreases.iterrows() if row["_change"] < 0]
-    parsed.changes_flags = classify_changes(parsed.changes_table)
-
-
-def classify_changes(df: pd.DataFrame) -> list[str]:
-    if df.empty:
-        return []
-    broker_keywords = ("securities", "sec", "brokerage", "capital", "futu", "uob", "kingston", "rifa", "phillip", "bright")
-    bank_keywords = ("bank", "nominees", "custodian", "clearing", "hkscc", "central clearing")
-    ranked = df.copy()
-    ranked["_change"] = ranked["Change"].map(to_number)
-    ranked["_stake_after"] = ranked["Stake after"].map(to_number)
-    ranked = ranked.dropna(subset=["_change"])
-    if ranked.empty:
-        return []
-
-    flags: list[str] = []
-    increases = ranked[ranked["_change"] > 0].sort_values("_change", ascending=False)
-    decreases = ranked[ranked["_change"] < 0].sort_values("_change", ascending=True)
-    total_inc = increases["_change"].sum()
-    total_dec = abs(decreases["_change"].sum())
-
-    large_increases = increases[increases["_stake_after"].fillna(0) >= 1]
-    retail_like_increases = increases[
-        increases["Participant"].astype(str).str.lower().apply(lambda name: any(k in name for k in broker_keywords))
-    ]
-    custody_like_increases = increases[
-        increases["Participant"].astype(str).str.lower().apply(lambda name: any(k in name for k in bank_keywords))
-    ]
-
-    if not large_increases.empty:
-        sample = ", ".join(large_increases.head(3)["Participant"].astype(str).tolist())
-        flags.append(f"å¤§æˆ¶åˆ¸å•†å¢žå€‰: {sample}")
-    if not retail_like_increases.empty:
-        sample = ", ".join(retail_like_increases.head(5)["Participant"].astype(str).tolist())
-        flags.append(f"æ•£æˆ¶åˆ¸å•†å¢žå€‰: {sample}")
-    if not decreases.empty and abs(decreases.iloc[0]["_change"]) >= max(total_dec * 0.5, 1):
-        flags.append(f"å–®ä¸€å¤§æˆ¶æ¸›å€‰: {decreases.iloc[0]['Participant']} {decreases.iloc[0]['Change']}")
-    if len(increases) >= 4 and total_inc > 0:
-        flags.append(f"å¤šé–“åˆ¸å•†åˆ†æ•£æ‰¿æŽ¥: {len(increases)} participants increased holdings")
-    if total_inc > 0 and total_dec > 0 and abs(total_inc - total_dec) <= max(total_inc, total_dec) * 0.15:
-        flags.append("æ˜¯å¦ç–‘ä¼¼è½‰å€‰: yes, increases and decreases are broadly balanced")
-    elif not custody_like_increases.empty and total_dec > 0:
-        flags.append("æ˜¯å¦ç–‘ä¼¼è½‰å€‰: possible, custody-like participant increased while others decreased")
-    else:
-        flags.append("æ˜¯å¦ç–‘ä¼¼è½‰å€‰: not confirmed from Changes table alone")
-    return flags
-
-
-def parse_big_changes(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
-    parse = SectionParse("Big Changes")
-    parsed.section_parses[parse.section] = parse
-    table = get_selected_table(parse.section, result, overrides, parse)
-    if table.empty:
-        return
-
-    date_col = pick_first_column(table, [["date"]])
-    participant_col = pick_first_column(table, [["participant"], ["name"]])
-    shares_col = pick_first_column(table, [["change in shares"], ["shares"], ["holding change"]])
-    change_col = shares_col or pick_first_column(table, [["change"]])
-    change_pct_col = pick_first_column(table, [["change %"], ["% change"], ["%"]])
-    if any(col is None for col in [date_col, participant_col, change_col]):
-        parse.status = "no matching table"
-        parse.error = "Big Changes table parsing failed. Raw table previews are shown below."
-        return
-
-    output = pd.DataFrame()
-    output["Raw Date"] = table[date_col]
-    output["Date"] = table[date_col].replace("", pd.NA).ffill()
-    output["Participant"] = table[participant_col]
-    if shares_col:
-        output["Change in shares"] = table[shares_col]
-        output["Change %"] = table[change_pct_col] if change_pct_col else ""
-    else:
-        output["Change %"] = table[change_pct_col] if change_pct_col else table[change_col]
-    output = output.dropna(how="all")
-    output = output[output["Participant"].astype(str).str.strip().ne("")]
-    columns = ["Date", "Participant"]
-    if "Change in shares" in output.columns:
-        columns.append("Change in shares")
-    columns.append("Change %")
-    parsed.big_changes_table = output[columns]
-
-    if parsed.big_changes_table.empty:
-        parse.status = "no matching table"
-        parse.error = "Big Changes table parsing failed. Raw table previews are shown below."
-        return
-
-    parsed.big_changes_latest_date = latest_date_from_column(parsed.big_changes_table, "Date")
-    parse.latest_date = parsed.big_changes_latest_date
-    parsed.transfer_flags = detect_transfer_flags(parsed.big_changes_table)
-
-
-def detect_transfer_flags(df: pd.DataFrame, threshold_pct: float = 10.0) -> list[str]:
-    if df.empty or "Date" not in df or "Change %" not in df:
-        return []
-    flags = []
-    for date, group in df.groupby("Date", dropna=True):
-        rows = []
-        for _, row in group.iterrows():
-            pct = to_number(row.get("Change %"))
-            if pct is not None and abs(pct) >= threshold_pct:
-                rows.append((safe_str(row.get("Participant")), pct))
-        positives = [item for item in rows if item[1] > 0]
-        negatives = [item for item in rows if item[1] < 0]
-        for pos_name, pos_pct in positives:
-            for neg_name, neg_pct in negatives:
-                if abs(abs(pos_pct) - abs(neg_pct)) <= 2.0:
-                    flags.append(
-                        f"{date}: possible large custody transfer / warehouse transfer, {pos_name} +{pos_pct:g}% / {neg_name} {neg_pct:g}%"
-                    )
-    return flags
-
-
-def parse_concentration(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
-    parse = SectionParse("Concentration")
-    parsed.section_parses[parse.section] = parse
-    table = get_selected_table(parse.section, result, overrides, parse)
-    if table.empty:
-        return
-
-    date_col = pick_first_column(table, [["date"]])
-    top5_col = pick_first_column(table, [["top 5"], ["top5"]])
-    top10_ncip_col = pick_first_column(table, [["top 10 + ncip"], ["top 10 +ncip"], ["top 10 ncip"], ["ncip"]])
-    top10_table = table.drop(columns=[top10_ncip_col]) if top10_ncip_col else table
-    top10_col = pick_first_column(top10_table, [["top 10 %"], ["top 10"], ["top10"]])
-    stake_col = pick_first_column(table, [["stake in ccass"], ["ccass"], ["stake"]])
-    if any(col is None for col in [date_col, top5_col, top10_col]):
-        parse.status = "no matching table"
-        parse.error = "Concentration table parsing failed. Raw table previews are shown below."
-        return
-
-    output = pd.DataFrame()
-    output["Date"] = table[date_col]
-    output["Top 5 %"] = table[top5_col]
-    output["Top 10 %"] = table[top10_col]
-    output["Top 10 + NCIP %"] = table[top10_ncip_col] if top10_ncip_col else ""
-    output["Stake in CCASS %"] = table[stake_col] if stake_col else ""
-    output = output.dropna(how="all")
-    parsed.concentration_table = output
-
-    if parsed.concentration_table.empty:
-        parse.status = "no matching table"
-        parse.error = "Concentration table parsing failed. Raw table previews are shown below."
-        return
-
-    parsed.concentration_latest_date = latest_date_from_column(parsed.concentration_table, "Date")
-    parse.latest_date = parsed.concentration_latest_date
-    parsed.concentration_5day_change = calculate_concentration_5day_change(parsed.concentration_table)
-    validate_concentration(parsed)
-
-
-def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
-    parse = SectionParse("Price History")
-    parsed.section_parses[parse.section] = parse
-    table = get_selected_table(parse.section, result, overrides, parse)
-    if table.empty:
-        return
-
-    date_col = pick_first_column(table, [["date"]])
-    close_col = pick_first_column(table, [["close"], ["price"]])
-    volume_col = pick_first_column(table, [["volume"], ["vol"]])
-    turnover_col = pick_first_column(table, [["turnover"], ["value"], ["amount"]])
-    vwap_col = pick_first_column(table, [["vwap"], ["average price"], ["avg price"]])
-    high_col = pick_first_column(table, [["high"]])
-    low_col = pick_first_column(table, [["low"]])
-    open_col = pick_first_column(table, [["open"]])
-
-    if any(col is None for col in [date_col, close_col]):
-        parse.status = "no matching table"
-        parse.error = "Price History table parsing failed. Raw table previews are shown below."
-        return
-
-    output = pd.DataFrame()
-    output["Date"] = table[date_col]
-    output["Close"] = table[close_col]
-    output["Open"] = table[open_col] if open_col else ""
-    output["High"] = table[high_col] if high_col else ""
-    output["Low"] = table[low_col] if low_col else ""
-    output["Volume"] = table[volume_col] if volume_col else ""
-    output["Turnover"] = table[turnover_col] if turnover_col else ""
-    output["VWAP"] = table[vwap_col] if vwap_col else ""
-    price_source_col = pick_first_column(table, [["price_source"], ["price source"]])
-    turnover_est_col = pick_first_column(table, [["turnover_est"], ["turnover est"]])
-    vwap_est_col = pick_first_column(table, [["vwap_est"], ["vwap est"]])
-    if price_source_col:
-        output["price_source"] = table[price_source_col]
-    if turnover_est_col:
-        output["turnover_est"] = table[turnover_est_col]
-    if vwap_est_col:
-        output["vwap_est"] = table[vwap_est_col]
-    output = output.dropna(how="all")
-    output = output[output["Date"].astype(str).str.strip().ne("")]
-    for column in ["Close", "Open", "High", "Low", "VWAP", "vwap_est"]:
-        if column in output.columns:
-            output[column] = pd.to_numeric(output[column], errors="coerce").round(3)
-    for column in ["Turnover", "turnover_est"]:
-        if column in output.columns:
-            output[column] = pd.to_numeric(output[column], errors="coerce").round(2)
-    if "vwap_est" not in output.columns and "price_source" in output.columns:
-        volume = pd.to_numeric(output.get("Volume"), errors="coerce")
-        turnover_est = pd.to_numeric(output.get("turnover_est"), errors="coerce")
-        yahoo_source = output["price_source"].astype(str).str.lower().eq("yahoo")
-        missing_vwap = pd.to_numeric(output.get("VWAP"), errors="coerce").isna()
-        output["vwap_est"] = (turnover_est / volume.where(volume.ne(0))).where(yahoo_source & missing_vwap).round(3)
-    parsed.price_history_table = output
-
-    if parsed.price_history_table.empty:
-        parse.status = "no matching table"
-        parse.error = "Price History table parsing failed. Raw table previews are shown below."
-        return
-
-    parsed.price_history_latest_date = latest_date_from_column(parsed.price_history_table, "Date")
-    parse.latest_date = parsed.price_history_latest_date
-    sorted_df = parsed.price_history_table.copy()
-    sorted_df["_date"] = sorted_df["Date"].map(parse_date_value)
-    sorted_df = sorted_df.dropna(subset=["_date"]).sort_values("_date", ascending=False)
-    if not sorted_df.empty:
-        latest = sorted_df.iloc[0]
-        parsed.latest_price = safe_str(latest.get("Close"))
-        parsed.latest_price_volume = safe_str(latest.get("Volume"))
-        parsed.latest_price_turnover = safe_str(latest.get("Turnover"))
-        parsed.latest_price_vwap = safe_str(latest.get("VWAP"))
-        parsed.price_source = safe_str(latest.get("price_source"))
-        if parsed.price_source == "yahoo" or "turnover_est" in parsed.price_history_table.columns:
-            warning = "Turnover is estimated as volume \u00d7 close, not actual turnover"
-            if warning not in parsed.analysis_warnings:
-                parsed.analysis_warnings.append(warning)
-        if parsed.price_source == "yahoo" and "vwap_est" in parsed.price_history_table.columns:
-            warning = "VWAP is estimated from estimated turnover"
-            if warning not in parsed.analysis_warnings:
-                parsed.analysis_warnings.append(warning)
-
-
-def calculate_concentration_5day_change(df: pd.DataFrame) -> dict[str, str]:
-    if df.empty or len(df) < 2:
-        return {}
-    sorted_df = df.copy()
-    sorted_df["_date"] = sorted_df["Date"].map(parse_date_value)
-    sorted_df = sorted_df.dropna(subset=["_date"]).sort_values("_date", ascending=False)
-    if len(sorted_df) < 2:
-        return {}
-    latest = sorted_df.iloc[0]
-    base = sorted_df.iloc[min(4, len(sorted_df) - 1)]
-    changes = {}
-    for label in ["Top 5 %", "Top 10 %", "Stake in CCASS %"]:
-        latest_value = to_number(latest.get(label))
-        base_value = to_number(base.get(label))
-        if latest_value is None or base_value is None:
-            changes[label] = "not available"
-        else:
-            changes[label] = f"{latest_value - base_value:+.2f} ppt ({safe_str(base.get('Date'))} to {safe_str(latest.get('Date'))})"
-    return changes
-
-
-def validate_concentration(parsed: ParsedCCASS) -> None:
-    if parsed.concentration_table.empty:
-        return
-    value_columns = ["Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"]
-    for idx, row in parsed.concentration_table.iterrows():
-        date = safe_str(row.get("Date")) or f"row {idx + 1}"
-        for column in value_columns:
-            value = to_number(row.get(column))
-            if value is None:
-                continue
-            if value < 0 or value > 100:
-                parsed.analysis_warnings.append(
-                    f"Abnormal concentration value: {date} {column} = {row.get(column)}. Expected range is 0-100."
-                )
-
-
-def fallback_concentration_from_holdings(parsed: ParsedCCASS, result: FetchResult | None) -> None:
-    if not parsed.concentration_table.empty or parsed.holdings_table.empty:
-        return
-    parsed.concentration_table = pd.DataFrame(
-        [
-            {
-                "Date": parsed.holdings_data_date or "Current holdings page",
-                "Top 5 %": parsed.top5_cumulative_pct,
-                "Top 10 %": parsed.top10_cumulative_pct,
-                "Top 10 + NCIP %": "",
-                "Stake in CCASS %": parsed.total_in_ccass_pct,
-            }
-        ]
-    )
-    parsed.concentration_latest_date = parsed.holdings_data_date or "Current holdings page"
-    section = parsed.section_parses.setdefault("Concentration", SectionParse("Concentration"))
-    section.status = "partial success"
-    section.latest_date = parsed.concentration_latest_date
-    section.error = "Concentration page failed; Top 5 / Top 10 estimated from Holdings table."
-    if result:
-        section.selected_table_index = None
-
-
-def unavailable(value: str, reason: str) -> str:
-    return value if value else f"not available because {reason}"
-
-
-def add_cross_section_warnings(parsed: ParsedCCASS) -> None:
-    if not parsed.concentration_table.empty and parsed.holdings_table.empty:
-        parsed.analysis_warnings.append("Concentration succeeded, but Holdings failed. Full broker-level analysis is incomplete.")
-    if not parsed.big_changes_table.empty and parsed.changes_table.empty:
-        parsed.analysis_warnings.append("Big Changes succeeded, but daily Changes failed. Recent daily movement cannot be confirmed.")
-
-
-def parse_results(
-    issue_id: str,
-    results: dict[str, FetchResult],
-    stock_code: str = "",
-    id_lookup_method: str = "",
-    id_lookup_status: str = "",
-    selected_indices: dict[str, int] | None = None,
-    source_metadata: dict[str, Any] | None = None,
-) -> ParsedCCASS:
-    parsed = ParsedCCASS(
-        issue_id=issue_id,
-        stock_code=stock_code,
-        id_lookup_method=id_lookup_method,
-        id_lookup_status=id_lookup_status,
-    )
-    fetched_times = [item.fetched_time for item in results.values() if item.fetched_time]
-    parsed.fetched_time = max(fetched_times) if fetched_times else ""
-    if source_metadata:
-        parsed.source = safe_str(source_metadata.get("source"))
-        parsed.mirror_status = safe_str(source_metadata.get("mirror_status"))
-        parsed.mirror_base_url = safe_str(source_metadata.get("mirror_base_url"))
-        try:
-            parsed.history_depth_days = int(source_metadata.get("history_depth_days") or 0)
-        except (TypeError, ValueError):
-            parsed.history_depth_days = 0
-        parsed.db_restored_from_backup = bool(source_metadata.get("db_restored_from_backup", False))
-
-    if results.get("Company / orgdata"):
-        parse_company(results["Company / orgdata"], parsed, selected_indices)
-    if results.get("Holdings"):
-        if results["Holdings"].ok:
-            parse_holdings(results["Holdings"], parsed, selected_indices)
-        else:
-            parsed.section_parses["Holdings"] = SectionParse("Holdings", status="failed", error=results["Holdings"].error_message)
-    if results.get("Changes"):
-        if results["Changes"].ok:
-            parse_changes(results["Changes"], parsed, selected_indices)
-        else:
-            parsed.section_parses["Changes"] = SectionParse("Changes", status="failed", error=results["Changes"].error_message)
-    if results.get("Big Changes"):
-        if results["Big Changes"].ok:
-            parse_big_changes(results["Big Changes"], parsed, selected_indices)
-        else:
-            parsed.section_parses["Big Changes"] = SectionParse("Big Changes", status="failed", error=results["Big Changes"].error_message)
-    if results.get("Concentration"):
-        if results["Concentration"].ok:
-            parse_concentration(results["Concentration"], parsed, selected_indices)
-        else:
-            parsed.section_parses["Concentration"] = SectionParse("Concentration", status="failed", error=results["Concentration"].error_message)
-    if results.get("Price History"):
-        if results["Price History"].ok:
-            parse_price_history(results["Price History"], parsed, selected_indices)
-        else:
-            parsed.section_parses["Price History"] = SectionParse("Price History", status="failed", error=results["Price History"].error_message)
-
-    fallback_concentration_from_holdings(parsed, results.get("Concentration"))
-    add_cross_section_warnings(parsed)
-    return parsed
-
-
-def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> pd.DataFrame:
-    rows = []
-    for section in SECTIONS:
-        result = results.get(section)
-        parse = parsed.section_parses.get(section, SectionParse(section))
-        status = parse.status
-        if result and not result.ok:
-            status = "failed"
-        rows.append(
-            {
-                "Section": section,
-                "URL": result.url if result else "",
-                "Status": status,
-                "Tables found": len(result.tables) if result else 0,
-                "Selected table index": parse.selected_table_index if parse.selected_table_index is not None else "",
-                "Latest date / data date": parse.latest_date,
-                "Error": parse.error or (result.error_message if result and not result.ok else ""),
-            }
-        )
-    return pd.DataFrame(rows)
+     ãM}¶‰žËkºwµç}Í•}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰±½Í”‰t°l‰ÁÉ¥”‰ut¤(€€€Ù½±Õµ•}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰Ù½±Õµ”‰t°l‰Ù½°‰ut¤(€€€ÑÕÉ¹½Ù•É}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰ÑÕÉ¹½Ù•È‰t°l‰Ù…±Õ”‰t°l‰…µ½Õ¹Ð‰ut¤(€€€ÙÝ…Á}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰ÙÝ…À‰t°l‰…Ù•É…”ÁÉ¥”‰t°l‰…ÙœÁÉ¥”‰ut¤(€€€¡¥¡}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰¡¥ ‰ut¤(€€€±½Ý}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰±½Ü‰ut¤(€€€½Á•¹}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰½Á•¸‰ut¤((€€€¥˜…¹ä¡½°¥Ì9½¹”™½È½°¥¸m‘…Ñ•}½°°±½Í•}½±t¤è(€€€€€€€Á…ÉÍ”¹ÍÑ…ÑÕÌ€ô€‰¹¼µ…Ñ¡¥¹œÑ…‰±”ˆ(€€€€€€€Á…ÉÍ”¹•ÉÉ½È€ô€‰AÉ¥”!¥ÍÑ½ÉäÑ…‰±”Á…ÉÍ¥¹œ™…¥±•¸I…ÜÑ…‰±”ÁÉ•Ù¥•ÝÌ…É”Í¡½Ý¸‰•±½Ü¸ˆ(€€€€€€€É•ÑÕÉ¸((€€€½ÕÑÁÕÐ€ôÁ¹…Ñ…É…µ” ¤(€€€½ÕÑÁÕÑl‰…Ñ”‰t€ôÑ…‰±•m‘…Ñ•}½±t(€€€½ÕÑÁÕÑl‰±½Í”‰t€ôÑ…‰±•m±½Í•}½±t(€€€½ÕÑÁÕÑl‰=Á•¸‰t€ôÑ…‰±•m½Á•¹}½±t¥˜½Á•¹}½°•±Í”€ˆˆ(€€€½ÕÑÁÕÑl‰!¥ ‰t€ôÑ…‰±•m¡¥¡}½±t¥˜¡¥¡}½°•±Í”€ˆˆ(€€€½ÕÑÁÕÑl‰1½Ü‰t€ôÑ…‰±•m±½Ý}½±t¥˜±½Ý}½°•±Í”€ˆˆ(€€€½ÕÑÁÕÑl‰Y½±Õµ”‰t€ôÑ…‰±•mÙ½±Õµ•}½±t¥˜Ù½±Õµ•}½°•±Í”€ˆˆ(€€€½ÕÑÁÕÑl‰QÕÉ¹½Ù•È‰t€ôÑ…‰±•mÑÕÉ¹½Ù•É}½±t¥˜ÑÕÉ¹½Ù•É}½°•±Í”€ˆˆ(€€€½ÕÑÁÕÑl‰Y]@‰t€ôÑ…‰±•mÙÝ…Á}½±t¥˜ÙÝ…Á}½°•±Í”€ˆˆ(€€€ÁÉ¥•}Í½ÕÉ•}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰ÁÉ¥•}Í½ÕÉ”‰t°l‰ÁÉ¥”Í½ÕÉ”‰ut¤(€€€ÑÕÉ¹½Ù•É}•ÍÑ}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰ÑÕÉ¹½Ù•É}•ÍÐ‰t°l‰ÑÕÉ¹½Ù•È•ÍÐ‰ut¤(€€€ÙÝ…Á}•ÍÑ}½°€ôÁ¥­}™¥ÉÍÑ}½±Õµ¸¡Ñ…‰±”°ml‰ÙÝ…Á}•ÍÐ‰t°l‰ÙÝ…À•ÍÐ‰ut¤(€€€¥˜ÁÉ¥•}Í½ÕÉ•}½°è(€€€€€€€½ÕÑÁÕÑl‰ÁÉ¥•}Í½ÕÉ”‰t€ôÑ…‰±•mÁÉ¥•}Í½ÕÉ•}½±t(€€€¥˜ÑÕÉ¹½Ù•É}•ÍÑ}½°è(€€€€€€€½ÕÑÁÕÑl‰ÑÕÉ¹½Ù•É}•ÍÐ‰t€ôÑ…‰±•mÑÕÉ¹½Ù•É}•ÍÑ}½±t(€€€¥˜ÙÝ…Á}•ÍÑ}½°è(€€€€€€€½ÕÑÁÕÑl‰ÙÝ…Á}•ÍÐ‰t€ôÑ…‰±•mÙÝ…Á}•ÍÑ}½±t(€€€½ÕÑÁÕÐ€ô½ÕÑÁÕÐ¹‘É½Á¹„¡¡½Üô‰…±°ˆ¤(€€€½ÕÑÁÕÐ€ô½ÕÑÁÕÑm½ÕÑÁÕÑl‰…Ñ”‰t¹…ÍÑåÁ”¡ÍÑÈ¤¹ÍÑÈ¹ÍÑÉ¥À ¤¹¹” ˆˆ¥t(€€€™½È½±Õµ¸¥¸l‰±½Í”ˆ°€‰=Á•¸ˆ°€‰!¥ ˆ°€‰1½Üˆ°€‰Y]@ˆ°€‰ÙÝ…Á}•ÍÐ‰tè(€€€€€€€¥˜½±Õµ¸¥¸½ÕÑÁÕÐ¹½±Õµ¹Ìè(€€€€€€€€€€€½ÕÑÁÕÑm½±Õµ¹t€ôÁ¹Ñ½}¹Õµ•É¥Œ¡½ÕÑÁÕÑm½±Õµ¹t°•ÉÉ½ÉÌô‰½•É”ˆ¤¹É½Õ¹ Ì¤(€€€™½È½±Õµ¸¥¸l‰QÕÉ¹½Ù•Èˆ°€‰ÑÕÉ¹½Ù•É}•ÍÐ‰tè(€€€€€€€¥˜½±Õµ¸¥¸½ÕÑÁÕÐ¹½±Õµ¹Ìè(€€€€€€€€€€€½ÕÑÁÕÑm½±Õµ¹t€ôÁ¹Ñ½}¹Õµ•É¥Œ¡½ÕÑÁÕÑm½±Õµ¹t°•ÉÉ½ÉÌô‰½•É”ˆ¤¹É½Õ¹ È¤(€€€¥˜€‰ÙÝ…Á}•ÍÐˆ¹½Ð¥¸½ÕÑÁÕÐ¹½±Õµ¹Ì…¹€‰ÁÉ¥•}Í½ÕÉ”ˆ¥¸½ÕÑÁÕÐ¹½±Õµ¹Ìè(€€€€€€€Ù½±Õµ”€ôÁ¹Ñ½}¹Õµ•É¥Œ¡½ÕÑÁÕÐ¹•Ð ‰Y½±Õµ”ˆ¤°•ÉÉ½ÉÌô‰½•É”ˆ¤(€€€€€€€ÑÕÉ¹½Ù•É}•ÍÐ€ôÁ¹Ñ½}¹Õµ•É¥Œ¡½ÕÑÁÕÐ¹•Ð ‰ÑÕÉ¹½Ù•É}•ÍÐˆ¤°•ÉÉ½ÉÌô‰½•É”ˆ¤(€€€€€€€å…¡½½}Í½ÕÉ”€ô½ÕÑÁÕÑl‰ÁÉ¥•}Í½ÕÉ”‰t¹…ÍÑåÁ”¡ÍÑÈ¤¹ÍÑÈ¹±½Ý•È ¤¹•Ä ‰å…¡½¼ˆ¤(€€€€€€€µ¥ÍÍ¥¹}ÙÝ…À€ôÁ¹Ñ½}¹Õµ•É¥Œ¡½ÕÑÁÕÐ¹•Ð ‰Y]@ˆ¤°•ÉÉ½ÉÌô‰½•É”ˆ¤¹¥Í¹„ ¤(€€€€€€€½ÕÑÁÕÑl‰ÙÝ…Á}•ÍÐ‰t€ô€¡ÑÕÉ¹½Ù•É}•ÍÐ€¼Ù½±Õµ”¹Ý¡•É”¡Ù½±Õµ”¹¹” À¤¤¤¹Ý¡•É”¡å…¡½½}Í½ÕÉ”€˜µ¥ÍÍ¥¹}ÙÝ…À¤¹É½Õ¹ Ì¤(€€€Á…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}Ñ…‰±”€ô½ÕÑÁÕÐ((€€€¥˜Á…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}Ñ…‰±”¹•µÁÑäè(€€€€€€€Á…ÉÍ”¹ÍÑ…ÑÕÌ€ô€‰¹¼µ…Ñ¡¥¹œÑ…‰±”ˆ(€€€€€€€Á…ÉÍ”¹•ÉÉ½È€ô€‰AÉ¥”!¥ÍÑ½ÉäÑ…‰±”Á…ÉÍ¥¹œ™…¥±•¸I…ÜÑ…‰±”ÁÉ•Ù¥•ÝÌ…É”Í¡½Ý¸‰•±½Ü¸ˆ(€€€€€€€É•ÑÕÉ¸((€€€Á…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}±…Ñ•ÍÑ}‘…Ñ”€ô±…Ñ•ÍÑ}‘…Ñ•}™É½µ}½±Õµ¸¡Á…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}Ñ…‰±”°€‰…Ñ”ˆ¤(€€€Á…ÉÍ”¹±…Ñ•ÍÑ}‘…Ñ”€ôÁ…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}±…Ñ•ÍÑ}‘…Ñ”(€€€Í½ÉÑ•‘}‘˜€ôÁ…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}Ñ…‰±”¹½Áä ¤(€€€Í½ÉÑ•‘}‘™l‰}‘…Ñ”‰t€ôÍ½ÉÑ•‘}‘™l‰…Ñ”‰t¹µ…À¡Á…ÉÍ•}‘…Ñ•}Ù…±Õ”¤(€€€Í½ÉÑ•‘}‘˜€ôÍ½ÉÑ•‘}‘˜¹‘É½Á¹„¡ÍÕ‰Í•Ðõl‰}‘…Ñ”‰t¤¹Í½ÉÑ}Ù…±Õ•Ì ‰}‘…Ñ”ˆ°…Í•¹‘¥¹œõ…±Í”¤(€€€¥˜¹½ÐÍ½ÉÑ•‘}‘˜¹•µÁÑäè(€€€€€€€±…Ñ•ÍÐ€ôÍ½ÉÑ•‘}‘˜¹¥±½lÁt(€€€€€€€Á…ÉÍ•¹±…Ñ•ÍÑ}ÁÉ¥”€ôÍ…™•}ÍÑÈ¡±…Ñ•ÍÐ¹•Ð ‰±½Í”ˆ¤¤(€€€€€€€Á…ÉÍ•¹±…Ñ•ÍÑ}ÁÉ¥•}Ù½±Õµ”€ôÍ…™•}ÍÑÈ¡±…Ñ•ÍÐ¹•Ð ‰Y½±Õµ”ˆ¤¤(€€€€€€€Á…ÉÍ•¹±…Ñ•ÍÑ}ÁÉ¥•}ÑÕÉ¹½Ù•È€ôÍ…™•}ÍÑÈ¡±…Ñ•ÍÐ¹•Ð ‰QÕÉ¹½Ù•Èˆ¤¤(€€€€€€€Á…ÉÍ•¹±…Ñ•ÍÑ}ÁÉ¥•}ÙÝ…À€ôÍ…™•}ÍÑÈ¡±…Ñ•ÍÐ¹•Ð ‰Y]@ˆ¤¤(€€€€€€€Á…ÉÍ•¹ÁÉ¥•}Í½ÕÉ”€ôÍ…™•}ÍÑÈ¡±…Ñ•ÍÐ¹•Ð ‰ÁÉ¥•}Í½ÕÉ”ˆ¤¤(€€€€€€€¥˜Á…ÉÍ•¹ÁÉ¥•}Í½ÕÉ”€ôô€‰å…¡½¼ˆ½È€‰ÑÕÉ¹½Ù•É}•ÍÐˆ¥¸Á…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}Ñ…‰±”¹½±Õµ¹Ìè(€€€€€€€€€€€Ý…É¹¥¹œ€ô€‰QÕÉ¹½Ù•È¥Ì•ÍÑ¥µ…Ñ•…ÌÙ½±Õµ”qÔÀÁÜ±½Í”°¹½Ð…ÑÕ…°ÑÕÉ¹½Ù•Èˆ(€€€€€€€€€€€¥˜Ý…É¹¥¹œ¹½Ð¥¸Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ìè(€€€€€€€€€€€€€€€Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ì¹…ÁÁ•¹¡Ý…É¹¥¹œ¤(€€€€€€€¥˜Á…ÉÍ•¹ÁÉ¥•}Í½ÕÉ”€ôô€‰å…¡½¼ˆ…¹€‰ÙÝ…Á}•ÍÐˆ¥¸Á…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}Ñ…‰±”¹½±Õµ¹Ìè(€€€€€€€€€€€Ý…É¹¥¹œ€ô€‰Y]@¥Ì•ÍÑ¥µ…Ñ•™É½´•ÍÑ¥µ…Ñ•ÑÕÉ¹½Ù•Èˆ(€€€€€€€€€€€¥˜Ý…É¹¥¹œ¹½Ð¥¸Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ìè(€€€€€€€€€€€€€€€Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ì¹…ÁÁ•¹¡Ý…É¹¥¹œ¤(()‘•˜…±Õ±…Ñ•}½¹•¹ÑÉ…Ñ¥½¹|Õ‘…å}¡…¹”¡‘˜èÁ¹…Ñ…É…µ”¤€´ø‘¥ÑmÍÑÈ°ÍÑÉtè(€€€¥˜‘˜¹•µÁÑä½È±•¸¡‘˜¤€ð€Èè(€€€€€€€É•ÑÕÉ¸íô(€€€Í½ÉÑ•‘}‘˜€ô‘˜¹½Áä ¤(€€€Í½ÉÑ•‘}‘™l‰}‘…Ñ”‰t€ôÍ½ÉÑ•‘}‘™l‰…Ñ”‰t¹µ…À¡Á…ÉÍ•}‘…Ñ•}Ù…±Õ”¤(€€€Í½ÉÑ•‘}‘˜€ôÍ½ÉÑ•‘}‘˜¹‘É½Á¹„¡ÍÕ‰Í•Ðõl‰}‘…Ñ”‰t¤¹Í½ÉÑ}Ù…±Õ•Ì ‰}‘…Ñ”ˆ°…Í•¹‘¥¹œõ…±Í”¤(€€€¥˜±•¸¡Í½ÉÑ•‘}‘˜¤€ð€Èè(€€€€€€€É•ÑÕÉ¸íô(€€€±…Ñ•ÍÐ€ôÍ½ÉÑ•‘}‘˜¹¥±½lÁt(€€€‰…Í”€ôÍ½ÉÑ•‘}‘˜¹¥±½mµ¥¸ Ð°±•¸¡Í½ÉÑ•‘}‘˜¤€´€Ä¥t(€€€¡…¹•Ì€ôíô(€€€™½È±…‰•°¥¸l‰Q½À€Ô€”ˆ°€‰Q½À€ÄÀ€”ˆ°€‰MÑ…­”¥¸ML€”‰tè(€€€€€€€±…Ñ•ÍÑ}Ù…±Õ”€ôÑ½}¹Õµ‰•È¡±…Ñ•ÍÐ¹•Ð¡±…‰•°¤¤(€€€€€€€‰…Í•}Ù…±Õ”€ôÑ½}¹Õµ‰•È¡‰…Í”¹•Ð¡±…‰•°¤¤(€€€€€€€¥˜±…Ñ•ÍÑ}Ù…±Õ”¥Ì9½¹”½È‰…Í•}Ù…±Õ”¥Ì9½¹”è(€€€€€€€€€€€¡…¹•Ím±…‰•±t€ô€‰¹½Ð…Ù…¥±…‰±”ˆ(€€€€€€€•±Í”è(€€€€€€€€€€€¡…¹•Ím±…‰•±t€ô˜‰í±…Ñ•ÍÑ}Ù…±Õ”€´‰…Í•}Ù…±Õ”è¬¸É™ôÁÁÐ€¡íÍ…™•}ÍÑÈ¡‰…Í”¹•Ð …Ñ”œ¤¥ôÑ¼íÍ…™•}ÍÑÈ¡±…Ñ•ÍÐ¹•Ð …Ñ”œ¤¥ô¤ˆ(€€€É•ÑÕÉ¸¡…¹•Ì(()‘•˜Ù…±¥‘…Ñ•}½¹•¹ÑÉ…Ñ¥½¸¡Á…ÉÍ•èA…ÉÍ•‘ML¤€´ø9½¹”è(€€€¥˜Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}Ñ…‰±”¹•µÁÑäè(€€€€€€€É•ÑÕÉ¸(€€€Ù…±Õ•}½±Õµ¹Ì€ôl‰Q½À€Ô€”ˆ°€‰Q½À€ÄÀ€”ˆ°€‰Q½À€ÄÀ€¬9%@€”ˆ°€‰MÑ…­”¥¸ML€”‰t(€€€™½È¥‘à°É½Ü¥¸Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}Ñ…‰±”¹¥Ñ•ÉÉ½ÝÌ ¤è(€€€€€€€‘…Ñ”€ôÍ…™•}ÍÑÈ¡É½Ü¹•Ð ‰…Ñ”ˆ¤¤½È˜‰É½Üí¥‘à€¬€Åôˆ(€€€€€€€™½È½±Õµ¸¥¸Ù…±Õ•}½±Õµ¹Ìè(€€€€€€€€€€€Ù…±Õ”€ôÑ½}¹Õµ‰•È¡É½Ü¹•Ð¡½±Õµ¸¤¤(€€€€€€€€€€€¥˜Ù…±Õ”¥Ì9½¹”è(€€€€€€€€€€€€€€€½¹Ñ¥¹Õ”(€€€€€€€€€€€¥˜Ù…±Õ”€ð€À½ÈÙ…±Õ”€ø€ÄÀÀè(€€€€€€€€€€€€€€€Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ì¹…ÁÁ•¹ (€€€€€€€€€€€€€€€€€€€˜‰‰¹½Éµ…°½¹•¹ÑÉ…Ñ¥½¸Ù…±Õ”èí‘…Ñ•ôí½±Õµ¹ô€ôíÉ½Ü¹•Ð¡½±Õµ¸¥ô¸áÁ•Ñ•É…¹”¥Ì€À´ÄÀÀ¸ˆ(€€€€€€€€€€€€€€€€¤(()‘•˜™…±±‰…­}½¹•¹ÑÉ…Ñ¥½¹}™É½µ}¡½±‘¥¹Ì¡Á…ÉÍ•èA…ÉÍ•‘ML°É•ÍÕ±Ðè•Ñ¡I•ÍÕ±Ðð9½¹”¤€´ø9½¹”è(€€€¥˜¹½ÐÁ…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}Ñ…‰±”¹•µÁÑä½ÈÁ…ÉÍ•¹¡½±‘¥¹Í}Ñ…‰±”¹•µÁÑäè(€€€€€€€É•ÑÕÉ¸(€€€Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}Ñ…‰±”€ôÁ¹…Ñ…É…µ” (€€€€€€€l(€€€€€€€€€€€ì(€€€€€€€€€€€€€€€€‰…Ñ”ˆèÁ…ÉÍ•¹¡½±‘¥¹Í}‘…Ñ…}‘…Ñ”½È€‰ÕÉÉ•¹Ð¡½±‘¥¹ÌÁ…”ˆ°(€€€€€€€€€€€€€€€€‰Q½À€Ô€”ˆèÁ…ÉÍ•¹Ñ½ÀÕ}ÕµÕ±…Ñ¥Ù•}ÁÐ°(€€€€€€€€€€€€€€€€‰Q½À€ÄÀ€”ˆèÁ…ÉÍ•¹Ñ½ÀÄÁ}ÕµÕ±…Ñ¥Ù•}ÁÐ°(€€€€€€€€€€€€€€€€‰Q½À€ÄÀ€¬9%@€”ˆè€ˆˆ°(€€€€€€€€€€€€€€€€‰MÑ…­”¥¸ML€”ˆèÁ…ÉÍ•¹Ñ½Ñ…±}¥¹}…ÍÍ}ÁÐ°(€€€€€€€€€€€ô(€€€€€€€t(€€€€¤(€€€Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}±…Ñ•ÍÑ}‘…Ñ”€ôÁ…ÉÍ•¹¡½±‘¥¹Í}‘…Ñ…}‘…Ñ”½È€‰ÕÉÉ•¹Ð¡½±‘¥¹ÌÁ…”ˆ(€€€Í•Ñ¥½¸€ôÁ…ÉÍ•¹Í•Ñ¥½¹}Á…ÉÍ•Ì¹Í•Ñ‘•™…Õ±Ð ‰½¹•¹ÑÉ…Ñ¥½¸ˆ°M•Ñ¥½¹A…ÉÍ” ‰½¹•¹ÑÉ…Ñ¥½¸ˆ¤¤(€€€Í•Ñ¥½¸¹ÍÑ…ÑÕÌ€ô€‰Á…ÉÑ¥…°ÍÕ•ÍÌˆ(€€€Í•Ñ¥½¸¹±…Ñ•ÍÑ}‘…Ñ”€ôÁ…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}±…Ñ•ÍÑ}‘…Ñ”(€€€Í•Ñ¥½¸¹•ÉÉ½È€ô€‰½¹•¹ÑÉ…Ñ¥½¸Á…”™…¥±•ìQ½À€Ô€¼Q½À€ÄÀ•ÍÑ¥µ…Ñ•™É½´!½±‘¥¹ÌÑ…‰±”¸ˆ(€€€¥˜É•ÍÕ±Ðè(€€€€€€€Í•Ñ¥½¸¹Í•±•Ñ•‘}Ñ…‰±•}¥¹‘•à€ô9½¹”(()‘•˜Õ¹…Ù…¥±…‰±”¡Ù…±Õ”èÍÑÈ°É•…Í½¸èÍÑÈ¤€´øÍÑÈè(€€€É•ÑÕÉ¸Ù…±Õ”¥˜Ù…±Õ”•±Í”˜‰¹½Ð…Ù…¥±…‰±”‰•…ÕÍ”íÉ•…Í½¹ôˆ(()‘•˜…‘‘}É½ÍÍ}Í•Ñ¥½¹}Ý…É¹¥¹Ì¡Á…ÉÍ•èA…ÉÍ•‘ML¤€´ø9½¹”è(€€€¥˜¹½ÐÁ…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}Ñ…‰±”¹•µÁÑä…¹Á…ÉÍ•¹¡½±‘¥¹Í}Ñ…‰±”¹•µÁÑäè(€€€€€€€Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ì¹…ÁÁ•¹ ‰½¹•¹ÑÉ…Ñ¥½¸ÍÕ••‘•°‰ÕÐ!½±‘¥¹Ì™…¥±•¸Õ±°‰É½­•Èµ±•Ù•°…¹…±åÍ¥Ì¥Ì¥¹½µÁ±•Ñ”¸ˆ¤(€€€¥˜¹½ÐÁ…ÉÍ•¹‰¥}¡…¹•Í}Ñ…‰±”¹•µÁÑä…¹Á…ÉÍ•¹¡…¹•Í}Ñ…‰±”¹•µÁÑäè(€€€€€€€Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ì¹…ÁÁ•¹ ‰	¥œ¡…¹•ÌÍÕ••‘•°‰ÕÐ‘…¥±ä¡…¹•Ì™…¥±•¸I••¹Ð‘…¥±äµ½Ù•µ•¹Ð…¹¹½Ð‰”½¹™¥Éµ•¸ˆ¤(()‘•˜}…¹¹½Ñ…Ñ•}™É…µ•}‘…Ñ•Ì (€€€Á…ÉÍ•èA…ÉÍ•‘ML°(€€€Í•Ñ¥½¸èÍÑÈ°(€€€™É…µ”èÁ¹…Ñ…É…µ”°(€€€‘•™…Õ±Ñ}‘…Ñ”èÍÑÈ€ô€ˆˆ°(¤€´øÁ¹…Ñ…É…µ”è(€€€¥˜™É…µ”¥Ì9½¹”½È™É…µ”¹•µÁÑäè(€€€€€€€É•ÑÕÉ¸™É…µ”(€€€É•½É‘Ì°Ý…É¹¥¹Ì€ô…¹¹½Ñ…Ñ•}É•½É‘Ì¡™É…µ”¹Ñ½}‘¥Ð¡½É¥•¹Ðô‰É•½É‘Ìˆ¤°Í•Ñ¥½¸°‘•™…Õ±Ñ}‘…Ñ”õ‘•™…Õ±Ñ}‘…Ñ”¤(€€€™½ÈÝ…É¹¥¹œ¥¸Ý…É¹¥¹Ìè(€€€€€€€¥˜Ý…É¹¥¹œ¹½Ð¥¸Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ìè(€€€€€€€€€€€Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ì¹…ÁÁ•¹¡Ý…É¹¥¹œ¤(€€€É•ÑÕÉ¸Á¹…Ñ…É…µ”¡É•½É‘Ì¤(()‘•˜…ÁÁ±å}‘…Ñ•}Í•µ…¹Ñ¥Ì¡Á…ÉÍ•èA…ÉÍ•‘ML¤€´ø9½¹”è(€€€€ˆˆ‰ÑÑ… •áÁ±¥¥ÐÍ½ÕÉ”½¥µÁ±¥•‘…Ñ•Ì½¹”™½È•Ù•Éä½ÕÑÁÕÐÁ…Ñ ¸ˆˆˆ(€€€Á…ÉÍ•¹‘…Ñ•}‰…Í¥Í}‰å}Í•Ñ¥½¸€ôì(€€€€€€€Í•Ñ¥½¸¹±½Ý•È ¤¹É•Á±…” ˆ€ˆ°€‰|ˆ¤è‰…Í¥Ì(€€€€€€€™½ÈÍ•Ñ¥½¸°‰…Í¥Ì¥¸MQ%=9}Q}	M%L¹¥Ñ•µÌ ¤(€€€€€€€¥˜Í•Ñ¥½¸¥¸ì‰!½±‘¥¹Ìˆ°€‰¡…¹•Ìˆ°€‰	¥œ¡…¹•Ìˆ°€‰½¹•¹ÑÉ…Ñ¥½¸‰ô(€€€ô(€€€Á…ÉÍ•¹Í•ÑÑ±•µ•¹Ñ}¹½Ñ”€ôMQQ159Q}9=Q((€€€Á…ÉÍ•¹¡½±‘¥¹Í}Ñ…‰±”€ô}…¹¹½Ñ…Ñ•}™É…µ•}‘…Ñ•Ì (€€€€€€€Á…ÉÍ•°€‰!½±‘¥¹Ìˆ°Á…ÉÍ•¹¡½±‘¥¹Í}Ñ…‰±”°Á…ÉÍ•¹¡½±‘¥¹Í}‘…Ñ…}‘…Ñ”(€€€€¤(€€€Á…ÉÍ•¹¡…¹•Í}Ñ…‰±”€ô}…¹¹½Ñ…Ñ•}™É…µ•}‘…Ñ•Ì (€€€€€€€Á…ÉÍ•°€‰¡…¹•Ìˆ°Á…ÉÍ•¹¡…¹•Í}Ñ…‰±”°Á…ÉÍ•¹¡…¹•Í}ÑÉ…‘¥¹}‘…Ñ”(€€€€¤(€€€Á…ÉÍ•¹‰¥}¡…¹•Í}Ñ…‰±”€ô}…¹¹½Ñ…Ñ•}™É…µ•}‘…Ñ•Ì (€€€€€€€Á…ÉÍ•°€‰	¥œ¡…¹•Ìˆ°Á…ÉÍ•¹‰¥}¡…¹•Í}Ñ…‰±”°Á…ÉÍ•¹‰¥}¡…¹•Í}±…Ñ•ÍÑ}‘…Ñ”(€€€€¤(€€€Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}Ñ…‰±”€ô}…¹¹½Ñ…Ñ•}™É…µ•}‘…Ñ•Ì (€€€€€€€Á…ÉÍ•°€‰½¹•¹ÑÉ…Ñ¥½¸ˆ°Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}Ñ…‰±”°Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}±…Ñ•ÍÑ}‘…Ñ”(€€€€¤(€€€Á…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}Ñ…‰±”€ô}…¹¹½Ñ…Ñ•}™É…µ•}‘…Ñ•Ì (€€€€€€€Á…ÉÍ•°€‰AÉ¥”!¥ÍÑ½Éäˆ°Á…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}Ñ…‰±”°Á…ÉÍ•¹ÁÉ¥•}¡¥ÍÑ½Éå}±…Ñ•ÍÑ}‘…Ñ”(€€€€¤((€€€€Œ½¹•¹ÑÉ…Ñ¥½¸¥Ì¥¹‘•Á•¹‘•¹Ñ±äÍÕ™™¥¥•¹Ð™½ÈQ½À€Ô€¼Q½À€ÄÀ¸¼¹½Ð(€€€€Œ‰±…¹¬Ñ¡•Í”Ù…±Õ•Ìµ•É•±ä‰•…ÕÍ”‰É½­•Èµ±•Ù•°!½±‘¥¹Ì™…¥±•¸(€€€¥˜¹½ÐÁ…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}Ñ…‰±”¹•µÁÑäè(€€€€€€€±…Ñ•ÍÑ}½¹•¹ÑÉ…Ñ¥½¸€ôÁ…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}Ñ…‰±”¹Í½ÉÑ}Ù…±Õ•Ì (€€€€€€€€€€€€‰…ÍÍ}‘…Ñ”ˆ°…Í•¹‘¥¹œõ…±Í”°¹…}Á½Í¥Ñ¥½¸ô‰±…ÍÐˆ(€€€€€€€€¤¹¥±½lÁt(€€€€€€€Á…ÉÍ•¹Ñ½ÀÕ}ÕµÕ±…Ñ¥Ù•}ÁÐ€ôÁ…ÉÍ•¹Ñ½ÀÕ}ÕµÕ±…Ñ¥Ù•}ÁÐ½ÈÁ•É•¹Ñ}Ñ•áÐ (€€€€€€€€€€€±…Ñ•ÍÑ}½¹•¹ÑÉ…Ñ¥½¸¹•Ð ‰Q½À€Ô€”ˆ°€ˆˆ¤(€€€€€€€€¤(€€€€€€€Á…ÉÍ•¹Ñ½ÀÄÁ}ÕµÕ±…Ñ¥Ù•}ÁÐ€ôÁ…ÉÍ•¹Ñ½ÀÄÁ}ÕµÕ±…Ñ¥Ù•}ÁÐ½ÈÁ•É•¹Ñ}Ñ•áÐ (€€€€€€€€€€€±…Ñ•ÍÑ}½¹•¹ÑÉ…Ñ¥½¸¹•Ð ‰Q½À€ÄÀ€”ˆ°€ˆˆ¤(€€€€€€€€¤((€€€‘•É¥Ù…Ñ¥½¹Ì€ôì(€€€€€€€€‰!½±‘¥¹Ìˆè‘•É¥Ù•}‘…Ñ•Ì¡Á…ÉÍ•¹¡½±‘¥¹Í}‘…Ñ…}‘…Ñ”°MQ%=9}Q}	M%Ml‰!½±‘¥¹Ì‰t¤°(€€€€€€€€‰¡…¹•Ìˆè‘•É¥Ù•}‘…Ñ•Ì¡Á…ÉÍ•¹¡…¹•Í}ÑÉ…‘¥¹}‘…Ñ”°MQ%=9}Q}	M%Ml‰¡…¹•Ì‰t¤°(€€€€€€€€‰	¥œ¡…¹•Ìˆè‘•É¥Ù•}‘…Ñ•Ì¡Á…ÉÍ•¹‰¥}¡…¹•Í}±…Ñ•ÍÑ}‘…Ñ”°MQ%=9}Q}	M%Ml‰	¥œ¡…¹•Ì‰t¤°(€€€€€€€€‰½¹•¹ÑÉ…Ñ¥½¸ˆè‘•É¥Ù•}‘…Ñ•Ì (€€€€€€€€€€€Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}±…Ñ•ÍÑ}‘…Ñ”°MQ%=9}Q}	M%Ml‰½¹•¹ÑÉ…Ñ¥½¸‰t(€€€€€€€€¤°(€€€ô(€€€Á…ÉÍ•¹¡½±‘¥¹Í}¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”€ô‘•É¥Ù…Ñ¥½¹Íl‰!½±‘¥¹Ì‰t¹¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”(€€€Á…ÉÍ•¹¡…¹•Í}¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”€ô‘•É¥Ù…Ñ¥½¹Íl‰¡…¹•Ì‰t¹¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”(€€€Á…ÉÍ•¹‰¥}¡…¹•Í}¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”€ô‘•É¥Ù…Ñ¥½¹Íl‰	¥œ¡…¹•Ì‰t¹¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”(€€€Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”€ô‘•É¥Ù…Ñ¥½¹Íl‰½¹•¹ÑÉ…Ñ¥½¸‰t¹¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”((€€€™½ÈÍ•Ñ¥½¸°‘•É¥Ù…Ñ¥½¸¥¸‘•É¥Ù…Ñ¥½¹Ì¹¥Ñ•µÌ ¤è(€€€€€€€¥˜‘•É¥Ù…Ñ¥½¸¹…ÍÍ}‘…Ñ”…¹‘•É¥Ù…Ñ¥½¸¹Ý…É¹¥¹œè(€€€€€€€€€€€Ý…É¹¥¹œ€ô˜‰íÍ•Ñ¥½¹ôèí‘•É¥Ù…Ñ¥½¸¹Ý…É¹¥¹ôˆ(€€€€€€€€€€€¥˜Ý…É¹¥¹œ¹½Ð¥¸Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ìè(€€€€€€€€€€€€€€€Á…ÉÍ•¹…¹…±åÍ¥Í}Ý…É¹¥¹Ì¹…ÁÁ•¹¡Ý…É¹¥¹œ¤((€€€Á…ÉÍ•¹‘…Ñ…}…Í}½™}ÑÉ…‘¥¹}‘…Ñ”€ô¹•áÐ (€€€€€€€€ (€€€€€€€€€€€Ù…±Õ”(€€€€€€€€€€€™½ÈÙ…±Õ”¥¸€ (€€€€€€€€€€€€€€€Á…ÉÍ•¹¡½±‘¥¹Í}¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”°(€€€€€€€€€€€€€€€Á…ÉÍ•¹½¹•¹ÑÉ…Ñ¥½¹}¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”°(€€€€€€€€€€€€€€€Á…ÉÍ•¹¡…¹•Í}¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”°(€€€€€€€€€€€€€€€Á…ÉÍ•¹‰¥}¡…¹•Í}¥µÁ±¥•‘}ÑÉ…‘•}‘…Ñ”°(€€€€€€€€€€€€¤(€€€€€€€€€€€¥˜Ù…±Õ”(€€€€€€€€¤°(€€€€€€€Õ¹…Ù…¥±…‰±•}‘…Ñ…}…Í}½˜ ‰¹¼‘…Ñ•!½±‘¥¹Ì°½¹•¹ÑÉ…Ñ¥½¸°¡…¹•Ì½È	¥œ¡…¹•ÌÉ½ÜÁ…ÉÍ•ˆ¤°(€€€€¤(()‘•˜Á…ÉÍ•}É•ÍÕ±ÑÌ (€€€¥ÍÍÕ•}¥èÍÑÈ°(€€€É•ÍÕ±ÑÌè‘¥ÑmÍÑÈ°•Ñ¡I•ÍÕ±Ñt°(€€€ÍÑ½­}½‘”èÍÑÈ€ô€ˆˆ°(€€€¥‘}±½½­ÕÁ}µ•Ñ¡½èÍÑÈ€ô€ˆˆ°(€€€¥‘}±½½­ÕÁ}ÍÑ…ÑÕÌèÍÑÈ€ô€ˆˆ°(€€€Í•±•Ñ•‘}¥¹‘¥•Ìè‘¥ÑmÍÑÈ°¥¹Ñtð9½¹”€ô9½¹”°(€€€Í½ÕÉ•}µ•Ñ…‘…Ñ„è‘¥ÑmÍÑÈ°¹åtð9½¹”€ô9½¹”°(¤€´øA…ÉÍ•‘MLè(€€€Á…ÉÍ•€ôA…ÉÍ•‘ML (€€€€€€€¥ÍÍÕ•}¥õ¥ÍÍÕ•}¥°(€€€€€€€ÍÑ½­}½‘”õÍÑ½­}½‘”°(€€€€€€€¥‘}±½½­ÕÁ}µ•Ñ¡½õ¥‘}±½½­ÕÁ}µ•Ñ¡½°(€€€€€€€¥‘}±½½­ÕÁ}ÍÑ…ÑÕÌõ¥‘}±½½­ÕÁ}ÍÑ…ÑÕÌ°(€€€€¤(€€€™•Ñ¡•‘}Ñ¥µ•Ì€ôm¥Ñ•´¹™•Ñ¡•‘}Ñ¥µ”™½È¥Ñ•´¥¸É•ÍÕ±ÑÌ¹Ù…±Õ•Ì ¤¥˜¥Ñ•´¹™•Ñ¡•‘}Ñ¥µ•t(€€€Á…ÉÍ•¹™•Ñ¡•‘}Ñ¥µ”€ôµ…à¡™•Ñ¡•‘}Ñ¥µ•Ì¤¥˜™•Ñ¡•‘}Ñ¥µ•Ì•±Í”€ˆˆ(€€€¥˜Í½ÕÉ•}µ•Ñ…‘…Ñ„è(€€€€€€€Á…ÉÍ•¹Í½ÕÉ”€ôÍ…™•}ÍÑÈ¡Í½ÕÉ•}µ•Ñ…‘…Ñ„¹•Ð ‰Í½ÕÉ”ˆ¤¤(€€€€€€€Á…ÉÍ•¹µ¥ÉÉ½É}ÍÑ…ÑÕÌ€ôÍ…™•}ÍÑÈ¡Í½ÕÉ•}µ•Ñ…‘…Ñ„¹•Ð ‰µ¥ÉÉ½É}ÍÑ…ÑÕÌˆ¤¤(€€€€€€€Á…ÉÍ•¹µ¥ÉÉ½É}‰…Í•}ÕÉ°€ôÍ…™•}ÍÑÈ¡Í½ÕÉ•}µ•Ñ…‘…Ñ„¹•Ð ‰µ¥ÉÉ½É}‰…Í•}ÕÉ°ˆ¤¤(€€€€€€€ÑÉäè(€€€€€€€€€€€Á…ÉÍ•¹¡¥ÍÑ½Éå}‘•ÁÑ¡}‘…åÌ€ô¥¹Ð¡Í½ÕÉ•}µ•Ñ…‘…Ñ„¹•Ð ‰¡¥ÍÑ½Éå}‘•ÁÑ¡}‘…åÌˆ¤½È€À¤(€€€€€€€•á•ÁÐ€¡QåÁ•ÉÉ½È°Y…±Õ•ÉÉ½È¤è(€€€€€€€€€€€Á…ÉÍ•¹¡¥ÍÑ½Éå}‘•ÁÑ¡}‘…åÌ€ô€À(€€€€€€€Á…ÉÍ•¹‘‰}É•ÍÑ½É•‘}™É½µ}‰…­ÕÀ€ô‰½½°¡Í½ÕÉ•}µ•Ñ…‘…Ñ„¹•Ð ‰‘‰}É•ÍÑ½É•‘}™É½µ}‰…­ÕÀˆ°…±Í”¤¤((€€€¥˜É•ÍÕ±ÑÌ¹•Ð ‰½µÁ…¹ä€¼½É‘…Ñ„ˆ¤è(€€€€€€€Á…ÉÍ•}½µÁ…¹ä¡É•ÍÕ±ÑÍl‰½µÁ…¹ä€¼½É‘…Ñ„‰t°Á…ÉÍ•°Í•±•Ñ•‘}¥¹‘¥•Ì¤(€€€¥˜É•ÍÕ±ÑÌ¹•Ð ‰!½±‘¥¹Ìˆ¤è(€€€€€€€¥˜É•ÍÕ±ÑÍl‰!½±‘¥¹Ì‰t¹½¬è(€€€€€€€€€€€Á…ÉÍ•}¡½±‘¥¹Ì¡É•ÍÕ±ÑÍl‰!½±‘¥¹Ì‰t°Á…ÉÍ•°Í•±•Ñ•‘}¥¹‘¥•Ì¤(€€€€€€€•±Í”è(€€€€€€€€€€€Á…ÉÍ•¹Í•Ñ¥½¹}Á…ÉÍ•Íl‰!½±‘¥¹Ì‰t€ôM•Ñ¥½¹A…ÉÍ” ‰!½±‘¥¹Ìˆ°ÍÑ…ÑÕÌô‰™…¥±•ˆ°•ÉÉ½ÈõÉ•ÍÕ±ÑÍl‰!½±‘¥¹Ì‰t¹•ÉÉ½É}µ•ÍÍ…”¤(€€€¥˜É•ÍÕ±ÑÌ¹•Ð ‰¡…¹•Ìˆ¤è(€€€€€€€¥˜É•ÍÕ±ÑÍl‰¡…¹•Ì‰t¹½¬è(€€€€€€€€€€€Á…ÉÍ•}¡…¹•Ì¡É•ÍÕ±ÑÍl‰¡…¹•Ì‰t°Á…ÉÍ•°Í•±•Ñ•‘}¥¹‘¥•Ì¤(€€€€€€€•±Í”è(€€€€€€€€€€€Á…ÉÍ•¹Í•Ñ¥½¹}Á…ÉÍ•Íl‰¡…¹•Ì‰t€ôM•Ñ¥½¹A…ÉÍ” ‰¡…¹•Ìˆ°ÍÑ…ÑÕÌô‰™…¥±•ˆ°•ÉÉ½ÈõÉ•ÍÕ±ÑÍl‰¡…¹•Ì‰t¹•ÉÉ½É}µ•ÍÍ…”¤(€€€¥˜É•ÍÕ±ÑÌ¹•Ð ‰	¥œ¡…¹•Ìˆ¤è(€€€€€€€¥˜É•ÍÕ±ÑÍl‰	¥œ¡…¹•Ì‰t¹½¬è(€€€€€€€€€€€Á…ÉÍ•}‰¥}¡…¹•Ì¡É•ÍÕ±ÑÍl‰	¥œ¡…¹•Ì‰t°Á…ÉÍ•°Í•±•Ñ•‘}¥¹‘¥•Ì¤(€€€€€€€•±Í”è(€€€€€€€€€€€Á…ÉÍ•¹Í•Ñ¥½¹}Á…ÉÍ•Íl‰	¥œ¡…¹•Ì‰t€ôM•Ñ¥½¹A…ÉÍ” ‰	¥œ¡…¹•Ìˆ°ÍÑ…ÑÕÌô‰™…¥±•ˆ°•ÉÉ½ÈõÉ•ÍÕ±ÑÍl‰	¥œ¡…¹•Ì‰t¹•ÉÉ½É}µ•ÍÍ…”¤(€€€¥˜É•ÍÕ±ÑÌ¹•Ð ‰½¹•¹ÑÉ…Ñ¥½¸ˆ¤è(€€€€€€€¥˜É•ÍÕ±ÑÍl‰½¹•¹ÑÉ…Ñ¥½¸‰t¹½¬è(€€€€€€€€€€€Á…ÉÍ•}½¹•¹ÑÉ…Ñ¥½¸¡É•ÍÕ±ÑÍl‰½¹•¹ÑÉ…Ñ¥½¸‰t°Á…ÉÍ•°Í•±•Ñ•‘}¥¹‘¥•Ì¤(€€€€€€€•±Í”è(€€€€€€€€€€€Á…ÉÍ•¹Í•Ñ¥½¹}Á…ÉÍ•Íl‰½¹•¹ÑÉ…Ñ¥½¸‰t€ôM•Ñ¥½¹A…ÉÍ” ‰½¹•¹ÑÉ…Ñ¥½¸ˆ°ÍÑ…ÑÕÌô‰™…¥±•ˆ°•ÉÉ½ÈõÉ•ÍÕ±ÑÍl‰½¹•¹ÑÉ…Ñ¥½¸‰t¹•ÉÉ½É}µ•ÍÍ…”¤(€€€¥˜É•ÍÕ±ÑÌ¹•Ð ‰AÉ¥”!¥ÍÑ½Éäˆ¤è(€€€€€€€¥˜É•ÍÕ±ÑÍl‰AÉ¥”!¥ÍÑ½Éä‰t¹½¬è(€€€€€€€€€€€Á…ÉÍ•}ÁÉ¥•}¡¥ÍÑ½Éä¡É•ÍÕ±ÑÍl‰AÉ¥”!¥ÍÑ½Éä‰t°Á…ÉÍ•°Í•±•Ñ•‘}¥¹‘¥•Ì¤(€€€€€€€•±Í”è(€€€€€€€€€€€Á…ÉÍ•¹Í•Ñ¥½¹}Á…ÉÍ•Íl‰AÉ¥”!¥ÍÑ½Éä‰t€ôM•Ñ¥½¹A…ÉÍ” ‰AÉ¥”!¥ÍÑ½Éäˆ°ÍÑ…ÑÕÌô‰™…¥±•ˆ°•ÉÉ½ÈõÉ•ÍÕ±ÑÍl‰AÉ¥”!¥ÍÑ½Éä‰t¹•ÉÉ½É}µ•ÍÍ…”¤((€€€™…±±‰…­}½¹•¹ÑÉ…Ñ¥½¹}™É½µ}¡½±‘¥¹Ì¡Á…ÉÍ•°É•ÍÕ±ÑÌ¹•Ð ‰½¹•¹ÑÉ…Ñ¥½¸ˆ¤¤(€€€…ÁÁ±å}‘…Ñ•}Í•µ…¹Ñ¥Ì¡Á…ÉÍ•¤(€€€…‘‘}É½ÍÍ}Í•Ñ¥½¹}Ý…É¹¥¹Ì¡Á…ÉÍ•¤(€€€É•ÑÕÉ¸Á…ÉÍ•(()‘•˜‰Õ¥±‘}™•Ñ¡}ÍÕµµ…Éä¡Á…ÉÍ•èA…ÉÍ•‘ML°É•ÍÕ±ÑÌè‘¥ÑmÍÑÈ°•Ñ¡I•ÍÕ±Ñt¤€´øÁ¹…Ñ…É…µ”è(€€€É½ÝÌ€ômt(€€€™½ÈÍ•Ñ¥½¸¥¸MQ%=9Lè(€€€€€€€É•ÍÕ±Ð€ôÉ•ÍÕ±ÑÌ¹•Ð¡Í•Ñ¥½¸¤(€€€€€€€Á…ÉÍ”€ôÁ…ÉÍ•¹Í•Ñ¥½¹}Á…ÉÍ•Ì¹•Ð¡Í•Ñ¥½¸°M•Ñ¥½¹A…ÉÍ”¡Í•Ñ¥½¸¤¤(€€€€€€€ÍÑ…ÑÕÌ€ôÁ…ÉÍ”¹ÍÑ…ÑÕÌ(€€€€€€€¥˜É•ÍÕ±Ð…¹¹½ÐÉ•ÍÕ±Ð¹½¬è(€€€€€€€€€€€ÍÑ…ÑÕÌ€ô€‰™…¥±•ˆ(€€€€€€€É½ÝÌ¹…ÁÁ•¹ (€€€€€€€€€€€ì(€€€€€€€€€€€€€€€€‰M•Ñ¥½¸ˆèÍ•Ñ¥½¸°(€€€€€€€€€€€€€€€€‰UI0ˆèÉ•ÍÕ±Ð¹ÕÉ°¥˜É•ÍÕ±Ð•±Í”€ˆˆ°(€€€€€€€€€€€€€€€€‰MÑ…ÑÕÌˆèÍÑ…ÑÕÌ°(€€€€€€€€€€€€€€€€‰Q…‰±•Ì™½Õ¹ˆè±•¸¡É•ÍÕ±Ð¹Ñ…‰±•Ì¤¥˜É•ÍÕ±Ð•±Í”€À°(€€€€€€€€€€€€€€€€‰M•±•Ñ•Ñ…‰±”¥¹‘•àˆèÁ…ÉÍ”¹Í•±•Ñ•‘}Ñ…‰±•}¥¹‘•à¥˜Á…ÉÍ”¹Í•±•Ñ•‘}Ñ…‰±•}¥¹‘•à¥Ì¹½Ð9½¹”•±Í”€ˆˆ°(€€€€€€€€€€€€€€€€‰1…Ñ•ÍÐ‘…Ñ”€¼‘…Ñ„‘…Ñ”ˆèÁ…ÉÍ”¹±…Ñ•ÍÑ}‘…Ñ”°(€€€€€€€€€€€€€€€€‰ÉÉ½ÈˆèÁ…ÉÍ”¹•ÉÉ½È½È€¡É•ÍÕ±Ð¹•ÉÉ½É}µ•ÍÍ…”¥˜É•ÍÕ±Ð…¹¹½ÐÉ•ÍÕ±Ð¹½¬•±Í”€ˆˆ¤°(€€€€€€€€€€€ô(€€€€€€€€¤(€€€É•ÑÕÉ¸Á¹…Ñ…É…µ”¡É½ÝÌ¤(

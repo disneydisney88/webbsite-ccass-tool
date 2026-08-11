@@ -56,8 +56,13 @@ class SettlementMetadataTest(unittest.TestCase):
         }
         with patch.object(api, "build_base_payload", return_value=base):
             payload = api.build_stock_payload("01592")
-        self.assertEqual(payload["metadata"]["data_as_of_trading_date"], "2026-07-15")
+        self.assertEqual(payload["metadata"]["data_as_of_trading_date"], "2026-07-13")
+        self.assertEqual(payload["metadata"]["holdings_implied_trade_date"], "2026-07-13")
+        self.assertEqual(payload["metadata"]["date_basis_by_section"]["holdings"], "settlement")
         self.assertIn("T+2", payload["metadata"]["settlement_note"])
+        self.assertEqual(payload["holdings"][0]["ccass_date"], "2026-07-15")
+        self.assertEqual(payload["holdings"][0]["implied_trade_date"], "2026-07-13")
+        self.assertEqual(payload["holdings"][0]["date_basis"], "settlement")
         self.assertEqual(payload["holdings"][0]["category"], "retail")
         self.assertEqual(payload["changes"][0]["category"], "bank")
         self.assertEqual(payload["big_changes"][0]["category"], "boutique")

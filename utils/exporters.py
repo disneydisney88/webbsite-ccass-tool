@@ -5,6 +5,13 @@ import json
 
 import pandas as pd
 
+from .date_semantics import (
+    SECTION_DATE_BASIS as CCASS_SECTION_DATE_BASIS,
+    SETTLEMENT_NOTE,
+    date_fields,
+    derive_dates,
+    unavailable_data_as_of,
+)
 from .fetcher import FetchResult
 from .parser import ParsedCCASS, build_fetch_summary, table_preview_records
 
@@ -18,6 +25,9 @@ COMMON_EXPORT_COLUMNS = [
     "webbsite_issue_id",
     "fetched_time",
     "data_date_or_latest_date",
+    "ccass_date",
+    "implied_trade_date",
+    "implied_settlement_date",
     "date_basis",
     "data_as_of_trading_date",
     "source_url",
@@ -35,11 +45,7 @@ COMMON_EXPORT_COLUMNS = [
 
 SECTION_DATE_BASIS = {
     "Company / orgdata": "company_profile",
-    "Holdings": "settlement_date",
-    "Changes": "trading_date",
-    "Big Changes": "settlement_date",
-    "Concentration": "settlement_date",
-    "Price History": "trading_date",
+    **CCASS_SECTION_DATE_BASIS,
     "HKEX Announcements": "announcement_publish_time",
     "Corporate Events": "event_date",
     "Share Capital Changes": "event_date",
@@ -53,12 +59,20 @@ def _parsed_value(parsed: ParsedCCASS, name: str, default=""):
 
 
 def _data_as_of_trading_date(parsed: ParsedCCASS) -> str:
-    return str(
-        _parsed_value(parsed, "data_as_of_trading_date", "")
-        or parsed.changes_trading_date
-        or parsed.price_history_latest_date
-        or ""
+    explicit = str(_parsed_value(parsed, "data_as_of_trading_date", "") or "")
+    if explicit:
+        return explicit
+    candidates = (
+        (parsed.holdings_data_date, "settlement"),
+        (parsed.concentration_latest_date, "settlement"),
+        (parsed.changes_trading_date, "trade"),
+        (parsed.big_changes_latest_date, "settlement"),
     )
+    for value, basis in candidates:
+        derived = derive_dates(value, basis)
+        if derived.implied_trade_date:
+            return derived.implied_trade_date
+    return unavailable_data_as_of("no dated CCASS section parsed")
 
 
 def _date_basis_map(parsed: ParsedCCASS) -> dict[str, str]:
@@ -66,9 +80,9 @@ def _date_basis_map(parsed: ParsedCCASS) -> dict[str, str]:
     if isinstance(value, dict) and value:
         return value
     return {
-        section: basis
-        for section, basis in SECTION_DATE_BASIS.items()
-        if section in {"Holdings", "Changes", "Big Changes", "Concentration", "Price History"}
+        section.lower().replace(" ", "_"): basis
+        for section, basis in CCASS_SECTION_DATE_BASIS.items()
+        if section in {"Holdings", "Changes", "Big Changes", "Concentration"}
     }
 
 
@@ -90,13 +104,19 @@ def metadata_dict(parsed: ParsedCCASS) -> dict:
         "settlement_note": _parsed_value(
             parsed,
             "settlement_note",
-            "Holdings, Big Changes and Concentration use CCASS settlement dates; Changes and Price History use trading dates.",
+            SETTLEMENT_NOTE,
         ),
         "holdings_data_date": parsed.holdings_data_date,
+        "holdings_implied_trade_date": _parsed_value(parsed, "holdings_implied_trade_date", ""),
         "changes_date_range": parsed.changes_date_range,
         "changes_trading_date": parsed.changes_trading_date,
+        "changes_implied_trade_date": _parsed_value(parsed, "changes_implied_trade_date", ""),
         "big_changes_latest_date": parsed.big_changes_latest_date,
+        "big_changes_implied_trade_date": _parsed_value(parsed, "big_changes_implied_trade_date", ""),
         "concentration_latest_date": parsed.concentration_latest_date,
+        "concentration_implied_trade_date": _parsed_value(
+            parsed, "concentration_implied_trade_date", ""
+        ),
         "price_history_latest_date": parsed.price_history_latest_date,
         "price_source": parsed.price_source,
         "issued_securities": parsed.issued_securities,
@@ -279,6 +299,11 @@ def _section_context(
         error_message = parse_message
     if not error_message and status in {"failed", "no_matching_table"}:
         error_message = "No parsed rows were available for this section."
+    basis = SECTION_DATE_BASIS.get(section, "unknown")
+    semantic_fields, semantic_warning = date_fields(
+        data_date,
+        basis if basis in {"settlement", "trade"} else "unknown",
+    )
     return {
         "section": section,
         "row_meaning": description,
@@ -287,7 +312,7 @@ def _section_context(
         "webbsite_issue_id": parsed.issue_id,
         "fetched_time": parsed.fetched_time,
         "data_date_or_latest_date": data_date,
-        "date_basis": SECTION_DATE_BASIS.get(section, ""),
+        **semantic_fields,
         "data_as_of_trading_date": _data_as_of_trading_date(parsed),
         "source_url": _result_source_url(parsed, result, section),
         "fetch_status": status,
@@ -305,6 +330,7 @@ def _section_context(
             else (parsed.source if row_count else "")
         ),
         "section_row_count": row_count,
+        "data_quality_warning": semantic_warning,
     }
 
 
@@ -322,7 +348,10 @@ def _section_data_frame(
     out = _annotate_data_quality(section, out)
     context = _section_context(parsed, section, description, data_date, result, len(out))
     context["record_type"] = "data"
+    row_date_columns = {"ccass_date", "implied_trade_date", "implied_settlement_date", "date_basis"}
     for column, value in context.items():
+        if column in row_date_columns and column in out.columns:
+            continue
         out[column] = value
     ordered = COMMON_EXPORT_COLUMNS + [column for column in out.columns if column not in COMMON_EXPORT_COLUMNS]
     return out.reindex(columns=ordered)

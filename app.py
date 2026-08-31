@@ -174,7 +174,8 @@ def render_section(section: str, result, selected_index, parsed_table, summary_t
     if summary_text:
         st.info(summary_text)
     if parsed_table is not None and not parsed_table.empty:
-        st.dataframe(parsed_table, use_container_width=True)
+        # Keep wide/long tables inside a stable scrollable viewport.
+        st.dataframe(parsed_table, use_container_width=True, height=420, hide_index=True)
     else:
         st.warning(f"{section} table parsing failed. Raw table previews are shown below.")
     render_table_previews(section, result)
@@ -1236,7 +1237,8 @@ def render_officers(officers: list, name: str, warnings: list, managers_f10: lis
 
 
 def render_copy_report(report: str) -> None:
-    st.text_area("Markdown report", report, height=620)
+    st.caption("Markdown report (scroll inside the box to review or copy)")
+    st.text_area("Markdown report", report, height=420, label_visibility="collapsed")
     payload = json.dumps(report)
     components.html(
         f"""
@@ -1271,7 +1273,7 @@ def render_copy_report(report: str) -> None:
         }});
         </script>
         """,
-        height=95,
+        height=72,
     )
 
 
@@ -1655,12 +1657,13 @@ render_officers(
 
 st.markdown('<div id="fetch-summary"></div>', unsafe_allow_html=True)
 st.subheader("Fetch Summary")
-st.dataframe(compact_fetch_summary(fetch_summary), use_container_width=True)
+st.dataframe(compact_fetch_summary(fetch_summary), use_container_width=True, hide_index=True, height=260)
 with st.expander("Source URLs", expanded=False):
-    st.dataframe(fetch_summary[["Section", "URL"]], use_container_width=True)
+    st.dataframe(fetch_summary[["Section", "URL"]], use_container_width=True, hide_index=True)
 if parsed.analysis_warnings:
-    for warning in parsed.analysis_warnings:
-        st.warning(warning)
+    with st.expander(f"Data quality warnings ({len(parsed.analysis_warnings)})", expanded=False):
+        for warning in parsed.analysis_warnings:
+            st.warning(warning)
 
 st.divider()
 st.markdown('<div id="all-tables"></div>', unsafe_allow_html=True)
@@ -1770,4 +1773,5 @@ render_copy_report(report)
 st.divider()
 st.markdown('<div id="download-files"></div>', unsafe_allow_html=True)
 st.subheader("Download Files")
+st.caption("Individual section files and the Markdown/JSON exports are available below. Partial exports keep the PARTIAL label.")
 render_download_buttons(parsed, results, report, "bottom", export_extras)

@@ -1571,6 +1571,9 @@ def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) ->
         status = parse.status
         if result and not result.ok:
             status = "failed"
+        error = parse.error or (result.error_message if result and not result.ok else "")
+        if not error and status in {"failed", "no matching table", "partial success"}:
+            error = "Parsed table unavailable; inspect raw table preview"
         rows.append(
             {
                 "Section": section,
@@ -1579,7 +1582,7 @@ def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) ->
                 "Tables found": len(result.tables) if result else 0,
                 "Selected table index": parse.selected_table_index if parse.selected_table_index is not None else "",
                 "Latest date / data date": parse.latest_date,
-                "Error": parse.error or (result.error_message if result and not result.ok else ""),
+                "Error": error,
             }
         )
     return pd.DataFrame(rows)

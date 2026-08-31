@@ -21,6 +21,7 @@ RETRYABLE = {
     "INVALID_CODE": False,
     "AUTH_FAILED": False,
     "ISSUE_LOOKUP_FAILED": True,
+    "ISSUE_ID_NOT_FOUND": False,
 }
 
 
@@ -39,7 +40,7 @@ def classify_fetch_message(error_type: str | None, message: str | None) -> str:
         return "COLD_START"
     if "timeout" in text or "timed out" in text:
         return "SOURCE_TIMEOUT"
-    if "source_challenge" in text or "cookie/reload challenge" in text or "human verification" in text:
+    if "source_challenge" in text or "js_challenge" in text or "cookie/reload challenge" in text or "human verification" in text:
         return "SOURCE_CHALLENGE"
     if "no table" in text or "no matching table" in text or "table format" in text:
         return "SOURCE_CHANGED"
@@ -86,7 +87,7 @@ def errors_from_warnings(warnings: list[str]) -> list[dict[str, Any]]:
     for warning in warnings or []:
         lower = warning.lower()
         if "issue lookup failed" in lower or "issue id" in lower:
-            code = "ISSUE_LOOKUP_FAILED"
+            code = "ISSUE_ID_NOT_FOUND" if "cannot automatically determine" in lower or "unable to resolve" in lower else "ISSUE_LOOKUP_FAILED"
         elif "budget exhausted" in lower or "cold" in lower:
             code = "COLD_START"
         elif "timeout" in lower:

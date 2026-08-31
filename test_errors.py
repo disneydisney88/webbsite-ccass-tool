@@ -4,8 +4,10 @@ import unittest
 from unittest.mock import patch
 
 import api
-from utils.fetcher import fetch_with_requests, webb_database_cookie_value
+from utils.fetcher import FetchResult, IssueLookup, fetch_with_requests, webb_database_cookie_value
 from utils.errors import classify_fetch_message, errors_from_fetch_summary, structured_error
+from utils.parser import ParsedCCASS, build_fetch_summary
+from utils.source_router import SourceBundle, fetch_hybrid_bundle
 
 
 class ClassifyTest(unittest.TestCase):
@@ -128,9 +130,37 @@ class FetchDiagnosticsTest(unittest.TestCase):
         with patch("requests.Session", return_value=FakeSession()):
             result = fetch_with_requests("Holdings", "https://example.com", timeout=1)
         self.assertFalse(result.ok)
-        self.assertEqual(result.error_type, "SOURCE_CHALLENGE")
+        self.assertEqual(result.error_type, "JS_CHALLENGE")
         self.assertIn("JavaScript cookie/reload challenge", result.error_message)
         self.assertIn("setCookie", result.response_snippet)
+
+    def test_hybrid_keeps_js_challenge_result_and_parser_error(self):
+        challenge = "<html><head><script src='/432182.js'></script><script>setCookie();location.reload();</script></head><body></body></html>"
+        failed = FetchResult(
+            name="Holdings",
+            url="https://webb-database.com/ccass/choldings.asp?i=15949",
+            final_url="https://webb-database.com/ccass/choldings.asp?i=15949",
+            status=200,
+            html=challenge,
+            response_snippet=challenge[:500],
+            method="requests",
+            ok=False,
+            error_type="JS_CHALLENGE",
+            error_message="JavaScript cookie/reload challenge",
+        )
+        empty = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"),
+            results={},
+        )
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=empty), patch(
+            "utils.source_router.fetch_with_requests", return_value=failed
+        ):
+            bundle = fetch_hybrid_bundle("08245", timeout=1, headless=True)
+        self.assertIs(bundle.results["Holdings"], failed)
+        self.assertEqual(bundle.results["Holdings"].error_type, "JS_CHALLENGE")
+        summary = build_fetch_summary(ParsedCCASS(stock_code="08245", issue_id="15949"), bundle.results)
+        self.assertEqual(summary.loc[summary["Section"] == "Holdings", "Error"].iloc[0], failed.error_message)
+        self.assertNotIn("Parsed table unavailable", summary.loc[summary["Section"] == "Holdings", "Error"].iloc[0])
 
 
 class HealthUpstreamsTest(unittest.TestCase):

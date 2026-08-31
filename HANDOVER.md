@@ -46,6 +46,14 @@ The repository now contains the implementation for the 2026-08-26 repair specifi
 
 Still open from the 08245 brief: independent Non-CCASS time-series output, structured warning records, corporate-action adjacency flags, and deployment-environment Playwright verification.
 
+## Prompt 2 Follow-up: Challenge Diagnostics and Probe Decision
+
+- Failed Holdings/Changes `FetchResult` objects are retained in the hybrid bundle, including status, URL, response details, error type, and error message.
+- A JavaScript cookie/reload response is classified as `JS_CHALLENGE`; this remains distinct from an empty source or parser miss.
+- `CCASS_DEBUG_DUMP` controls optional raw Holdings/Changes diagnostic files and is off by default. The `debug/` directory is ignored by Git.
+- `mirror_probe()` remains defined but is not connected to the `auto` route. The current decision is **do not connect it in this task**. Connecting it later would add a daily upstream request, probe-cache semantics, and a decision about whether a failed probe triggers SDW fallback or a browser fetch. This needs a separate reviewed change because it affects frequency and source selection.
+- README was corrected so it no longer promises a daily auto probe that does not currently run.
+
 ## Verification Evidence
 
 Completed locally in the GitHub-linked repo:

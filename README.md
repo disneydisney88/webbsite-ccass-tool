@@ -56,7 +56,7 @@ Default:
 CCASS_SOURCE_MODE=auto
 ```
 
-- `auto`: probe the Webb-site mirror once per day. If blocked by 403/Cloudflare challenge, use HKEX SDW plus the local SQLite snapshot DB.
+- `auto`: use the hybrid local DB + direct Webb-site requests path. The currently defined `mirror_probe()` helper is not connected to this route, so auto mode does not currently perform a daily probe. If the direct page is blocked or returns a JavaScript challenge, use the available local fallback.
 - `mirror`: force the original Webb-site mirror fetcher/parser.
 - `sdw`: use HKEX SDW plus local snapshots only.
 
@@ -87,11 +87,15 @@ You can set it as an environment variable or in `ccass_source_config.json`:
 }
 ```
 
-`hpu.asp` may work through plain requests on that mirror, while some CCASS pages first return a small JavaScript cookie reload page. The app does not manually bypass this; it only uses the existing Playwright real-browser fallback when mirror mode or the daily auto probe needs a browser and Playwright is available. If Playwright is unavailable, the app falls back to SDW/local DB instead of crashing.
+`hpu.asp` may work through plain requests on that mirror, while some CCASS pages first return a small JavaScript cookie reload page. The app does not manually bypass this; it only uses the existing Playwright real-browser fallback when the page fetch path requests it and Playwright is available. If Playwright is unavailable, the app falls back to SDW/local DB instead of crashing. The daily auto probe described in earlier documentation is not currently connected.
 
 On Streamlit Cloud, Chromium is installed lazily only when a mirror page actually
 needs browser rendering. A failed browser installation is shown as a warning and
 does not stop the SDW/local DB fallback.
+
+Set `CCASS_DEBUG_DUMP=true` only for a controlled diagnosis. It writes raw
+Holdings/Changes HTML and metadata under `debug/`; the default is off and the
+directory is ignored by Git.
 
 The default Streamlit path is fast hybrid mode: HKEX SDW provides current
 Holdings, local snapshots provide Changes, and direct Webb-site pages provide

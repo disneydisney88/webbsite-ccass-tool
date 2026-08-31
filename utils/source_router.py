@@ -22,7 +22,7 @@ from .fetcher import (
     orgdata_url,
     resolve_issue_id_from_stock,
 )
-from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, history_depth_days, load_price_history, stock_fetched_today, upsert_price_history
+from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, history_depth_days, load_price_history, load_stock_map, stock_fetched_today, upsert_price_history, upsert_stock_map
 
 
 CONFIG_PATH = Path(os.getenv("CCASS_SOURCE_CONFIG", "ccass_source_config.json"))
@@ -154,12 +154,66 @@ def mirror_probe(stock_code: str, issue_id: str, timeout: int, headless: bool = 
 
 
 def issue_id_for_stock(code: str) -> str:
-    return KNOWN_ISSUE_ID_BY_STOCK.get(clean_stock_code(code), "")
+    cleaned = clean_stock_code(code)
+    cached = load_stock_map(cleaned).get("issue_id", "")
+    if cached:
+        return str(cached)
+    return KNOWN_ISSUE_ID_BY_STOCK.get(cleaned, "")
 
 
 def stock_code_for_issue_id(issue_id: str) -> str:
     reverse = {issue: code for code, issue in KNOWN_ISSUE_ID_BY_STOCK.items()}
     return reverse.get(str(issue_id), "")
+
+
+def _extract_company_name(result: FetchResult | None) -> str:
+    if result is None:
+        return ""
+    for table in result.tables or []:
+        if table is None or table.empty:
+            continue
+        for column in ("Name", "Company", "Stock name", "Stock Name"):
+            if column in table.columns:
+                value = table.iloc[0].get(column)
+                if value:
+                    return str(value).strip()
+    text = str(result.raw_text or result.html or "")
+    for line in text.splitlines():
+        line = line.strip()
+        if line and len(line) > 4 and ("holdings limited" in line.lower() or "holdings" in line.lower() or "limited" in line.lower()):
+            return line
+    return ""
+
+
+def resolve_issue_id(stock_code: str, timeout: int = 60, headless: bool = True, force_refresh: bool = False) -> IssueLookup:
+    code = clean_stock_code(stock_code)
+    cached = load_stock_map(code)
+    if cached.get("issue_id") and not force_refresh:
+        company_name = str(cached.get("name") or "")
+        company_table = pd.DataFrame([{"Code": code, "Name": company_name}])
+        return IssueLookup(
+            stock_code=code,
+            issue_id=str(cached.get("issue_id") or ""),
+            method="cache",
+            status="success",
+            message="Issue ID loaded from persistent cache.",
+            result=FetchResult(
+                name="Company / orgdata",
+                url=f"local_db://stock_map/{code}",
+                tables=[company_table],
+                method="cache",
+                ok=True,
+            ),
+        )
+    lookup = resolve_issue_id_from_stock(code, timeout=timeout, headless=headless)
+    if lookup.status == "success" and lookup.issue_id:
+        company_name = _extract_company_name(lookup.result)
+        try:
+            upsert_stock_map(code, lookup.issue_id, name=company_name)
+        except Exception:
+            pass
+        lookup.message = lookup.message or "Issue ID resolved from Webb lookup."
+    return lookup
 
 
 def fetch_webb_price_history(
@@ -177,7 +231,7 @@ def fetch_webb_price_history(
     if issue_id:
         lookup = IssueLookup(stock_code=code, issue_id=issue_id, method="known mapping fallback", status="success")
     else:
-        lookup = resolve_issue_id_from_stock(code, timeout=timeout, headless=headless)
+        lookup = resolve_issue_id(code, timeout=timeout, headless=headless)
     if lookup.status != "success" or not lookup.issue_id:
         return None, lookup
 
@@ -188,12 +242,22 @@ def fetch_webb_price_history(
     return result, lookup
 
 
+def _persist_stock_mapping(code: str, lookup: IssueLookup, stock_name: str = "") -> None:
+    if lookup.status == "success" and lookup.issue_id:
+        try:
+            upsert_stock_map(code, lookup.issue_id, name=stock_name)
+        except Exception:
+            # The mapping cache is an optimization; never let it block the request.
+            pass
+
+
 def fetch_local_db_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mirror_status: str = "") -> SourceBundle:
     code = clean_stock_code(stock_code)
+    resolved_issue_id = issue_id or issue_id_for_stock(code)
     lookup = IssueLookup(
         stock_code=code,
-        issue_id=issue_id or issue_id_for_stock(code),
-        method="known mapping fallback" if issue_id_for_stock(code) else "local stock code",
+        issue_id=resolved_issue_id,
+        method="cache" if load_stock_map(code).get("issue_id") else ("known mapping fallback" if issue_id_for_stock(code) else "local stock code"),
         status="success" if code else "failed",
         message="Local CCASS snapshot DB selected; live HKEX SDW scraping is disabled.",
     )
@@ -221,6 +285,7 @@ def fetch_local_db_bundle(stock_code: str, issue_id: str = "", timeout: int = 30
     warnings.extend(built.warnings or [])
     if built.stock_name:
         lookup.message = f"{lookup.message} Stock name from local DB: {built.stock_name}"
+    _persist_stock_mapping(code, lookup, built.stock_name)
     if built.history_depth_days <= 1 and built.latest_date:
         warnings.append(f"History limited to local snapshots since {built.latest_date}; mirror historical data unavailable")
     return SourceBundle(
@@ -249,7 +314,7 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
     bundle = fetch_local_db_bundle(stock_code, timeout=timeout, mirror_status="hybrid")
     issue_id = bundle.lookup.issue_id
     if not issue_id:
-        resolved = resolve_issue_id_from_stock(stock_code, timeout=timeout, headless=headless)
+        resolved = resolve_issue_id(stock_code, timeout=timeout, headless=headless)
         if resolved.status == "success" and resolved.issue_id:
             bundle.lookup = resolved
             issue_id = resolved.issue_id
@@ -264,12 +329,15 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
 
     urls = issue_urls(issue_id)
     for section in ("Holdings", "Changes", "Big Changes", "Concentration", "Price History"):
-        result = fetch_with_requests(section, urls[section], timeout=timeout)
+        debug_kwargs = {}
+        if os.getenv("CCASS_DEBUG_DUMP", "").strip().lower() in {"1", "true", "yes", "on"}:
+            debug_kwargs["debug_stock"] = stock_code
+        result = fetch_with_requests(section, urls[section], timeout=timeout, **debug_kwargs)
+        bundle.results[section] = result
         if result.ok:
             if section == "Price History":
                 for table in result.tables:
                     table["price_source"] = "mirror"
-            bundle.results[section] = result
         else:
             bundle.warnings.append(
                 f"Webb-site {section} fetch failed: {result.error_type} - {result.error_message}. "
@@ -346,7 +414,14 @@ def fetch_source_bundle_for_stock(stock_code: str, timeout: int = 30, headless: 
             return render_bundle
     issue_id = issue_id_for_stock(code)
     if mode in {"sdw", "local_db"}:
-        return fetch_local_db_bundle(code, issue_id=issue_id, timeout=timeout, mirror_status="disabled_by_config")
+        local_bundle = fetch_local_db_bundle(code, issue_id=issue_id, timeout=timeout, mirror_status="disabled_by_config")
+        if local_bundle.lookup.issue_id and local_bundle.results:
+            return local_bundle
+        hybrid_bundle = fetch_hybrid_bundle(code, timeout=timeout, headless=headless)
+        if hybrid_bundle.lookup.issue_id or hybrid_bundle.results:
+            hybrid_bundle.warnings.append("Local snapshot was empty; upstream fallback was used for this request.")
+            return hybrid_bundle
+        return local_bundle
     if mode == "mirror":
         return fetch_mirror_bundle(code, issue_id="", timeout=timeout, headless=headless, mirror_status="forced")
     return fetch_hybrid_bundle(code, timeout=timeout, headless=headless)

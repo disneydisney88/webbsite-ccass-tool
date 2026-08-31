@@ -210,6 +210,61 @@ def body_head(text: str, limit: int = 500) -> str:
     return re.sub(r"\s+", " ", text or "").strip()[:limit]
 
 
+def _write_debug_artifact(
+    name: str,
+    url: str,
+    source: str,
+    html: str = "",
+    status: Optional[int] = None,
+    headers=None,
+    stock_code: str = "",
+    final_url: str = "",
+) -> None:
+    """Persist one non-git-tracked fetch diagnostic for Holdings/Changes only."""
+    if os.getenv("CCASS_DEBUG_DUMP", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    if name not in {"Holdings", "Changes"}:
+        return
+    code = clean_stock_code(stock_code) or "unknown"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    folder = Path("debug") / code
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        html_path = folder / f"{name}_{source}_{timestamp}.html"
+        meta_path = folder / f"{name}_{source}_{timestamp}.meta.json"
+        html_path.write_text(html or "", encoding="utf-8", errors="replace")
+        header_map = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
+        tables = []
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(html or "", "lxml")
+            for table in soup.find_all("table"):
+                rows = table.find_all("tr")
+                cols = max((len(row.find_all(["th", "td"])) for row in rows), default=0)
+                tables.append({"rows": len(rows), "cols": cols})
+        except Exception:
+            tables = []
+        meta = {
+            "name": name,
+            "source": source,
+            "url": url,
+            "final_url": final_url or url,
+            "http_status": status,
+            "response_length": len(html or ""),
+            "content_type": header_map.get("content-type", ""),
+            "has_set_cookie": "set-cookie" in header_map,
+            "response_head": (html or "")[:500],
+            "tables_found": len(tables),
+            "tables": tables,
+            "html_file": str(html_path).replace("\\", "/"),
+        }
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        # Diagnostics must never change the fetch result on a read-only host.
+        return
+
+
 def webb_database_host(url: str) -> str:
     return (urlparse(url).hostname or "").lower()
 
@@ -232,6 +287,7 @@ def looks_like_js_cookie_challenge(html: str) -> bool:
         ("setcookie()" in text and "location.reload" in text)
         or ("document.cookie" in text and "location.reload" in text)
         or ("please enable cookies" in text)
+        or ("js required" in text)
     )
 
 
@@ -265,7 +321,7 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
+def fetch_with_requests(name: str, url: str, timeout: int, debug_stock: str = "") -> FetchResult:
     import requests
 
     attempts = max(1, _int_env("FETCH_RETRY_ATTEMPTS", 3))
@@ -285,6 +341,7 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
         result.html = response.text
         result.raw_text = html_to_text(response.text)
         result.response_snippet = body_head(response.text)
+        _write_debug_artifact(name, url, "requests", response.text, response.status_code, getattr(response, "headers", {}), debug_stock, result.final_url)
 
     for attempt in range(1, attempts + 1):
         result.attempts = attempt
@@ -324,7 +381,7 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
                         response = solved
                         result.fallback_method_used = "webb-database challenge cookie"
                     else:
-                        result.error_type = "SOURCE_CHALLENGE"
+                        result.error_type = "JS_CHALLENGE"
                         result.error_message = (
                             "Upstream returned a JavaScript cookie/reload challenge even after challenge cookie retry. "
                             f"{upstream_failure_message(result)}"
@@ -332,7 +389,7 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
                         result.ok = False
                         return result
                 else:
-                    result.error_type = "SOURCE_CHALLENGE"
+                    result.error_type = "JS_CHALLENGE"
                     result.error_message = f"Upstream returned a JavaScript cookie/reload challenge instead of data. {upstream_failure_message(result)}"
                     result.ok = False
                     return result
@@ -362,11 +419,12 @@ def fetch_with_requests(name: str, url: str, timeout: int) -> FetchResult:
             break
     result.error_type = last_error_type or result.error_type or "FetchError"
     result.error_message = last_error_message or result.error_message or upstream_failure_message(result)
+    _write_debug_artifact(name, url, "requests", result.html, result.status, {}, debug_stock)
     result.ok = False
     return result
 
 
-def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> FetchResult:
+def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool, debug_stock: str = "") -> FetchResult:
     result = FetchResult(name=name, url=url, fetched_time=now_iso(), method="playwright")
     try:
         from playwright.sync_api import Error as PlaywrightError
@@ -407,6 +465,7 @@ def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> 
             result.html = page.content()
             result.raw_text = html_to_text(result.html)
             result.tables = extract_tables_from_html(result.html)
+            _write_debug_artifact(name, url, "playwright", result.html, result.status, getattr(response, "headers", {}) if response else {}, debug_stock, result.final_url)
             browser.close()
             if not result.tables:
                 raise ValueError("no table found")
@@ -418,23 +477,25 @@ def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool) -> 
         else:
             result.error_message = str(exc)
         result.ok = False
+    if not result.html:
+        _write_debug_artifact(name, url, "playwright", "", result.status, {}, debug_stock)
     return result
 
 
-def fetch_page(name: str, url: str, timeout: int = 60, headless: bool = True) -> FetchResult:
-    first = fetch_with_requests(name, url, timeout=timeout)
+def fetch_page(name: str, url: str, timeout: int = 60, headless: bool = True, debug_stock: str = "") -> FetchResult:
+    first = fetch_with_requests(name, url, timeout=timeout, debug_stock=debug_stock)
     if first.ok:
         return first
     if first.error_type in DETERMINISTIC_FAILURE_TYPES or first.status in DETERMINISTIC_FAILURE_STATUS_CODES:
         return first
 
-    fallback_reasons = ("403", "timeout", "no table", "dns", "connection", "name resolution")
+    fallback_reasons = ("403", "timeout", "no table", "js_challenge", "dns", "connection", "name resolution")
     error_text = f"{first.status} {first.error_message}".lower()
     should_try_browser = any(reason in error_text for reason in fallback_reasons) or not first.tables
     if not should_try_browser:
         return first
 
-    second = fetch_with_playwright(name, url, timeout=timeout, headless=headless)
+    second = fetch_with_playwright(name, url, timeout=timeout, headless=headless, debug_stock=debug_stock)
     second.fallback_method_used = "requests -> playwright"
     if second.ok:
         return second
@@ -526,9 +587,9 @@ def fetch_all(issue_id: str, stock_code: str = "", timeout: int = 60, headless: 
     delay = float(os.getenv("FETCH_DELAY_SECONDS", delay_seconds if delay_seconds is not None else 0.5))
     results: dict[str, FetchResult] = {}
     if stock_code:
-        results["Company / orgdata"] = fetch_page("Company / orgdata", orgdata_url(stock_code), timeout=timeout, headless=headless)
+        results["Company / orgdata"] = fetch_page("Company / orgdata", orgdata_url(stock_code), timeout=timeout, headless=headless, debug_stock=stock_code)
         time.sleep(max(delay, 0))
     for name, url in issue_urls(issue_id).items():
-        results[name] = fetch_page(name, url, timeout=timeout, headless=headless)
+        results[name] = fetch_page(name, url, timeout=timeout, headless=headless, debug_stock=stock_code)
         time.sleep(max(delay, 0))
     return results

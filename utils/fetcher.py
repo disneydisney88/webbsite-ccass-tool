@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Optional
+from typing import Any, Optional
 
 # 0xmd is temporarily blocked by Cloudflare. Keep it configurable, but use the
 # compatible mirror until it becomes available again.
@@ -98,6 +98,7 @@ class FetchResult:
     error_type: str = ""
     error_message: str = ""
     fallback_method_used: str = ""
+    attempted_sources: list[dict[str, Any]] = field(default_factory=list)
 
     def to_log(self) -> dict:
         return {
@@ -115,6 +116,7 @@ class FetchResult:
             "error_type": self.error_type,
             "error_message": self.error_message,
             "response_snippet": self.response_snippet,
+            "attempted_sources": self.attempted_sources,
         }
 
 

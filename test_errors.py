@@ -3,7 +3,9 @@
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
 import api
+import utils.source_router as source_router
 from utils.fetcher import FetchResult, IssueLookup, fetch_with_requests, webb_database_cookie_value
 from utils.errors import classify_fetch_message, errors_from_fetch_summary, structured_error
 from utils.parser import ParsedCCASS, build_fetch_summary
@@ -159,8 +161,120 @@ class FetchDiagnosticsTest(unittest.TestCase):
         self.assertIs(bundle.results["Holdings"], failed)
         self.assertEqual(bundle.results["Holdings"].error_type, "JS_CHALLENGE")
         summary = build_fetch_summary(ParsedCCASS(stock_code="08245", issue_id="15949"), bundle.results)
-        self.assertEqual(summary.loc[summary["Section"] == "Holdings", "Error"].iloc[0], failed.error_message)
+        self.assertIn(failed.error_type, summary.loc[summary["Section"] == "Holdings", "Error"].iloc[0])
+        self.assertIn(failed.error_message, summary.loc[summary["Section"] == "Holdings", "Error"].iloc[0])
         self.assertNotIn("Parsed table unavailable", summary.loc[summary["Section"] == "Holdings", "Error"].iloc[0])
+
+    def test_hybrid_keeps_local_success_and_reports_remote_failure(self):
+        local = FetchResult(name="Holdings", url="local_db://ccass_snapshots", ok=True, method="sdw+local_db")
+        local_bundle = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"),
+            results={"Holdings": local},
+        )
+
+        def failed_result(section, url, timeout, **kwargs):
+            return FetchResult(
+                name=section,
+                url=url,
+                method="requests",
+                ok=False,
+                status=200,
+                error_type="JS_CHALLENGE",
+                error_message="JavaScript cookie/reload challenge",
+            )
+
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local_bundle), patch(
+            "utils.source_router.fetch_with_requests", side_effect=failed_result
+        ):
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        self.assertIs(bundle.results["Holdings"], local)
+        self.assertTrue(bundle.results["Holdings"].ok)
+        self.assertEqual(bundle.results["Holdings"].attempted_sources[0]["error_type"], "JS_CHALLENGE")
+        summary = build_fetch_summary(ParsedCCASS(stock_code="08245", issue_id="15949"), bundle.results)
+        error = summary.loc[summary["Section"] == "Holdings", "Error"].iloc[0]
+        self.assertIn("local data retained", error)
+        self.assertIn("JS_CHALLENGE", error)
+
+    def test_hybrid_remote_success_replaces_local_snapshot(self):
+        local = FetchResult(name="Holdings", url="local_db://ccass_snapshots", ok=True, method="sdw+local_db")
+        local_bundle = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"),
+            results={"Holdings": local},
+        )
+
+        def successful_result(section, url, timeout, **kwargs):
+            return FetchResult(name=section, url=url, method="requests", ok=True, tables=[])
+
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local_bundle), patch(
+            "utils.source_router.fetch_with_requests", side_effect=successful_result
+        ):
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        # Remote success is newer than a local snapshot, so it is authoritative.
+        self.assertEqual(bundle.results["Holdings"].method, "requests")
+        self.assertNotEqual(bundle.results["Holdings"].url, local.url)
+
+    def test_hybrid_resolver_failure_is_retained_when_local_db_is_empty(self):
+        failed_company = FetchResult(
+            name="Company / orgdata",
+            url="https://webb-database.com/dbpub/orgdata.asp?code=08245&Submit=current",
+            ok=False,
+            error_type="JS_CHALLENGE",
+            error_message="JavaScript cookie/reload challenge",
+        )
+        local_bundle = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="", status="failed"),
+            results={},
+            metadata={"source": "local_db"},
+        )
+        resolved = IssueLookup(stock_code="08245", status="failed", result=failed_company)
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local_bundle), patch(
+            "utils.source_router.resolve_issue_id", return_value=resolved
+        ):
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        self.assertIs(bundle.results["Company / orgdata"], failed_company)
+        summary = build_fetch_summary(ParsedCCASS(stock_code="08245"), bundle.results)
+        errors = summary["Error"].tolist()
+        self.assertIn("JS_CHALLENGE", errors[0])
+        self.assertTrue(all(error for error in errors))
+        self.assertTrue(all("Issue ID unresolved" in error for error in errors[1:]))
+
+    def test_fetch_summary_empty_results_still_has_nonempty_errors(self):
+        summary = build_fetch_summary(ParsedCCASS(stock_code="08245"), {})
+        self.assertEqual(len(summary), 6)
+        self.assertTrue(all(summary["Error"].astype(bool)))
+
+    def test_local_lookup_without_issue_id_is_not_success(self):
+        with patch("utils.source_router.load_stock_map", return_value={"issue_id": "", "name": ""}), patch(
+            "utils.source_router.build_results_from_db",
+            return_value=type("Built", (), {"results": {}, "warnings": [], "stock_name": "", "history_depth_days": 0, "latest_date": ""})(),
+        ):
+            bundle = source_router.fetch_local_db_bundle("08245")
+        self.assertEqual(bundle.lookup.status, "failed")
+
+    def test_local_snapshot_can_continue_without_issue_id(self):
+        local_holdings = FetchResult(
+            name="Holdings", url="local_db://ccass_snapshots", ok=True,
+            tables=[pd.DataFrame({"Participant": ["B00001"]})],
+        )
+        local_concentration = FetchResult(
+            name="Concentration", url="local_db://ccass_concentration", ok=True,
+            tables=[pd.DataFrame({"Date": ["2026-08-28"]})],
+        )
+        local_bundle = SourceBundle(
+            lookup=IssueLookup(stock_code="01592", issue_id="", status="failed"),
+            results={"Holdings": local_holdings, "Concentration": local_concentration},
+            metadata={"source": "local_db"},
+        )
+        dummy = ParsedCCASS(stock_code="01592", issue_id="")
+        with patch("api.cache_get", return_value=None), patch("api.cache_set"), patch(
+            "api.fetch_source_bundle_for_stock", return_value=local_bundle
+        ), patch(
+            "api.resolve_issue_id", return_value=IssueLookup(stock_code="01592", issue_id="26603", status="success")
+        ), patch("api.parse_results", return_value=dummy) as parse_results, patch(
+            "api.parsed_to_json_ready", return_value={"metadata": {}, "holdings": [], "concentration": []}
+        ):
+            api.build_base_payload("01592", timeout=10)
+        parse_results.assert_called_once()
 
 
 class HealthUpstreamsTest(unittest.TestCase):
@@ -168,6 +282,8 @@ class HealthUpstreamsTest(unittest.TestCase):
         with patch.object(api, "probe_upstreams", return_value={"probes": [{"source": "webbsite", "ok": False}]}):
             payload = api.health(upstreams=True)
         self.assertTrue(payload["ok"])
+        self.assertIn("commit", payload)
+        self.assertEqual(payload["commit"], api.GIT_SHA)
         self.assertEqual(payload["upstreams"]["probes"][0]["source"], "webbsite")
 
 

@@ -343,6 +343,14 @@ def _section_context(
     status = _section_fetch_status(result, row_count)
     parse_message = _section_parse_message(parsed, section)
     error_message = str(result.error_message or "") if result else ""
+    if not error_message and result:
+        failures = [
+            f"{item.get('error_type') or 'error'}: {item.get('error_message') or 'remote refresh failed'}"
+            for item in result.attempted_sources
+            if not item.get("ok")
+        ]
+        if failures:
+            error_message = "Remote refresh failed; local data retained: " + "; ".join(failures)
     if not error_message:
         error_message = parse_message
     if not error_message and status in {"failed", "no_matching_table"}:

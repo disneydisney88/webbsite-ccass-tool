@@ -1565,6 +1565,12 @@ def assess_completeness(parsed: ParsedCCASS) -> None:
 
 def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> pd.DataFrame:
     rows = []
+    resolver_result = results.get("Company / orgdata")
+    resolver_error = ""
+    if resolver_result and not resolver_result.ok:
+        resolver_error = resolver_result.error_message or resolver_result.error_type or "resolver failed"
+    elif not results:
+        resolver_error = "no resolver result was retained"
     for section in SECTIONS:
         result = results.get(section)
         parse = parsed.section_parses.get(section, SectionParse(section))
@@ -1572,8 +1578,22 @@ def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) ->
         if result and not result.ok:
             status = "failed"
         error = parse.error or (result.error_message if result and not result.ok else "")
+        if error and result and not result.ok and result.error_type and result.error_type not in error:
+            error = f"{result.error_type}: {error}"
+        if not error and result and result.attempted_sources:
+            failures = [
+                f"{item.get('error_type') or 'error'}: {item.get('error_message') or 'remote refresh failed'}"
+                for item in result.attempted_sources
+                if not item.get("ok")
+            ]
+            if failures:
+                error = "Remote refresh failed; local data retained: " + "; ".join(failures)
         if not error and status in {"failed", "no matching table", "partial success"}:
-            error = "Parsed table unavailable; inspect raw table preview"
+            error = (
+                f"Issue ID unresolved: {resolver_error}"
+                if resolver_error and section != "Company / orgdata"
+                else "Parsed table unavailable; inspect raw table preview"
+            )
         rows.append(
             {
                 "Section": section,

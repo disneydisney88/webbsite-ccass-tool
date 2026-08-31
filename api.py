@@ -79,6 +79,7 @@ def int_env(name: str, default: int) -> int:
 API_TITLE = "Webb-site CCASS Research API"
 API_SERVICE = "webbsite-ccass-api"
 API_VERSION = "1.13.0"
+GIT_SHA = os.getenv("RENDER_GIT_COMMIT", "unknown")
 CACHE_TTL_SECONDS = max(0, int_env("API_CACHE_TTL_SECONDS", 86400))
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -2100,6 +2101,7 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
         "ok": True,
         "service": API_SERVICE,
         "version": API_VERSION,
+        "commit": GIT_SHA,
         "uptime_seconds": int(max(0.0, time.monotonic() - _APP_STARTED_MONOTONIC)),
     }
     if upstreams:

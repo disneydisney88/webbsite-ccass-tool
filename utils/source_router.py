@@ -258,7 +258,7 @@ def fetch_local_db_bundle(stock_code: str, issue_id: str = "", timeout: int = 30
         stock_code=code,
         issue_id=resolved_issue_id,
         method="cache" if load_stock_map(code).get("issue_id") else ("known mapping fallback" if issue_id_for_stock(code) else "local stock code"),
-        status="success" if code else "failed",
+        status="success" if code and resolved_issue_id else "failed",
         message="Local CCASS snapshot DB selected; live HKEX SDW scraping is disabled.",
     )
     warnings: list[str] = []
@@ -321,6 +321,8 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
             if resolved.result is not None:
                 bundle.results["Company / orgdata"] = resolved.result
         else:
+            if resolved.result is not None:
+                bundle.results["Company / orgdata"] = resolved.result
             bundle.warnings.append(
                 "Webb-site issue ID could not be resolved from the public orgdata page; "
                 "continuing with local snapshot data only."
@@ -333,7 +335,25 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
         if os.getenv("CCASS_DEBUG_DUMP", "").strip().lower() in {"1", "true", "yes", "on"}:
             debug_kwargs["debug_stock"] = stock_code
         result = fetch_with_requests(section, urls[section], timeout=timeout, **debug_kwargs)
-        bundle.results[section] = result
+        local_result = bundle.results.get(section)
+        if result.ok:
+            # A successful remote refresh is newer and therefore wins over a
+            # local snapshot; a failed refresh must never replace usable data.
+            bundle.results[section] = result
+        elif local_result is None or not local_result.ok:
+            bundle.results[section] = result
+        else:
+            local_result.attempted_sources.append(
+                {
+                    "source": "mirror",
+                    "url": result.url,
+                    "final_url": result.final_url,
+                    "ok": False,
+                    "status_code": result.status,
+                    "error_type": result.error_type,
+                    "error_message": result.error_message,
+                }
+            )
         if result.ok:
             if section == "Price History":
                 for table in result.tables:

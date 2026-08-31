@@ -7,3 +7,4 @@ __pycache__/
 .env
 data/*.db
 data/mirror_probe_status.json
+debug/

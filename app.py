@@ -187,11 +187,14 @@ def get_download_base(parsed) -> str:
 def render_download_buttons(parsed, results, report: str, key_prefix: str, extras: dict | None = None) -> None:
     base = get_download_base(parsed)
     all_csv = combined_stock_csv(parsed, results, extras)
+    partial_suffix = ".PARTIAL" if getattr(parsed, "completeness_status", "complete") == "partial" else ""
     st.caption("The main CSV combines all sections and labels what each row represents.")
+    if partial_suffix:
+        st.error("Critical section failure: this export is marked PARTIAL and must not be used as a complete CCASS dataset.")
     st.download_button(
         "Download All Data CSV",
         all_csv,
-        f"{base}_all_ccass_data.csv",
+        f"{base}_all_ccass_data{partial_suffix}.csv",
         "text/csv",
         key=f"{key_prefix}_{base}_all_ccass_data_csv",
         use_container_width=True,
@@ -1523,6 +1526,11 @@ parsed = parse_results(
     source_metadata=source_metadata,
 )
 apply_source_metadata(parsed, source_metadata, source_warnings)
+if getattr(parsed, "completeness_status", "complete") == "partial":
+    st.error(
+        "This fetch is PARTIAL: a critical section failed. The downloaded CSV is explicitly marked PARTIAL; "
+        "check raw previews and fetch errors before analysis."
+    )
 export_extras = {
     "events": st.session_state.get("events", {}).get("records", []),
     "events_url": events_url(lookup.issue_id) if lookup.issue_id else "",
@@ -1573,11 +1581,12 @@ st.subheader("Download This Stock")
 st.caption("One CSV contains Holdings, Changes, Big Changes and Concentration with source URL, fetched time and data meaning.")
 top_dl1, top_dl2 = st.columns([2, 1])
 top_csv = combined_stock_csv(parsed, results, export_extras)
+top_csv_name = f"{get_download_base(parsed)}_all_ccass_data{'.PARTIAL' if parsed.completeness_status == 'partial' else ''}.csv"
 with top_dl1:
     st.download_button(
         "Download All CCASS Data CSV",
         top_csv,
-        f"{get_download_base(parsed)}_all_ccass_data.csv",
+        top_csv_name,
         "text/csv",
         key=f"top_{get_download_base(parsed)}_all_ccass_data_csv",
         use_container_width=True,

@@ -2,6 +2,7 @@
 
 import pandas as pd
 
+from .date_semantics import date_semantics_header
 from .fetcher import FetchResult
 from .parser import ParsedCCASS, build_fetch_summary
 
@@ -12,6 +13,20 @@ REPORT_COLUMNS = {
     "concentration": ["Date", "Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"],
     "price_history": ["Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP", "price_source", "turnover_est", "vwap_est"],
 }
+
+
+BIG_CHANGE_REPORT_COLUMNS = [
+    "Date",
+    "Participant",
+    "CCASS ID",
+    "Change %",
+    "change_shares",
+    "change_shares_is_estimate",
+    "holding_after",
+    "stake_pct_of_issued",
+    "stake_pct_of_ccass",
+    "threshold_used",
+]
 
 
 def ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -38,6 +53,18 @@ def value_or_reason(value: str, failed: bool, label: str) -> str:
         return value
     if failed:
         return f"not available because {label} table parsing failed"
+    return "not available"
+
+
+def concentration_value_or_reason(value: str, holdings_failed: bool, concentration_failed: bool) -> str:
+    if value:
+        return value
+    if holdings_failed and concentration_failed:
+        return "not available because Holdings and Concentration table parsing failed"
+    if holdings_failed:
+        return "not available because Holdings parsing failed and Concentration supplied no value"
+    if concentration_failed:
+        return "not available because Concentration parsing failed and Holdings supplied no value"
     return "not available"
 
 
@@ -71,6 +98,22 @@ def concentration_change_lines(parsed: ParsedCCASS) -> str:
         "Stake in CCASS %": "Stake in CCASS % change",
     }
     return "\n".join(f"* {labels.get(key, key)}: {value}" for key, value in parsed.concentration_5day_change.items())
+
+
+def section_asof_table(parsed: ParsedCCASS) -> str:
+    rows = []
+    for section, details in (getattr(parsed, "section_asof", {}) or {}).items():
+        rows.append(
+            {
+                "Section": section,
+                "Latest date": details.get("latest_date", ""),
+                "Rows": details.get("row_count", 0),
+                "Date basis": details.get("date_basis", ""),
+                "Status": details.get("status", ""),
+                "Lag (trading days)": details.get("lag_trading_days", ""),
+            }
+        )
+    return markdown_table(pd.DataFrame(rows)) if rows else "* not available"
 
 
 def extras_report_sections(extras: dict | None) -> str:
@@ -137,6 +180,8 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 
     report = f"""# {parsed.stock_code or "Unknown stock code"} {parsed.stock_name or "Unknown stock name"}｜Webb-site CCASS 抽取結果
 
+{date_semantics_header(prefix="> ")}
+
 ## AI Analysis Ready Summary
 
 * Stock code: {parsed.stock_code}
@@ -147,12 +192,15 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * Mirror base URL: {parsed.mirror_base_url or "not recorded"}
 * Local history depth days: {parsed.history_depth_days}
 * DB restored from backup: {parsed.db_restored_from_backup}
+* DB snapshot ID: {getattr(parsed, "db_snapshot_id", "") or "not recorded"}
+* DB updated at: {getattr(parsed, "db_updated_at", "") or "not recorded"}
+* Latest DB CCASS date: {getattr(parsed, "db_latest_snapshot_date", "") or "not recorded"}
 * Holdings latest date: {value_or_reason(parsed.holdings_data_date, holdings_failed, "Holdings")}
 * Changes trading date: {value_or_reason(parsed.changes_trading_date, changes_failed, "Changes")}
-* Total in CCASS %: {parsed.total_in_ccass_pct}
-* Top 5 %: {parsed.top5_cumulative_pct}
-* Top 10 %: {parsed.top10_cumulative_pct}
-* Largest participant: {parsed.largest_participant}
+* Total in CCASS %: {value_or_reason(parsed.total_in_ccass_pct, holdings_failed, "Holdings")}
+* Top 5 %: {concentration_value_or_reason(parsed.top5_cumulative_pct, holdings_failed, conc_failed)}
+* Top 10 %: {concentration_value_or_reason(parsed.top10_cumulative_pct, holdings_failed, conc_failed)}
+* Largest participant: {value_or_reason(parsed.largest_participant, holdings_failed, "Holdings")}
 * Major increases:
 {bullet_list(parsed.major_increases)}
 * Major decreases:
@@ -178,7 +226,12 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * Mirror base URL: {parsed.mirror_base_url or "not recorded"}
 * Local history depth days: {parsed.history_depth_days}
 * DB restored from backup: {parsed.db_restored_from_backup}
+* DB snapshot ID: {getattr(parsed, "db_snapshot_id", "") or "not recorded"}
+* DB updated at: {getattr(parsed, "db_updated_at", "") or "not recorded"}
+* Latest DB CCASS date: {getattr(parsed, "db_latest_snapshot_date", "") or "not recorded"}
+* Latest DB price date: {getattr(parsed, "db_latest_price_date", "") or "not recorded"}
 * Fetched time: {parsed.fetched_time}
+* Listing date: {getattr(parsed, "listing_date", "") or "not available"}
 * Holdings data date: {value_or_reason(parsed.holdings_data_date, holdings_failed, "Holdings")}
 * Changes date range: {value_or_reason(parsed.changes_date_range, changes_failed, "Changes")}
 * Changes trading date: {value_or_reason(parsed.changes_trading_date, changes_failed, "Changes")}
@@ -195,6 +248,10 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 * HKEX announcements period: {getattr(hkex_announcements, "from_date", "")} to {getattr(hkex_announcements, "to_date", "")}
 * HKEX announcements total count: {getattr(hkex_announcements, "total_count", 0)}
 
+## Section As-Of Summary
+
+{section_asof_table(parsed)}
+
 ## HKEX Announcements
 
 {markdown_table(hkex_announcements.table) if hkex_announcements is not None and hkex_announcements.table is not None and not hkex_announcements.table.empty else "No HKEX announcements found or fetched."}
@@ -205,22 +262,22 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 
 ## Holdings Summary
 
-* Issued securities: {parsed.issued_securities}
-* Total in CCASS: {parsed.total_in_ccass}
-* Total in CCASS %: {parsed.total_in_ccass_pct}
-* Securities not in CCASS: {parsed.securities_not_in_ccass}
-* Largest participant: {parsed.largest_participant}
-* Top 5: {parsed.top5_cumulative_pct}
-* Top 10: {parsed.top10_cumulative_pct}
+* Issued securities: {value_or_reason(parsed.issued_securities, holdings_failed, "Holdings")}
+* Total in CCASS: {value_or_reason(parsed.total_in_ccass, holdings_failed, "Holdings")}
+* Total in CCASS %: {value_or_reason(parsed.total_in_ccass_pct, holdings_failed, "Holdings")}
+* Securities not in CCASS: {value_or_reason(parsed.securities_not_in_ccass, holdings_failed, "Holdings")}
+* Largest participant: {value_or_reason(parsed.largest_participant, holdings_failed, "Holdings")}
+* Top 5: {concentration_value_or_reason(parsed.top5_cumulative_pct, holdings_failed, conc_failed)}
+* Top 10: {concentration_value_or_reason(parsed.top10_cumulative_pct, holdings_failed, conc_failed)}
 
 ## Changes
 
-* Date range: {parsed.changes_date_range}
-* Trading date: {parsed.changes_trading_date}
-* Volume: {parsed.volume}
-* Turnover: {parsed.turnover}
-* Average price: {parsed.average_price}
-* Total CCASS change: {parsed.total_ccass_change}
+* Date range: {value_or_reason(parsed.changes_date_range, changes_failed, "Changes")}
+* Trading date: {value_or_reason(parsed.changes_trading_date, changes_failed, "Changes")}
+* Volume: {value_or_reason(parsed.volume, changes_failed, "Changes")}
+* Turnover: {value_or_reason(parsed.turnover, changes_failed, "Changes")}
+* Average price: {value_or_reason(parsed.average_price, changes_failed, "Changes")}
+* Total CCASS change: {value_or_reason(parsed.total_ccass_change, changes_failed, "Changes")}
 
 {markdown_table(parsed.changes_table, REPORT_COLUMNS["changes"])}
 
@@ -230,7 +287,11 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 
 ## Big Changes
 
-{markdown_table(parsed.big_changes_table)}
+* Change % basis: issued/outstanding shares.
+* Source threshold: movements greater than 0.25% of issued/outstanding shares.
+* `change_shares_is_estimate=true` means `change_shares` was calculated from the rounded source percentage and the stated `issued_shares_basis`; it is not source-reported.
+
+{markdown_table(parsed.big_changes_table, BIG_CHANGE_REPORT_COLUMNS)}
 
 """
     if parsed.transfer_flags:

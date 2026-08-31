@@ -7,11 +7,11 @@ Branch: `main`
 
 ## Important Status
 
-This document is written in the GitHub-linked repository. The second-round parser repair has been implemented and tested in this separate working copy, but has **not yet been merged into this repository or deployed**:
+This document is written in the GitHub-linked repository. The second-round parser repair has now been ported into this repository locally and passes the local regression suite. It is **not yet deployed**; the latest 08245-specific hardening remains a local commit until final review:
 
 `C:\Users\klcho\Documents\Codex\2026-05-25\full-stack-python-webb-site-ccass\webbsite-ccass-tool-current`
 
-Do not report the repair as production-complete until the changes are reviewed, ported/merged into this repo, tested here, committed, pushed, and deployed.
+Do not report the repair as production-complete until the changes are reviewed, committed, pushed, and deployed.
 
 ## Current Git State
 

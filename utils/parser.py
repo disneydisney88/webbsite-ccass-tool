@@ -2,15 +2,30 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Optional
 
 import pandas as pd
 from bs4 import BeautifulSoup
 
-from .fetcher import FetchResult
+from .date_semantics import (
+    SECTION_DATE_BASIS,
+    SETTLEMENT_NOTE,
+    annotate_records,
+    derive_dates,
+    trading_sessions_between,
+    unavailable_data_as_of,
+)
+from .fetcher import FetchResult, clean_stock_code
 
 
 SECTIONS = ["Company / orgdata", "Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+CCASS_ID_RE = re.compile(r"[A-Ca-c]\d{5}")
+
+
+class DateSanityError(ValueError):
+    """Raised when a parsed source date is impossible for the security."""
 
 
 @dataclass
@@ -35,13 +50,32 @@ class ParsedCCASS:
     mirror_base_url: str = ""
     history_depth_days: int = 0
     db_restored_from_backup: bool = False
+    db_snapshot_id: str = ""
+    db_updated_at: str = ""
+    db_latest_snapshot_date: str = ""
+    db_latest_price_date: str = ""
+    db_snapshot_rows: int = 0
+    db_price_rows: int = 0
     fetched_time: str = ""
+    listing_date: str = ""
     holdings_data_date: str = ""
+    holdings_implied_trade_date: str = ""
     changes_date_range: str = ""
     changes_trading_date: str = ""
+    changes_implied_trade_date: str = ""
     big_changes_latest_date: str = ""
+    big_changes_implied_trade_date: str = ""
     concentration_latest_date: str = ""
+    concentration_implied_trade_date: str = ""
     price_history_latest_date: str = ""
+    data_as_of_trading_date: str = ""
+    date_basis_by_section: dict[str, str] = field(default_factory=dict)
+    section_asof: dict[str, dict[str, Any]] = field(default_factory=dict)
+    settlement_note: str = SETTLEMENT_NOTE
+    default_pct_basis: str = "issued"
+    completeness_status: str = "complete"
+    critical_sections_failed: list[str] = field(default_factory=list)
+    non_ccass_table: pd.DataFrame = field(default_factory=pd.DataFrame)
     price_source: str = ""
     issued_securities: str = ""
     total_in_ccass: str = ""
@@ -82,6 +116,104 @@ def safe_str(value: Any) -> str:
     except (TypeError, ValueError):
         pass
     return str(value).strip()
+
+
+def clean_ccass_id(value: Any) -> str:
+    match = CCASS_ID_RE.search(safe_str(value))
+    return match.group(0).upper() if match else ""
+
+
+def clean_participant_name(value: Any) -> str:
+    text = compact_text(safe_str(value))
+    text = re.sub(
+        r"^name\s+of\s+ccass\s+participant\s*"
+        r"\(\*\s*for\s*consenting\s+investor\s+participants\s*\)\s*:?\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"^participant(?:\s+name|\s+id)?\s*:?\s*", "", text, flags=re.I)
+    trailing_the = re.fullmatch(r"(.+?)\s*\(THE\)", text, flags=re.I)
+    if trailing_the:
+        text = f"THE {trailing_the.group(1).strip()}"
+    if text.upper() == "THE HONGKONG AND SHANGHAI BANKING":
+        return "THE HONGKONG AND SHANGHAI BANKING CORPORATION LIMITED"
+    return text
+
+
+def participant_name_key(value: Any, strip_suffixes: bool = False) -> str:
+    text = clean_participant_name(value).upper()
+    text = re.sub(r"\(THE\)\s*$", "", text).strip()
+    text = re.sub(r"^THE\s+", "", text)
+    text = re.sub(r"[^A-Z0-9]+", " ", text).strip()
+    if strip_suffixes:
+        suffixes = (
+            " CORPORATION LIMITED",
+            " COMPANY LIMITED",
+            " CO LIMITED",
+            " LIMITED",
+            " LTD",
+        )
+        changed = True
+        while changed:
+            changed = False
+            for suffix in suffixes:
+                if text.endswith(suffix):
+                    text = text[: -len(suffix)].strip()
+                    changed = True
+                    break
+    return text
+
+
+def participant_directory_map(result: FetchResult | None) -> dict[str, tuple[str, str]]:
+    """Return exact and suffix-insensitive name keys -> (CCASS ID, name)."""
+    if result is None or not result.ok:
+        return {}
+    candidates: list[tuple[str, str]] = []
+    for raw_table in result.tables:
+        table = normalize_columns(raw_table)
+        id_col = pick_first_column(table, [["ccass id"], ["participant id"]])
+        name_col = pick_first_column(table, [["name"], ["participant"]])
+        if not id_col or not name_col:
+            continue
+        for _, row in table.iterrows():
+            ccass_id = clean_ccass_id(row.get(id_col))
+            name = clean_participant_name(row.get(name_col))
+            if ccass_id and name:
+                candidates.append((ccass_id, name))
+
+    mapping: dict[str, tuple[str, str]] = {}
+    base_counts: dict[str, int] = {}
+    for _, name in candidates:
+        base = participant_name_key(name, strip_suffixes=True)
+        if base:
+            base_counts[base] = base_counts.get(base, 0) + 1
+    for ccass_id, name in candidates:
+        exact = participant_name_key(name)
+        base = participant_name_key(name, strip_suffixes=True)
+        if exact:
+            mapping[exact] = (ccass_id, name)
+        if base and base_counts.get(base) == 1:
+            mapping[base] = (ccass_id, name)
+    return mapping
+
+
+def canonical_participant(
+    name: Any,
+    ccass_id: Any = "",
+    directory: dict[str, tuple[str, str]] | None = None,
+) -> tuple[str, str]:
+    cleaned_name = clean_participant_name(name)
+    cleaned_id = clean_ccass_id(ccass_id)
+    directory = directory or {}
+    for key in (
+        participant_name_key(cleaned_name),
+        participant_name_key(cleaned_name, strip_suffixes=True),
+    ):
+        if key and key in directory:
+            mapped_id, mapped_name = directory[key]
+            return cleaned_id or mapped_id, mapped_name
+    return cleaned_id, cleaned_name
 
 
 def compact_text(text: str) -> str:
@@ -144,11 +276,24 @@ def to_number(value: Any) -> Optional[float]:
         return None
 
 
+def to_int_number(value: Any) -> Optional[int]:
+    number = to_number(value)
+    return int(number) if number is not None else None
+
+
 def percent_text(value: Any) -> str:
     text = safe_str(value)
     if not text:
         return ""
     return text if "%" in text else f"{text}%"
+
+
+def _scaled_percentage(component: Any, base: Any) -> Optional[float]:
+    component_number = to_number(component)
+    base_number = to_number(base)
+    if component_number is None or base_number is None:
+        return None
+    return round(component_number * base_number / 100, 6)
 
 
 def parse_date_value(value: Any) -> Optional[pd.Timestamp]:
@@ -164,6 +309,11 @@ def parse_date_value(value: Any) -> Optional[pd.Timestamp]:
     if pd.isna(parsed):
         return None
     return parsed
+
+
+def normalized_date_text(value: Any) -> str:
+    parsed = parse_date_value(value)
+    return parsed.strftime("%Y-%m-%d") if parsed is not None else safe_str(value)
 
 
 def latest_date_from_column(df: pd.DataFrame, column: str) -> str:
@@ -306,11 +456,29 @@ def parse_company(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str,
     if not parsed.stock_name and not table.empty:
         joined = " ".join(table.head(3).fillna("").astype(str).to_numpy().ravel().tolist())
         parsed.stock_name = first_match(joined, [r"Name\s+(.+?)\s+Code", r"Issue\s+(.+?)\s+Code"])
+    parsed.stock_name = re.sub(r"\s*:\s*[A-Z]\s+[A-Z]{3}\s*$", "", compact_text(parsed.stock_name)).strip()
+    for raw_table in result.tables if result else []:
+        listed_table = normalize_columns(raw_table)
+        listed_col = pick_first_column(listed_table, [["listed"], ["listing date"]])
+        if not listed_col:
+            continue
+        for value in listed_table[listed_col].tolist():
+            normalized = normalized_date_text(value)
+            if ISO_DATE_RE.fullmatch(normalized):
+                parsed.listing_date = normalized
+                break
+        if parsed.listing_date:
+            break
     if result and result.ok and parse.status == "failed":
         parse.status = "success"
 
 
-def parse_holdings(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
+def parse_holdings(
+    result: FetchResult,
+    parsed: ParsedCCASS,
+    overrides: dict[str, int] | None,
+    directory: dict[str, tuple[str, str]] | None = None,
+) -> None:
     parse = SectionParse("Holdings")
     parsed.section_parses[parse.section] = parse
     table = get_selected_table(parse.section, result, overrides, parse)
@@ -337,11 +505,14 @@ def parse_holdings(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str
     if not holder_table.empty and {"Type of holder", "Holding"}.issubset(set(map(str, holder_table.columns))):
         total_rows = holder_table[holder_table["Type of holder"].astype(str).str.contains("Total", case=False, na=False)]
         outside_rows = holder_table[holder_table["Type of holder"].astype(str).str.contains("not in CCASS|outside", case=False, na=False)]
+        issued_rows = holder_table[holder_table["Type of holder"].astype(str).str.contains("Issued securities|Issued shares", case=False, na=False)]
         if not total_rows.empty:
             parsed.total_in_ccass = parsed.total_in_ccass or safe_str(total_rows.iloc[0].get("Holding"))
             parsed.total_in_ccass_pct = parsed.total_in_ccass_pct or percent_text(total_rows.iloc[0].get("Stake %", ""))
         if not outside_rows.empty:
             parsed.securities_not_in_ccass = parsed.securities_not_in_ccass or safe_str(outside_rows.iloc[0].get("Holding"))
+        if not issued_rows.empty:
+            parsed.issued_securities = parsed.issued_securities or safe_str(issued_rows.iloc[0].get("Holding"))
 
     rank_col = pick_first_column(table, [["rank"], ["#"]])
     participant_col = pick_first_column(table, [["name of ccass participant"], ["participant"], ["name"]])
@@ -357,14 +528,27 @@ def parse_holdings(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str
         return
 
     output = pd.DataFrame()
-    output["Rank"] = table[rank_col] if rank_col else range(1, len(table) + 1)
-    output["Participant"] = table[participant_col]
-    output["CCASS ID"] = table[ccass_col] if ccass_col else ""
+    output["Rank"] = table[rank_col].map(to_number) if rank_col else range(1, len(table) + 1)
+    raw_names = table[participant_col]
+    raw_ids = table[ccass_col] if ccass_col else pd.Series([""] * len(table), index=table.index)
+    canonical = [
+        canonical_participant(name, ccass_id, directory)
+        for name, ccass_id in zip(raw_names.tolist(), raw_ids.tolist())
+    ]
+    output["Participant"] = [item[1] for item in canonical]
+    output["CCASS ID"] = [item[0] for item in canonical]
     output["Holding"] = table[holding_col]
     output["Stake %"] = table[stake_col]
     output["Cumulative %"] = table[cumulative_col] if cumulative_col else ""
     output = output.dropna(how="all")
     output = output[output["Participant"].astype(str).str.strip().ne("")]
+    parsed.holdings_data_date = normalized_date_text(parsed.holdings_data_date)
+    output["Date"] = parsed.holdings_data_date
+    output["holding_shares"] = output["Holding"].map(to_int_number)
+    output["stake_pct_of_issued"] = output["Stake %"].map(to_number)
+    output["cumulative_pct_of_issued"] = output["Cumulative %"].map(to_number)
+    output["ccass_id"] = output["CCASS ID"]
+    output["participant_name"] = output["Participant"]
     parsed.holdings_table = output
 
     if parsed.holdings_table.empty:
@@ -380,7 +564,12 @@ def parse_holdings(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str
         parsed.top10_cumulative_pct = percent_text(parsed.holdings_table.iloc[9]["Cumulative %"])
 
 
-def parse_changes(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
+def parse_changes(
+    result: FetchResult,
+    parsed: ParsedCCASS,
+    overrides: dict[str, int] | None,
+    directory: dict[str, tuple[str, str]] | None = None,
+) -> None:
     parse = SectionParse("Changes")
     parsed.section_parses[parse.section] = parse
     table = get_selected_table(parse.section, result, overrides, parse)
@@ -418,13 +607,23 @@ def parse_changes(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str,
         return
 
     output = pd.DataFrame()
-    output["Participant"] = table[participant_col]
+    canonical = [canonical_participant(value, directory=directory) for value in table[participant_col].tolist()]
+    output["Participant"] = [item[1] for item in canonical]
+    output["CCASS ID"] = [item[0] for item in canonical]
     output["Change"] = table[change_col]
     output["Change %"] = table[change_pct_col] if change_pct_col else table[change_col]
     output["Holding after"] = table[holding_after_col] if holding_after_col else ""
     output["Stake after"] = table[stake_after_col] if stake_after_col else ""
     output = output.dropna(how="all")
     output = output[output["Participant"].astype(str).str.strip().ne("")]
+    parsed.changes_trading_date = normalized_date_text(parsed.changes_trading_date)
+    output["Date"] = parsed.changes_trading_date
+    output["change_shares"] = output["Change"].map(to_number)
+    output["change_pct_of_issued"] = output["Change %"].map(to_number)
+    output["holding_after_shares"] = output["Holding after"].map(to_number)
+    output["stake_after_pct_of_issued"] = output["Stake after"].map(to_number)
+    output["ccass_id"] = output["CCASS ID"]
+    output["participant_name"] = output["Participant"]
     parsed.changes_table = output
 
     if parsed.changes_table.empty:
@@ -486,7 +685,12 @@ def classify_changes(df: pd.DataFrame) -> list[str]:
     return flags
 
 
-def parse_big_changes(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
+def parse_big_changes(
+    result: FetchResult,
+    parsed: ParsedCCASS,
+    overrides: dict[str, int] | None,
+    directory: dict[str, tuple[str, str]] | None = None,
+) -> None:
     parse = SectionParse("Big Changes")
     parsed.section_parses[parse.section] = parse
     table = get_selected_table(parse.section, result, overrides, parse)
@@ -495,7 +699,7 @@ def parse_big_changes(result: FetchResult, parsed: ParsedCCASS, overrides: dict[
 
     date_col = pick_first_column(table, [["date"]])
     participant_col = pick_first_column(table, [["participant"], ["name"]])
-    shares_col = pick_first_column(table, [["change in shares"], ["shares"], ["holding change"]])
+    shares_col = pick_first_column(table, [["change in shares"], ["shares changed"], ["share change"]])
     change_col = shares_col or pick_first_column(table, [["change"]])
     change_pct_col = pick_first_column(table, [["change %"], ["% change"], ["%"]])
     if any(col is None for col in [date_col, participant_col, change_col]):
@@ -504,9 +708,12 @@ def parse_big_changes(result: FetchResult, parsed: ParsedCCASS, overrides: dict[
         return
 
     output = pd.DataFrame()
-    output["Raw Date"] = table[date_col]
-    output["Date"] = table[date_col].replace("", pd.NA).ffill()
-    output["Participant"] = table[participant_col]
+    raw_dates = table[date_col].map(safe_str)
+    output["Raw Date"] = raw_dates
+    output["Date"] = raw_dates.replace("", pd.NA).ffill().map(normalized_date_text)
+    canonical = [canonical_participant(value, directory=directory) for value in table[participant_col].tolist()]
+    output["Participant"] = [item[1] for item in canonical]
+    output["CCASS ID"] = [item[0] for item in canonical]
     if shares_col:
         output["Change in shares"] = table[shares_col]
         output["Change %"] = table[change_pct_col] if change_pct_col else ""
@@ -514,10 +721,81 @@ def parse_big_changes(result: FetchResult, parsed: ParsedCCASS, overrides: dict[
         output["Change %"] = table[change_pct_col] if change_pct_col else table[change_col]
     output = output.dropna(how="all")
     output = output[output["Participant"].astype(str).str.strip().ne("")]
-    columns = ["Date", "Participant"]
+    output["change_pct"] = output["Change %"].map(to_number)
+    output["change_pct_of_issued"] = output["change_pct"]
+    output["change_pct_basis"] = "issued_shares"
+    output["threshold_used"] = 0.25
+    output["threshold_basis"] = "pct_of_issued_shares"
+    output["row_meaning"] = (
+        "Daily participant movement greater than 0.25% of issued/outstanding shares; "
+        "Change % is measured against issued/outstanding shares."
+    )
+    output["ccass_id"] = output["CCASS ID"]
+    output["participant_name"] = output["Participant"]
+
+    issued_shares = to_number(parsed.issued_securities)
+    if shares_col:
+        output["change_shares"] = output["Change in shares"].map(to_number)
+        output["change_shares_is_estimate"] = False
+        output["change_shares_method"] = "source_reported"
+    elif issued_shares is not None:
+        output["change_shares"] = output["change_pct"].map(
+            lambda value: int(round(issued_shares * value / 100)) if value is not None else None
+        )
+        output["change_shares_is_estimate"] = True
+        output["change_shares_method"] = "rounded_change_pct_x_issued_shares_basis"
+    else:
+        output["change_shares"] = None
+        output["change_shares_is_estimate"] = True
+        output["change_shares_method"] = "unavailable_no_issued_shares_basis"
+    output["issued_shares_basis"] = int(issued_shares) if issued_shares is not None else None
+    output["issued_shares_basis_date"] = parsed.holdings_data_date or None
+
+    output["holding_after"] = None
+    output["stake_pct_of_issued"] = None
+    output["stake_pct_of_ccass"] = None
+    if not parsed.holdings_table.empty and parsed.holdings_data_date:
+        holdings_by_id = {
+            clean_ccass_id(row.get("CCASS ID") or row.get("ccass_id")): row
+            for _, row in parsed.holdings_table.iterrows()
+            if clean_ccass_id(row.get("CCASS ID") or row.get("ccass_id"))
+        }
+        total_in_ccass = to_number(parsed.total_in_ccass)
+        same_date = output["Date"].astype(str).eq(parsed.holdings_data_date)
+        for index in output.index[same_date]:
+            holding_row = holdings_by_id.get(clean_ccass_id(output.at[index, "CCASS ID"]))
+            if holding_row is None:
+                continue
+            holding_after = to_number(holding_row.get("Holding"))
+            output.at[index, "holding_after"] = int(holding_after) if holding_after is not None else None
+            output.at[index, "stake_pct_of_issued"] = to_number(holding_row.get("Stake %"))
+            if holding_after is not None and total_in_ccass:
+                output.at[index, "stake_pct_of_ccass"] = round(holding_after / total_in_ccass * 100, 6)
+
+    columns = ["Date", "Participant", "CCASS ID"]
     if "Change in shares" in output.columns:
         columns.append("Change in shares")
-    columns.append("Change %")
+    columns.extend(
+        [
+            "Change %",
+            "change_pct",
+            "change_pct_of_issued",
+            "change_pct_basis",
+            "change_shares",
+            "change_shares_is_estimate",
+            "change_shares_method",
+            "issued_shares_basis",
+            "issued_shares_basis_date",
+            "holding_after",
+            "stake_pct_of_issued",
+            "stake_pct_of_ccass",
+            "threshold_used",
+            "threshold_basis",
+            "row_meaning",
+            "ccass_id",
+            "participant_name",
+        ]
+    )
     parsed.big_changes_table = output[columns]
 
     if parsed.big_changes_table.empty:
@@ -570,12 +848,36 @@ def parse_concentration(result: FetchResult, parsed: ParsedCCASS, overrides: dic
         return
 
     output = pd.DataFrame()
-    output["Date"] = table[date_col]
+    output["Date"] = table[date_col].map(normalized_date_text)
     output["Top 5 %"] = table[top5_col]
     output["Top 10 %"] = table[top10_col]
     output["Top 10 + NCIP %"] = table[top10_ncip_col] if top10_ncip_col else ""
     output["Stake in CCASS %"] = table[stake_col] if stake_col else ""
     output = output.dropna(how="all")
+    output = output[output["Date"].astype(str).str.strip().ne("")]
+
+    value_columns = ["Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"]
+    duplicate_conflict_dates: set[str] = set()
+    for date, group in output.groupby("Date", sort=False, dropna=False):
+        if len(group) <= 1:
+            continue
+        signatures = {
+            tuple(safe_str(row.get(column)) for column in value_columns)
+            for _, row in group.iterrows()
+        }
+        if len(signatures) > 1:
+            duplicate_conflict_dates.add(safe_str(date))
+            parsed.analysis_warnings.append(
+                f"Concentration duplicate-date conflict: {date} has {len(group)} different rows; "
+                "only the first source row was retained for audit and excluded from analysis."
+            )
+    output = output.drop_duplicates(subset=["Date"], keep="first").reset_index(drop=True)
+    output["SUSPECT_DENOMINATOR"] = False
+    output["exclude_from_analysis"] = False
+    if duplicate_conflict_dates:
+        conflict_rows = output["Date"].astype(str).isin(duplicate_conflict_dates)
+        output.loc[conflict_rows, "SUSPECT_DENOMINATOR"] = True
+        output.loc[conflict_rows, "exclude_from_analysis"] = True
     parsed.concentration_table = output
 
     if parsed.concentration_table.empty:
@@ -585,8 +887,24 @@ def parse_concentration(result: FetchResult, parsed: ParsedCCASS, overrides: dic
 
     parsed.concentration_latest_date = latest_date_from_column(parsed.concentration_table, "Date")
     parse.latest_date = parsed.concentration_latest_date
-    parsed.concentration_5day_change = calculate_concentration_5day_change(parsed.concentration_table)
     validate_concentration(parsed)
+    parsed.concentration_table["top5_pct_of_ccass"] = parsed.concentration_table["Top 5 %"].map(to_number)
+    parsed.concentration_table["top10_pct_of_ccass"] = parsed.concentration_table["Top 10 %"].map(to_number)
+    parsed.concentration_table["top10_plus_ncip_pct_of_ccass"] = parsed.concentration_table[
+        "Top 10 + NCIP %"
+    ].map(to_number)
+    parsed.concentration_table["stake_pct_of_issued"] = parsed.concentration_table[
+        "Stake in CCASS %"
+    ].map(to_number)
+    parsed.concentration_table["top5_pct_of_issued"] = parsed.concentration_table.apply(
+        lambda row: _scaled_percentage(row.get("Top 5 %"), row.get("Stake in CCASS %")),
+        axis=1,
+    )
+    parsed.concentration_table["top10_pct_of_issued"] = parsed.concentration_table.apply(
+        lambda row: _scaled_percentage(row.get("Top 10 %"), row.get("Stake in CCASS %")),
+        axis=1,
+    )
+    parsed.concentration_5day_change = calculate_concentration_5day_change(parsed.concentration_table)
 
 
 def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
@@ -611,7 +929,7 @@ def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dic
         return
 
     output = pd.DataFrame()
-    output["Date"] = table[date_col]
+    output["Date"] = table[date_col].map(normalized_date_text)
     output["Close"] = table[close_col]
     output["Open"] = table[open_col] if open_col else ""
     output["High"] = table[high_col] if high_col else ""
@@ -649,6 +967,17 @@ def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dic
         parse.error = "Price History table parsing failed. Raw table previews are shown below."
         return
 
+    for date, group in parsed.price_history_table.groupby("Date", sort=False, dropna=False):
+        closes = {
+            value
+            for value in (to_number(item) for item in group["Close"].tolist())
+            if value is not None
+        }
+        if len(closes) > 1:
+            parsed.analysis_warnings.append(
+                f"Price History duplicate-date conflict: {date} has {len(closes)} different Close values."
+            )
+
     parsed.price_history_latest_date = latest_date_from_column(parsed.price_history_table, "Date")
     parse.latest_date = parsed.price_history_latest_date
     sorted_df = parsed.price_history_table.copy()
@@ -675,6 +1004,9 @@ def calculate_concentration_5day_change(df: pd.DataFrame) -> dict[str, str]:
     if df.empty or len(df) < 2:
         return {}
     sorted_df = df.copy()
+    if "exclude_from_analysis" in sorted_df.columns:
+        excluded = sorted_df["exclude_from_analysis"].fillna(False).astype(str).str.lower().isin({"true", "1", "yes"})
+        sorted_df = sorted_df[~excluded]
     sorted_df["_date"] = sorted_df["Date"].map(parse_date_value)
     sorted_df = sorted_df.dropna(subset=["_date"]).sort_values("_date", ascending=False)
     if len(sorted_df) < 2:
@@ -696,16 +1028,104 @@ def validate_concentration(parsed: ParsedCCASS) -> None:
     if parsed.concentration_table.empty:
         return
     value_columns = ["Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"]
+    for column in value_columns:
+        if column in parsed.concentration_table.columns:
+            parsed.concentration_table[column] = parsed.concentration_table[column].astype(object)
     for idx, row in parsed.concentration_table.iterrows():
         date = safe_str(row.get("Date")) or f"row {idx + 1}"
+        row_warnings: list[str] = []
         for column in value_columns:
             value = to_number(row.get(column))
             if value is None:
                 continue
             if value < 0 or value > 100:
-                parsed.analysis_warnings.append(
-                    f"Abnormal concentration value: {date} {column} = {row.get(column)}. Expected range is 0-100."
+                raw_column = f"{column} raw"
+                if raw_column not in parsed.concentration_table.columns:
+                    parsed.concentration_table[raw_column] = ""
+                parsed.concentration_table.at[idx, raw_column] = row.get(column)
+                parsed.concentration_table.at[idx, column] = "not available"
+                row_warnings.append(
+                    f"Abnormal concentration value withheld: {date} {column} = {row.get(column)}. "
+                    "Expected range is 0-100; possible share-capital consolidation/split denominator mismatch."
                 )
+        top5 = to_number(parsed.concentration_table.at[idx, "Top 5 %"])
+        top10 = to_number(parsed.concentration_table.at[idx, "Top 10 %"])
+        top10_ncip = to_number(parsed.concentration_table.at[idx, "Top 10 + NCIP %"])
+        if top5 is not None and top10 is not None and top5 > top10:
+            row_warnings.append(
+                f"Abnormal concentration hierarchy: {date} Top 5 % ({top5:g}) exceeds Top 10 % ({top10:g})."
+            )
+        if top10 is not None and top10_ncip is not None and top10 > top10_ncip:
+            row_warnings.append(
+                f"Abnormal concentration hierarchy: {date} Top 10 % ({top10:g}) exceeds Top 10 + NCIP % ({top10_ncip:g})."
+            )
+        if row_warnings:
+            parsed.concentration_table.at[idx, "SUSPECT_DENOMINATOR"] = True
+            parsed.concentration_table.at[idx, "exclude_from_analysis"] = True
+            for warning in row_warnings:
+                if warning not in parsed.analysis_warnings:
+                    parsed.analysis_warnings.append(warning)
+
+
+def mark_concentration_capital_change_dates(
+    parsed: ParsedCCASS,
+    share_changes: list[dict[str, Any]] | None,
+) -> None:
+    """Flag concentration rows whose denominator may straddle a capital event."""
+    if parsed.concentration_table.empty or not share_changes:
+        return
+
+    events: dict[str, list[str]] = {}
+    for record in share_changes:
+        if not isinstance(record, dict):
+            continue
+        event_date = normalized_date_text(
+            record.get("change_date")
+            or record.get("effective_date")
+            or record.get("date")
+        )
+        if not event_date:
+            continue
+        reason = safe_str(record.get("reason") or record.get("event") or "share capital change")
+        events.setdefault(event_date, []).append(reason)
+
+    if not events:
+        return
+    if "SUSPECT_DENOMINATOR" not in parsed.concentration_table.columns:
+        parsed.concentration_table["SUSPECT_DENOMINATOR"] = False
+    if "exclude_from_analysis" not in parsed.concentration_table.columns:
+        parsed.concentration_table["exclude_from_analysis"] = False
+
+    for idx, row in parsed.concentration_table.iterrows():
+        row_date = normalized_date_text(row.get("Date"))
+        if row_date not in events:
+            continue
+        parsed.concentration_table.at[idx, "SUSPECT_DENOMINATOR"] = True
+        parsed.concentration_table.at[idx, "exclude_from_analysis"] = True
+        reasons = "; ".join(dict.fromkeys(events[row_date]))
+        warning = (
+            f"SUSPECT_DENOMINATOR: Concentration percentages on {row_date} match a Share Capital "
+            f"Changes effective date ({reasons}) and are excluded from concentration-change analysis."
+        )
+        if warning not in parsed.analysis_warnings:
+            parsed.analysis_warnings.append(warning)
+
+    parsed.concentration_5day_change = calculate_concentration_5day_change(parsed.concentration_table)
+
+    # Keep suspect source rows visible, but do not promote them into the
+    # broker-level summary when a clean concentration observation exists.
+    if parsed.holdings_table.empty:
+        analysis_rows = parsed.concentration_table.copy()
+        excluded = analysis_rows["exclude_from_analysis"].fillna(False).astype(str).str.lower().isin(
+            {"true", "1", "yes"}
+        )
+        analysis_rows = analysis_rows[~excluded]
+        analysis_rows["_date"] = analysis_rows["Date"].map(parse_date_value)
+        analysis_rows = analysis_rows.dropna(subset=["_date"]).sort_values("_date", ascending=False)
+        if not analysis_rows.empty:
+            latest_valid = analysis_rows.iloc[0]
+            parsed.top5_cumulative_pct = percent_text(latest_valid.get("Top 5 %", ""))
+            parsed.top10_cumulative_pct = percent_text(latest_valid.get("Top 10 %", ""))
 
 
 def fallback_concentration_from_holdings(parsed: ParsedCCASS, result: FetchResult | None) -> None:
@@ -714,7 +1134,7 @@ def fallback_concentration_from_holdings(parsed: ParsedCCASS, result: FetchResul
     parsed.concentration_table = pd.DataFrame(
         [
             {
-                "Date": parsed.holdings_data_date or "Current holdings page",
+                "Date": parsed.holdings_data_date,
                 "Top 5 %": parsed.top5_cumulative_pct,
                 "Top 10 %": parsed.top10_cumulative_pct,
                 "Top 10 + NCIP %": "",
@@ -722,7 +1142,7 @@ def fallback_concentration_from_holdings(parsed: ParsedCCASS, result: FetchResul
             }
         ]
     )
-    parsed.concentration_latest_date = parsed.holdings_data_date or "Current holdings page"
+    parsed.concentration_latest_date = parsed.holdings_data_date
     section = parsed.section_parses.setdefault("Concentration", SectionParse("Concentration"))
     section.status = "partial success"
     section.latest_date = parsed.concentration_latest_date
@@ -742,6 +1162,272 @@ def add_cross_section_warnings(parsed: ParsedCCASS) -> None:
         parsed.analysis_warnings.append("Big Changes succeeded, but daily Changes failed. Recent daily movement cannot be confirmed.")
 
 
+def _annotate_frame_dates(
+    parsed: ParsedCCASS,
+    section: str,
+    frame: pd.DataFrame,
+    default_date: str = "",
+) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return frame
+    records, warnings = annotate_records(frame.to_dict(orient="records"), section, default_date=default_date)
+    for warning in warnings:
+        if warning not in parsed.analysis_warnings:
+            parsed.analysis_warnings.append(warning)
+    return pd.DataFrame(records)
+
+
+def apply_date_semantics(parsed: ParsedCCASS) -> None:
+    """Attach explicit source/implied dates once for every output path."""
+    parsed.date_basis_by_section = {
+        section.lower().replace(" ", "_"): basis
+        for section, basis in SECTION_DATE_BASIS.items()
+        if section in {"Holdings", "Changes", "Big Changes", "Concentration"}
+    }
+    parsed.settlement_note = SETTLEMENT_NOTE
+
+    parsed.holdings_table = _annotate_frame_dates(
+        parsed, "Holdings", parsed.holdings_table, parsed.holdings_data_date
+    )
+    parsed.changes_table = _annotate_frame_dates(
+        parsed, "Changes", parsed.changes_table, parsed.changes_trading_date
+    )
+    parsed.big_changes_table = _annotate_frame_dates(
+        parsed, "Big Changes", parsed.big_changes_table, parsed.big_changes_latest_date
+    )
+    parsed.concentration_table = _annotate_frame_dates(
+        parsed, "Concentration", parsed.concentration_table, parsed.concentration_latest_date
+    )
+    parsed.price_history_table = _annotate_frame_dates(
+        parsed, "Price History", parsed.price_history_table, parsed.price_history_latest_date
+    )
+
+    # Concentration is independently sufficient for Top 5 / Top 10. Do not
+    # blank these values merely because broker-level Holdings failed.
+    if not parsed.concentration_table.empty:
+        analysis_rows = parsed.concentration_table.copy()
+        if "exclude_from_analysis" in analysis_rows.columns:
+            excluded = analysis_rows["exclude_from_analysis"].fillna(False).astype(str).str.lower().isin(
+                {"true", "1", "yes"}
+            )
+            analysis_rows = analysis_rows[~excluded]
+        latest_concentration = analysis_rows.sort_values(
+            "ccass_date", ascending=False, na_position="last"
+        ).iloc[0] if not analysis_rows.empty else None
+        if latest_concentration is not None:
+            parsed.top5_cumulative_pct = parsed.top5_cumulative_pct or percent_text(
+                latest_concentration.get("Top 5 %", "")
+            )
+            parsed.top10_cumulative_pct = parsed.top10_cumulative_pct or percent_text(
+                latest_concentration.get("Top 10 %", "")
+            )
+
+    derivations = {
+        "Holdings": derive_dates(parsed.holdings_data_date, SECTION_DATE_BASIS["Holdings"]),
+        "Changes": derive_dates(parsed.changes_trading_date, SECTION_DATE_BASIS["Changes"]),
+        "Big Changes": derive_dates(parsed.big_changes_latest_date, SECTION_DATE_BASIS["Big Changes"]),
+        "Concentration": derive_dates(
+            parsed.concentration_latest_date, SECTION_DATE_BASIS["Concentration"]
+        ),
+    }
+    parsed.holdings_implied_trade_date = derivations["Holdings"].implied_trade_date
+    parsed.changes_implied_trade_date = derivations["Changes"].implied_trade_date
+    parsed.big_changes_implied_trade_date = derivations["Big Changes"].implied_trade_date
+    parsed.concentration_implied_trade_date = derivations["Concentration"].implied_trade_date
+
+    for section, derivation in derivations.items():
+        if derivation.ccass_date and derivation.warning:
+            warning = f"{section}: {derivation.warning}"
+            if warning not in parsed.analysis_warnings:
+                parsed.analysis_warnings.append(warning)
+
+    implied_trade_dates = [
+        value
+        for value in (
+            parsed.holdings_implied_trade_date,
+            parsed.concentration_implied_trade_date,
+            parsed.changes_implied_trade_date,
+            parsed.big_changes_implied_trade_date,
+        )
+        if value
+    ]
+    parsed.data_as_of_trading_date = max(
+        implied_trade_dates,
+        default=unavailable_data_as_of(
+            "no dated Holdings, Concentration, Changes or Big Changes row parsed"
+        ),
+    )
+
+
+def validate_date_sanity(parsed: ParsedCCASS) -> None:
+    """Fail loudly when a parsed row date cannot be trusted.
+
+    In particular, Webb-site Big Changes uses YY-MM-DD. A generic date parser can
+    silently reinterpret values such as 16-01-13 as 2013-01-16, so every parsed
+    row date is required to be ISO and bounded by listing/fetch dates.
+    """
+    lower = parse_date_value(parsed.listing_date)
+    upper = parse_date_value(parsed.fetched_time)
+    lower_date = lower.date() if lower is not None else None
+    upper_date = upper.date() if upper is not None else date.today()
+    frames = {
+        "Holdings": parsed.holdings_table,
+        "Changes": parsed.changes_table,
+        "Big Changes": parsed.big_changes_table,
+        "Concentration": parsed.concentration_table,
+        "Price History": parsed.price_history_table,
+    }
+    errors: list[str] = []
+    for section, frame in frames.items():
+        if frame is None or frame.empty:
+            continue
+        date_columns = [
+            column
+            for column in frame.columns
+            if str(column) == "Date"
+            or str(column).lower() in {"ccass_date", "issued_shares_basis_date"}
+        ]
+        for column in date_columns:
+            for row_number, value in enumerate(frame[column].tolist(), start=1):
+                text = safe_str(value)
+                if not text:
+                    continue
+                if not ISO_DATE_RE.fullmatch(text):
+                    errors.append(
+                        f"{section} row {row_number} {column}={text!r} is not ISO YYYY-MM-DD"
+                    )
+                    continue
+                try:
+                    value_date = date.fromisoformat(text)
+                except ValueError:
+                    errors.append(f"{section} row {row_number} {column}={text!r} is not a valid date")
+                    continue
+                if lower_date is not None and value_date < lower_date:
+                    errors.append(
+                        f"{section} row {row_number} {column}={text} is earlier than listing date "
+                        f"{lower_date.isoformat()}"
+                    )
+                if value_date > upper_date:
+                    errors.append(
+                        f"{section} row {row_number} {column}={text} is later than fetched date "
+                        f"{upper_date.isoformat()}"
+                    )
+    if errors:
+        message = "DATE_SANITY_ERROR: " + "; ".join(errors[:8])
+        if len(errors) > 8:
+            message += f"; and {len(errors) - 8} more invalid date value(s)"
+        if message not in parsed.analysis_warnings:
+            parsed.analysis_warnings.append(message)
+        raise DateSanityError(message)
+
+
+def validate_concentration_identity(parsed: ParsedCCASS, tolerance_pp: float = 0.15) -> None:
+    """Cross-check the two concentration denominators against Holdings."""
+    if parsed.holdings_table.empty or parsed.concentration_table.empty:
+        return
+    if not parsed.holdings_data_date:
+        return
+    matching = parsed.concentration_table[
+        parsed.concentration_table["Date"].astype(str).eq(parsed.holdings_data_date)
+    ]
+    if matching.empty:
+        return
+    row = matching.iloc[0]
+    if str(row.get("exclude_from_analysis", "")).strip().lower() in {"true", "1", "yes"}:
+        return
+    top5_ccass = to_number(row.get("Top 5 %"))
+    stake_in_ccass = to_number(row.get("Stake in CCASS %"))
+    holdings_top5 = sum(
+        value
+        for value in parsed.holdings_table.head(5)["Stake %"].map(to_number).tolist()
+        if value is not None
+    )
+    if top5_ccass is None or stake_in_ccass is None or not holdings_top5:
+        return
+    expected = top5_ccass * stake_in_ccass / 100
+    difference = abs(expected - holdings_top5)
+    parsed.concentration_table.loc[matching.index, "top5_identity_expected_pct_of_issued"] = round(expected, 6)
+    parsed.concentration_table.loc[matching.index, "top5_identity_holdings_pct_of_issued"] = round(
+        holdings_top5, 6
+    )
+    parsed.concentration_table.loc[matching.index, "top5_identity_difference_pp"] = round(difference, 6)
+    parsed.concentration_table.loc[matching.index, "top5_identity_check"] = (
+        "pass" if difference <= tolerance_pp else "warning"
+    )
+    if difference > tolerance_pp:
+        warning = (
+            f"Concentration/Holdings denominator check failed on {parsed.holdings_data_date}: "
+            f"Top 5 % of CCASS x Stake in CCASS % = {expected:.4f}% of issued shares, "
+            f"but Holdings top-five stake sums to {holdings_top5:.4f}% "
+            f"(difference {difference:.4f} percentage points)."
+        )
+        if warning not in parsed.analysis_warnings:
+            parsed.analysis_warnings.append(warning)
+
+
+def update_section_asof(parsed: ParsedCCASS) -> None:
+    frames = {
+        "Company / orgdata": parsed.company_table,
+        "Holdings": parsed.holdings_table,
+        "Changes": parsed.changes_table,
+        "Big Changes": parsed.big_changes_table,
+        "Concentration": parsed.concentration_table,
+        "Price History": parsed.price_history_table,
+    }
+    latest_values = {
+        "Company / orgdata": "",
+        "Holdings": parsed.holdings_data_date,
+        "Changes": parsed.changes_trading_date,
+        "Big Changes": parsed.big_changes_latest_date,
+        "Concentration": parsed.concentration_latest_date,
+        "Price History": parsed.price_history_latest_date,
+    }
+    parsed.section_asof = {}
+    for section, frame in frames.items():
+        parse = parsed.section_parses.get(section)
+        parsed.section_asof[section] = {
+            "latest_date": latest_values.get(section, ""),
+            "row_count": int(len(frame)) if frame is not None else 0,
+            "date_basis": SECTION_DATE_BASIS.get(section, "not_applicable"),
+            "status": parse.status if parse else ("success" if frame is not None and not frame.empty else "failed"),
+            "lag_trading_days": None,
+        }
+
+    dated = {
+        section: value
+        for section, value in latest_values.items()
+        if ISO_DATE_RE.fullmatch(safe_str(value))
+    }
+    if not dated:
+        return
+    reference_date = max(dated.values())
+    priority = ("Concentration", "Holdings", "Changes", "Price History", "Big Changes")
+    reference_section = next(
+        (section for section in priority if dated.get(section) == reference_date),
+        next(section for section, value in dated.items() if value == reference_date),
+    )
+    for section, section_date in dated.items():
+        sessions, calendar_warning = trading_sessions_between(section_date, reference_date)
+        if calendar_warning and not sessions:
+            warning = f"{section} freshness check unavailable: {calendar_warning}"
+            if warning not in parsed.analysis_warnings:
+                parsed.analysis_warnings.append(warning)
+            continue
+        lag = max(len(sessions) - 1, 0)
+        parsed.section_asof[section]["lag_trading_days"] = lag
+        parsed.section_asof[section]["reference_section"] = reference_section
+        parsed.section_asof[section]["reference_date"] = reference_date
+        if lag <= 3:
+            continue
+        uncovered_from = sessions[1] if len(sessions) > 1 else section_date
+        warning = (
+            f"{section} coverage ends {section_date}; it is {lag} XHKG trading sessions behind "
+            f"{reference_section} ({reference_date}). Movements from {uncovered_from} onward are not covered."
+        )
+        if warning not in parsed.analysis_warnings:
+            parsed.analysis_warnings.append(warning)
+
+
 def parse_results(
     issue_id: str,
     results: dict[str, FetchResult],
@@ -753,7 +1439,7 @@ def parse_results(
 ) -> ParsedCCASS:
     parsed = ParsedCCASS(
         issue_id=issue_id,
-        stock_code=stock_code,
+        stock_code=clean_stock_code(stock_code),
         id_lookup_method=id_lookup_method,
         id_lookup_status=id_lookup_status,
     )
@@ -768,22 +1454,33 @@ def parse_results(
         except (TypeError, ValueError):
             parsed.history_depth_days = 0
         parsed.db_restored_from_backup = bool(source_metadata.get("db_restored_from_backup", False))
+        parsed.db_snapshot_id = safe_str(source_metadata.get("db_snapshot_id"))
+        parsed.db_updated_at = safe_str(source_metadata.get("db_updated_at"))
+        parsed.db_latest_snapshot_date = safe_str(source_metadata.get("db_latest_snapshot_date"))
+        parsed.db_latest_price_date = safe_str(source_metadata.get("db_latest_price_date"))
+        try:
+            parsed.db_snapshot_rows = int(source_metadata.get("db_snapshot_rows") or 0)
+            parsed.db_price_rows = int(source_metadata.get("db_price_rows") or 0)
+        except (TypeError, ValueError):
+            parsed.db_snapshot_rows = 0
+            parsed.db_price_rows = 0
 
+    directory = participant_directory_map(results.get("Participants"))
     if results.get("Company / orgdata"):
         parse_company(results["Company / orgdata"], parsed, selected_indices)
     if results.get("Holdings"):
         if results["Holdings"].ok:
-            parse_holdings(results["Holdings"], parsed, selected_indices)
+            parse_holdings(results["Holdings"], parsed, selected_indices, directory)
         else:
             parsed.section_parses["Holdings"] = SectionParse("Holdings", status="failed", error=results["Holdings"].error_message)
     if results.get("Changes"):
         if results["Changes"].ok:
-            parse_changes(results["Changes"], parsed, selected_indices)
+            parse_changes(results["Changes"], parsed, selected_indices, directory)
         else:
             parsed.section_parses["Changes"] = SectionParse("Changes", status="failed", error=results["Changes"].error_message)
     if results.get("Big Changes"):
         if results["Big Changes"].ok:
-            parse_big_changes(results["Big Changes"], parsed, selected_indices)
+            parse_big_changes(results["Big Changes"], parsed, selected_indices, directory)
         else:
             parsed.section_parses["Big Changes"] = SectionParse("Big Changes", status="failed", error=results["Big Changes"].error_message)
     if results.get("Concentration"):
@@ -797,9 +1494,58 @@ def parse_results(
         else:
             parsed.section_parses["Price History"] = SectionParse("Price History", status="failed", error=results["Price History"].error_message)
 
+    for section, section_parse in parsed.section_parses.items():
+        result = results.get(section)
+        if not result or not result.ok or section_parse.status != "no matching table":
+            continue
+        message = section_parse.error or f"{section} table parsing failed. Raw table previews are shown below."
+        if not message.startswith("PARSE_MISS:"):
+            message = f"PARSE_MISS: {message}"
+        section_parse.error = message
+        result.error_type = "PARSE_MISS"
+        result.error_message = message
+
     fallback_concentration_from_holdings(parsed, results.get("Concentration"))
+    validate_concentration_identity(parsed)
+    apply_date_semantics(parsed)
+    validate_date_sanity(parsed)
+    update_section_asof(parsed)
     add_cross_section_warnings(parsed)
+    assess_completeness(parsed)
     return parsed
+
+
+def assess_completeness(parsed: ParsedCCASS) -> None:
+    """Classify output completeness so failed critical data cannot look complete."""
+    critical = ("Holdings", "Concentration", "Price History")
+    degraded = ("Changes", "Big Changes")
+    failed_critical = []
+    for section in critical:
+        result = parsed.section_parses.get(section)
+        frame = {
+            "Holdings": parsed.holdings_table,
+            "Concentration": parsed.concentration_table,
+            "Price History": parsed.price_history_table,
+        }[section]
+        if result is None or result.status not in {"success", "manually selected"} or frame.empty:
+            failed_critical.append(section)
+    parsed.critical_sections_failed = failed_critical
+    failed_degraded = [
+        section for section in degraded
+        if (parsed.section_parses.get(section) is None
+            or parsed.section_parses[section].status not in {"success", "manually selected"})
+    ]
+    if failed_critical:
+        parsed.completeness_status = "partial"
+        message = "Critical sections failed: " + ", ".join(failed_critical) + ". Primary export must be treated as partial."
+    elif failed_degraded:
+        parsed.completeness_status = "degraded"
+        message = "Degraded sections failed: " + ", ".join(failed_degraded) + "."
+    else:
+        parsed.completeness_status = "complete"
+        message = ""
+    if message and message not in parsed.analysis_warnings:
+        parsed.analysis_warnings.append(message)
 
 
 def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) -> pd.DataFrame:

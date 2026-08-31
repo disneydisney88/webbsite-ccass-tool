@@ -108,6 +108,16 @@ def ensure_db(path: Path = DB_PATH) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS stock_map (
+                code TEXT PRIMARY KEY,
+                issue_id TEXT NOT NULL,
+                name TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS price_history (
                 code TEXT NOT NULL,
                 date TEXT NOT NULL,
@@ -234,6 +244,36 @@ def load_stock_meta(code: str, path: Path = DB_PATH) -> dict[str, Any]:
     if not row:
         return {"name": "", "issued_shares": "", "issued_shares_as_of": ""}
     return {"name": row[0] or "", "issued_shares": row[1] or "", "issued_shares_as_of": row[2] or ""}
+
+
+def upsert_stock_map(code: str, issue_id: str, name: str = "", path: Path = DB_PATH) -> None:
+    ensure_db(path)
+    updated_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO stock_map (code, issue_id, name, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(code) DO UPDATE SET
+                issue_id=excluded.issue_id,
+                name=COALESCE(NULLIF(excluded.name, ''), stock_map.name),
+                updated_at=excluded.updated_at
+            """,
+            (code, issue_id, name, updated_at),
+        )
+        conn.commit()
+
+
+def load_stock_map(code: str, path: Path = DB_PATH) -> dict[str, Any]:
+    ensure_db(path)
+    with closing(sqlite3.connect(path)) as conn:
+        row = conn.execute(
+            "SELECT issue_id, name, updated_at FROM stock_map WHERE code=?",
+            (code,),
+        ).fetchone()
+    if not row:
+        return {"issue_id": "", "name": "", "updated_at": ""}
+    return {"issue_id": row[0] or "", "name": row[1] or "", "updated_at": row[2] or ""}
 
 
 def upsert_price_history(code: str, table: pd.DataFrame, source: str = "yahoo", path: Path = DB_PATH) -> int:

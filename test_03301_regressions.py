@@ -200,6 +200,8 @@ class Stock03301RegressionTests(unittest.TestCase):
         self.assertTrue(payload.startswith(b"\xef\xbb\xbf"))
         frame = pd.read_csv(BytesIO(payload), comment="#", dtype=str).fillna("")
         for column in frame.columns:
+            if column in {"issued_shares_at_date", "ccass_total_at_date"}:
+                continue
             if not (column == "Date" or column.lower().endswith("_date")):
                 continue
             for value in frame[column]:

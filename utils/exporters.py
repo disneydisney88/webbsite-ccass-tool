@@ -469,6 +469,8 @@ def _normalize_export_dates(frame: pd.DataFrame) -> pd.DataFrame:
     iso_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     for column in output.columns:
         label = str(column).strip().lower()
+        if label in {"issued_shares_at_date", "ccass_total_at_date"}:
+            continue
         if not (label == "date" or label.endswith("_date")):
             continue
         for index, value in output[column].items():

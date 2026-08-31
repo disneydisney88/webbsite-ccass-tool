@@ -7,17 +7,13 @@ Branch: `main`
 
 ## Important Status
 
-This document is written in the GitHub-linked repository. The second-round parser repair has now been ported into this repository locally and passes the local regression suite. It is **not yet deployed**; the latest 08245-specific hardening remains a local commit until final review:
-
-`C:\Users\klcho\Documents\Codex\2026-05-25\full-stack-python-webb-site-ccass\webbsite-ccass-tool-current`
-
-Do not report the repair as production-complete until the changes are reviewed, committed, pushed, and deployed.
+This document is written in the GitHub-linked repository. The parser repair and the 08245 golden-case follow-up are committed and pushed to `main`; deployment is still pending live verification. Local test success must not be treated as Streamlit Cloud or Render acceptance.
 
 ## Current Git State
 
 At handover time, the GitHub-linked repo is at:
 
-`6f65035 Restore public Webb history in hybrid source routing`
+`d79d11b Harden CCASS parsing and partial exports` (base repair commit; see the latest commit for the 08245 follow-up).
 
 Existing user work in the working tree must be preserved:
 
@@ -31,9 +27,9 @@ Existing user work in the working tree must be preserved:
 
 `stock_01592_ccass.json` is a user file. Do not edit, delete, reset, or include it in a repair commit.
 
-## Repair Scope Completed In Separate Copy
+## Repair Scope Completed
 
-The separate working copy contains the implementation for the 2026-08-26 repair specification:
+The repository now contains the implementation for the 2026-08-26 repair specification and the 08245 golden-case follow-up:
 
 - Big Changes dates are normalized to ISO `YYYY-MM-DD`, with forward-fill and date sanity checks.
 - Big Changes keeps percentage changes distinct from absolute share changes. Absolute shares are marked as source-reported or estimated; estimates are never presented as source-reported.
@@ -44,13 +40,20 @@ The separate working copy contains the implementation for the 2026-08-26 repair 
 - Exporters preserve UTF-8-SIG CSV output, ISO dates, raw previews, section metadata, and existing legacy columns.
 - API metadata and Big Changes records expose the new date/denominator/estimate fields without removing old field names.
 - Mirror fetching remains intact: requests is tried first and Playwright remains the fallback. No Cloudflare bypass was added.
+- Critical section failures are classified as `partial`; the Streamlit combined export is named `*.PARTIAL.csv` when Holdings, Concentration, or Price History is unavailable.
+- Holdings exports include `shares_held`, `issued_shares_at_date`, `ccass_total_at_date`, and participant `last_change_date` when supplied by the source.
+- Big Changes preserves explicit CCASS IDs and the golden 08245 regression fixture is offline-only.
+
+Still open from the 08245 brief: independent Non-CCASS time-series output, structured warning records, corporate-action adjacency flags, and deployment-environment Playwright verification.
 
 ## Verification Evidence
 
-Completed in the separate copy:
+Completed locally in the GitHub-linked repo:
 
 - `python -m py_compile app.py api.py utils/parser.py utils/exporters.py utils/snapshot_db.py`
-- Full test suite: `164 tests OK`
+- Full test suite: `150 tests OK` after adding the 08245 regression; the previous `148` run did not include that test.
+- The separate copy's `164` count included 13 tests from four files not present in this repo at that time (`test_08191_regressions.py`, `test_date_ranges.py`, `test_report_partial.py`, `test_source_routing.py`) plus three count differences; those files were not silently claimed as ported.
+- 08245 golden regression: `2 tests OK`, using an offline fixture and no live fetch.
 - 03301 regression tests: `6 tests OK`
 - 08191 regression tests: `42 tests OK` in the relevant run
 - Generated CSV has UTF-8-SIG BOM (`EF BB BF`) and generated Excel opens with separate section sheets.
@@ -85,6 +88,7 @@ Main implementation files in the separate copy:
 - `API_README.md`
 - `README.md`
 - `test_03301_regressions.py`
+- `test_08245_regressions.py`
 
 The target repository has its own later source-router, snapshot, auth, and error changes. Port the repair by comparing files and applying compatible hunks; do not copy the separate tree over the target repository wholesale.
 
@@ -99,7 +103,7 @@ The target repository has its own later source-router, snapshot, auth, and error
 7. Inspect generated CSV for UTF-8-SIG BOM, ISO dates, section labels, source URLs, fetch time, warnings, and no mixed-column shifts.
 8. Stage only repair files and tests. Do not stage `stock_01592_ccass.json` or unrelated user modifications.
 9. Commit with a clear message such as `Repair CCASS section dates and denominator validation`.
-10. Push `main`, then verify Render, Streamlit, API, and MCP separately.
+10. Push `main`, then verify Render, Streamlit, API, and MCP separately. In particular, run 08245 on Streamlit Cloud and confirm whether Holdings/Changes use Playwright or a local fallback; `partial` must remain visible if browser dependencies are unavailable.
 
 ## Acceptance Checks
 

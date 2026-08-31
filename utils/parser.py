@@ -538,6 +538,8 @@ def parse_holdings(
     output["Participant"] = [item[1] for item in canonical]
     output["CCASS ID"] = [item[0] for item in canonical]
     output["Holding"] = table[holding_col]
+    last_change_col = pick_first_column(table, [["last change"], ["last_change"], ["latest change"]])
+    output["Last change"] = table[last_change_col].map(normalized_date_text) if last_change_col else ""
     output["Stake %"] = table[stake_col]
     output["Cumulative %"] = table[cumulative_col] if cumulative_col else ""
     output = output.dropna(how="all")
@@ -545,7 +547,11 @@ def parse_holdings(
     parsed.holdings_data_date = normalized_date_text(parsed.holdings_data_date)
     output["Date"] = parsed.holdings_data_date
     output["holding_shares"] = output["Holding"].map(to_int_number)
+    output["shares_held"] = output["holding_shares"]
+    output["last_change_date"] = output["Last change"]
     output["stake_pct_of_issued"] = output["Stake %"].map(to_number)
+    output["issued_shares_at_date"] = to_int_number(parsed.issued_securities) if parsed.issued_securities else pd.NA
+    output["ccass_total_at_date"] = to_int_number(parsed.total_in_ccass) if parsed.total_in_ccass else pd.NA
     output["cumulative_pct_of_issued"] = output["Cumulative %"].map(to_number)
     output["ccass_id"] = output["CCASS ID"]
     output["participant_name"] = output["Participant"]
@@ -699,6 +705,7 @@ def parse_big_changes(
 
     date_col = pick_first_column(table, [["date"]])
     participant_col = pick_first_column(table, [["participant"], ["name"]])
+    ccass_col = pick_first_column(table, [["ccass id"], ["participant id"], ["id"]])
     shares_col = pick_first_column(table, [["change in shares"], ["shares changed"], ["share change"]])
     change_col = shares_col or pick_first_column(table, [["change"]])
     change_pct_col = pick_first_column(table, [["change %"], ["% change"], ["%"]])
@@ -711,7 +718,11 @@ def parse_big_changes(
     raw_dates = table[date_col].map(safe_str)
     output["Raw Date"] = raw_dates
     output["Date"] = raw_dates.replace("", pd.NA).ffill().map(normalized_date_text)
-    canonical = [canonical_participant(value, directory=directory) for value in table[participant_col].tolist()]
+    raw_ids = table[ccass_col].tolist() if ccass_col else [""] * len(table)
+    canonical = [
+        canonical_participant(value, ccass_id, directory)
+        for value, ccass_id in zip(table[participant_col].tolist(), raw_ids)
+    ]
     output["Participant"] = [item[1] for item in canonical]
     output["CCASS ID"] = [item[0] for item in canonical]
     if shares_col:
@@ -904,6 +915,10 @@ def parse_concentration(result: FetchResult, parsed: ParsedCCASS, overrides: dic
         lambda row: _scaled_percentage(row.get("Top 10 %"), row.get("Stake in CCASS %")),
         axis=1,
     )
+    issued = to_int_number(parsed.issued_securities) if parsed.issued_securities else pd.NA
+    ccass_total = to_int_number(parsed.total_in_ccass) if parsed.total_in_ccass else pd.NA
+    parsed.concentration_table["issued_shares_at_date"] = issued
+    parsed.concentration_table["ccass_total_at_date"] = ccass_total
     parsed.concentration_5day_change = calculate_concentration_5day_change(parsed.concentration_table)
 
 

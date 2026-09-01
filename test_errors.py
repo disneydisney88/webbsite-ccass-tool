@@ -2,6 +2,7 @@
 
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import pandas as pd
 import api
@@ -9,6 +10,7 @@ import utils.source_router as source_router
 from utils.fetcher import FetchResult, IssueLookup, fetch_with_requests, webb_database_cookie_value
 from utils.errors import classify_fetch_message, errors_from_fetch_summary, structured_error
 from utils.parser import ParsedCCASS, build_fetch_summary
+from utils.exporters import _section_context, combined_stock_csv
 from utils.source_router import SourceBundle, fetch_hybrid_bundle
 
 
@@ -275,6 +277,57 @@ class FetchDiagnosticsTest(unittest.TestCase):
         ):
             api.build_base_payload("01592", timeout=10)
         parse_results.assert_called_once()
+
+    def test_minimal_resolver_failure_preserves_fetch_summary(self):
+        failed_company = FetchResult(
+            name="Company / orgdata",
+            url="https://webb-database.com/dbpub/orgdata.asp?code=08245&Submit=current",
+            ok=False,
+            status=200,
+            error_type="JS_CHALLENGE",
+            error_message="Upstream returned a JavaScript cookie/reload challenge",
+        )
+        lookup = IssueLookup(stock_code="08245", status="failed", result=failed_company)
+        with patch("api.cache_get", return_value=None), patch("api.cache_set"), patch(
+            "api.resolve_issue_id", return_value=lookup
+        ):
+            payload = api.build_base_payload("08245", timeout=10)
+        summary = payload["exported"]["fetch_summary"]
+        self.assertTrue(summary)
+        self.assertEqual(summary[0]["section"], "Company / orgdata")
+        self.assertEqual(summary[0]["error_type"], "JS_CHALLENGE")
+        self.assertEqual(summary[0]["status_code"], 200)
+        self.assertIn("JavaScript cookie/reload challenge", summary[0]["error_message"])
+        self.assertEqual(summary[0]["url"], failed_company.url)
+
+    def test_minimal_payload_always_has_fetch_summary_key(self):
+        payload = api.minimal_base_payload("08245", None, ["unresolved"])
+        self.assertIn("fetch_summary", payload["exported"])
+        self.assertEqual(payload["exported"]["fetch_summary"], [])
+
+    def test_legacy_result_without_attempted_sources_is_safe_in_exporters(self):
+        parsed = ParsedCCASS(stock_code="08245", issue_id="15949")
+        legacy_result = SimpleNamespace(
+            url="https://example.test/holdings",
+            final_url="",
+            ok=True,
+            error_message="",
+            method="fixture",
+            status=200,
+            error_type="",
+            fallback_method_used="",
+        )
+        context = _section_context(
+            parsed,
+            "Holdings",
+            "fixture holdings",
+            "2026-08-28",
+            legacy_result,
+            0,
+        )
+        self.assertEqual(context["fetch_status"], "no_matching_table")
+        output = combined_stock_csv(parsed, {"Holdings": legacy_result})
+        self.assertIsInstance(output, bytes)
 
 
 class HealthUpstreamsTest(unittest.TestCase):

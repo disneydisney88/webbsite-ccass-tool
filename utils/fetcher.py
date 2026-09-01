@@ -116,7 +116,7 @@ class FetchResult:
             "error_type": self.error_type,
             "error_message": self.error_message,
             "response_snippet": self.response_snippet,
-            "attempted_sources": self.attempted_sources,
+            "attempted_sources": getattr(self, "attempted_sources", []),
         }
 
 

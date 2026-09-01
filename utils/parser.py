@@ -1580,10 +1580,11 @@ def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) ->
         error = parse.error or (result.error_message if result and not result.ok else "")
         if error and result and not result.ok and result.error_type and result.error_type not in error:
             error = f"{result.error_type}: {error}"
-        if not error and result and result.attempted_sources:
+        attempted_sources = getattr(result, "attempted_sources", []) if result else []
+        if not error and attempted_sources:
             failures = [
                 f"{item.get('error_type') or 'error'}: {item.get('error_message') or 'remote refresh failed'}"
-                for item in result.attempted_sources
+                for item in attempted_sources
                 if not item.get("ok")
             ]
             if failures:

@@ -343,10 +343,11 @@ def _section_context(
     status = _section_fetch_status(result, row_count)
     parse_message = _section_parse_message(parsed, section)
     error_message = str(result.error_message or "") if result else ""
-    if not error_message and result:
+    attempted_sources = getattr(result, "attempted_sources", []) if result else []
+    if not error_message and attempted_sources:
         failures = [
             f"{item.get('error_type') or 'error'}: {item.get('error_message') or 'remote refresh failed'}"
-            for item in result.attempted_sources
+            for item in attempted_sources
             if not item.get("ok")
         ]
         if failures:

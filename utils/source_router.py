@@ -343,7 +343,14 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
         elif local_result is None or not local_result.ok:
             bundle.results[section] = result
         else:
-            local_result.attempted_sources.append(
+            attempted_sources = getattr(local_result, "attempted_sources", None)
+            if attempted_sources is None:
+                attempted_sources = []
+                try:
+                    local_result.attempted_sources = attempted_sources
+                except AttributeError:
+                    pass
+            attempted_sources.append(
                 {
                     "source": "mirror",
                     "url": result.url,

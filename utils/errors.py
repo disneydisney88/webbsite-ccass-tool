@@ -22,6 +22,7 @@ RETRYABLE = {
     "AUTH_FAILED": False,
     "ISSUE_LOOKUP_FAILED": True,
     "ISSUE_ID_NOT_FOUND": False,
+    "ISSUE_ID_UNRESOLVED": True,
 }
 
 
@@ -36,6 +37,8 @@ def structured_error(error_code: str, message: str) -> dict[str, Any]:
 def classify_fetch_message(error_type: str | None, message: str | None) -> str:
     """Map a FetchResult's error_type/message to an error_code."""
     text = f"{error_type or ''} {message or ''}".lower()
+    if "issue id unresolved" in text or "no resolver result" in text:
+        return "ISSUE_ID_UNRESOLVED"
     if "timeoutbudget" in text or "budget exhausted" in text:
         return "COLD_START"
     if "timeout" in text or "timed out" in text:

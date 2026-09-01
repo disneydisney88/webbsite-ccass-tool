@@ -162,6 +162,7 @@ class StockMetadata(BaseModel):
     history_depth_days: int = Field(default=0, ge=0)
     db_restored_from_backup: bool = False
     price_source: str = ""
+    served_from_cache: bool = False
 
 
 class HoldingsSummary(BaseModel):
@@ -461,18 +462,46 @@ def make_lookup_from_issue_id(issue_id: str, stock_code: str = "") -> IssueLooku
     )
 
 
+CRITICAL_CACHE_SECTIONS = {"Holdings", "Concentration", "Price History"}
+
+
+def _payload_is_cacheable(payload: dict[str, Any]) -> bool:
+    """Cache only payloads whose critical sections are usable."""
+    if payload.get("ok") is False:
+        return False
+    exported = payload.get("exported") or {}
+    if exported.get("ok") is False:
+        return False
+    for row in exported.get("fetch_summary") or []:
+        section = str(row.get("Section") or row.get("section") or "")
+        status = str(row.get("Status") or row.get("fetch_status") or row.get("ok") or "").lower()
+        if section in CRITICAL_CACHE_SECTIONS and (status in {"failed", "false"} or row.get("ok") is False):
+            return False
+    return bool((exported.get("metadata") or {}).get("issue_id"))
+
+
+def _set_served_from_cache(payload: dict[str, Any], served: bool) -> dict[str, Any]:
+    exported = payload.setdefault("exported", {})
+    metadata = exported.setdefault("metadata", {})
+    metadata["served_from_cache"] = bool(served)
+    return payload
+
+
 def cache_get(stock_code: str) -> dict[str, Any] | None:
     cached = _stock_cache.get(stock_code)
     if not cached:
         return None
     cached_at, payload = cached
-    if time.monotonic() - cached_at > CACHE_TTL_SECONDS:
+    if time.monotonic() - cached_at > CACHE_TTL_SECONDS or not _payload_is_cacheable(payload):
         _stock_cache.pop(stock_code, None)
         return None
     return copy.deepcopy(payload)
 
 
 def cache_set(stock_code: str, payload: dict[str, Any]) -> None:
+    if not _payload_is_cacheable(payload):
+        _stock_cache.pop(stock_code, None)
+        return
     _stock_cache[stock_code] = (time.monotonic(), copy.deepcopy(payload))
 
 
@@ -568,14 +597,16 @@ def build_base_payload(
     timeout: int,
     headless: bool = True,
     source_preference: str = "auto",
+    bypass_cache: bool = False,
 ) -> dict[str, Any]:
     stock_code = clean_stock_code(stock_code)
     if not stock_code:
         raise HTTPException(status_code=400, detail="Provide stock_code.")
 
-    cached = cache_get(stock_code)
+    bypass_cache = bypass_cache or os.getenv("CCASS_CACHE_BYPASS", "").strip().lower() in {"1", "true", "yes", "on"}
+    cached = None if bypass_cache else cache_get(stock_code)
     if cached:
-        return cached
+        return copy.deepcopy(_set_served_from_cache(cached, True))
 
     resolved_lookup = resolve_issue_id(stock_code, timeout=min(timeout, 12), headless=headless)
     if resolved_lookup.status != "success" or not resolved_lookup.issue_id:
@@ -600,6 +631,7 @@ def build_base_payload(
             }
         )
         payload["exported"]["errors"] = [structured_error("ISSUE_ID_NOT_FOUND", warning)]
+        _set_served_from_cache(payload, False)
         cache_set(stock_code, payload)
         return copy.deepcopy(payload)
 
@@ -618,6 +650,7 @@ def build_base_payload(
         )
         if probe.get("error_type") == "MIRROR_BLOCKED" or probe.get("status_code") in {402, 403}:
             payload = probe_failure_base_payload(stock_code=stock_code, issue_id=known_issue_id, probe=probe)
+            _set_served_from_cache(payload, False)
             cache_set(stock_code, payload)
             return copy.deepcopy(payload)
 
@@ -633,7 +666,13 @@ def build_base_payload(
     requires_issue_id = source_name == "mirror" or not source_name
     if lookup.status != "success" or (requires_issue_id and not lookup.issue_id):
         warning = lookup.message or "Could not resolve Webb-site issue ID within the API timeout budget."
-        payload = minimal_base_payload(stock_code=stock_code, issue_id="", warnings=[f"Issue lookup failed: {warning}"])
+        payload = minimal_base_payload(
+            stock_code=stock_code,
+            issue_id=lookup.issue_id,
+            warnings=[f"Issue lookup failed: {warning}"],
+            results=bundle.results,
+        )
+        _set_served_from_cache(payload, False)
         cache_set(stock_code, payload)
         return payload
 
@@ -656,6 +695,7 @@ def build_base_payload(
         exported["metadata"].update(bundle.metadata)
 
     payload = {"exported": exported, "issue_id": lookup.issue_id}
+    _set_served_from_cache(payload, False)
     cache_set(stock_code, payload)
     return copy.deepcopy(payload)
 
@@ -695,6 +735,7 @@ def minimal_exported_payload(
             "mirror_base_url": "",
             "history_depth_days": 0,
             "db_restored_from_backup": False,
+            "served_from_cache": False,
         },
         "holdings": [],
         "changes": [],
@@ -1156,9 +1197,16 @@ def build_stock_payload(
     big_changes_limit: int = 10,
     concentration_limit: int = 15,
     headless: bool = True,
+    bypass_cache: bool = False,
     source_preference: str = "sdw",
 ) -> dict[str, Any]:
-    base = build_base_payload(stock_code=stock_code, timeout=timeout, headless=headless, source_preference=source_preference)
+    base = build_base_payload(
+        stock_code=stock_code,
+        timeout=timeout,
+        headless=headless,
+        source_preference=source_preference,
+        bypass_cache=bypass_cache,
+    )
     exported = base.get("exported", {})
     metadata = exported.get("metadata", {})
 
@@ -1226,6 +1274,7 @@ def build_stock_payload(
                 "mirror_status": metadata.get("mirror_status", ""),
                 "mirror_base_url": metadata.get("mirror_base_url", ""),
                 "history_depth_days": int(metadata.get("history_depth_days") or 0),
+                "served_from_cache": bool(metadata.get("served_from_cache", False)),
                 "db_restored_from_backup": bool(metadata.get("db_restored_from_backup", False)),
                 "price_source": metadata.get("price_source", ""),
             },
@@ -2302,6 +2351,7 @@ def get_stock(
     stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
     timeout: int = Query(30, ge=10, le=35, description="Overall compact API timeout budget in seconds."),
     holdings_limit: int = Query(15, ge=1, le=100, description="Maximum holdings rows returned."),
+    bypass_cache: bool = Query(False, description="Bypass the in-memory stock payload cache for diagnostics."),
     changes_limit: int = Query(20, ge=1, le=100, description="Maximum changes rows returned."),
     big_changes_limit: int = Query(10, ge=1, le=100, description="Maximum big changes rows returned."),
     concentration_limit: int = Query(15, ge=1, le=100, description="Maximum concentration rows returned."),
@@ -2318,6 +2368,7 @@ def get_stock(
         big_changes_limit=big_changes_limit,
         concentration_limit=concentration_limit,
         headless=True,
+        bypass_cache=bypass_cache,
     )
     if format.lower() in {"markdown", "md"}:
         return PlainTextResponse(compact_payload_to_markdown(payload), media_type="text/markdown; charset=utf-8")

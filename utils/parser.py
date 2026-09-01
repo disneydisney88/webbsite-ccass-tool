@@ -1569,7 +1569,7 @@ def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) ->
     resolver_error = ""
     if resolver_result and not resolver_result.ok:
         resolver_error = resolver_result.error_message or resolver_result.error_type or "resolver failed"
-    elif not results:
+    elif not parsed.issue_id:
         resolver_error = "no resolver result was retained"
     for section in SECTIONS:
         result = results.get(section)
@@ -1590,11 +1590,7 @@ def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) ->
             if failures:
                 error = "Remote refresh failed; local data retained: " + "; ".join(failures)
         if not error and status in {"failed", "no matching table", "partial success"}:
-            error = (
-                f"Issue ID unresolved: {resolver_error}"
-                if resolver_error and section != "Company / orgdata"
-                else "Parsed table unavailable; inspect raw table preview"
-            )
+            error = f"Issue ID unresolved: {resolver_error}" if resolver_error else "No fetch result was retained for this section."
         rows.append(
             {
                 "Section": section,

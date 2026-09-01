@@ -253,13 +253,26 @@ def _persist_stock_mapping(code: str, lookup: IssueLookup, stock_name: str = "")
 
 def fetch_local_db_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, mirror_status: str = "") -> SourceBundle:
     code = clean_stock_code(stock_code)
-    resolved_issue_id = issue_id or issue_id_for_stock(code)
+    cached_mapping = load_stock_map(code)
+    resolved_issue_id = issue_id or str(cached_mapping.get("issue_id") or "")
+    lookup_result = None
+    if resolved_issue_id:
+        lookup_result = FetchResult(
+            name="Company / orgdata",
+            url=f"local_db://stock_map/{code}",
+            final_url=f"local_db://stock_map/{code}",
+            method="cache",
+            ok=True,
+            status=200,
+            tables=[pd.DataFrame([{"Code": code, "Name": cached_mapping.get("name", "")}])],
+        )
     lookup = IssueLookup(
         stock_code=code,
         issue_id=resolved_issue_id,
-        method="cache" if load_stock_map(code).get("issue_id") else ("known mapping fallback" if issue_id_for_stock(code) else "local stock code"),
+        method="cache" if cached_mapping.get("issue_id") else ("known mapping fallback" if issue_id_for_stock(code) else "local stock code"),
         status="success" if code and resolved_issue_id else "failed",
         message="Local CCASS snapshot DB selected; live HKEX SDW scraping is disabled.",
+        result=lookup_result,
     )
     warnings: list[str] = []
     if not code:
@@ -288,9 +301,12 @@ def fetch_local_db_bundle(stock_code: str, issue_id: str = "", timeout: int = 30
     _persist_stock_mapping(code, lookup, built.stock_name)
     if built.history_depth_days <= 1 and built.latest_date:
         warnings.append(f"History limited to local snapshots since {built.latest_date}; mirror historical data unavailable")
+    local_results = dict(built.results)
+    if lookup_result is not None and "Company / orgdata" not in local_results:
+        local_results["Company / orgdata"] = lookup_result
     return SourceBundle(
         lookup=lookup,
-        results=built.results,
+        results=local_results,
         metadata={
             "source": "local_db",
             "mirror_status": mirror_status or "not_used",

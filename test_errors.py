@@ -22,11 +22,16 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(classify_fetch_message("ConnectionError", "connection refused"), "SOURCE_FETCH_FAILED")
         self.assertEqual(classify_fetch_message("HTTPError", "403 Forbidden"), "SOURCE_FETCH_FAILED")
         self.assertEqual(classify_fetch_message("SOURCE_CHALLENGE", "cookie/reload challenge"), "SOURCE_CHALLENGE")
+        self.assertEqual(
+            classify_fetch_message("", "Issue ID unresolved: no resolver result was retained"),
+            "ISSUE_ID_UNRESOLVED",
+        )
 
     def test_structured_error_retry_flag(self):
         self.assertTrue(structured_error("COLD_START", "x")["retry_recommended"])
         self.assertFalse(structured_error("PARSE_ERROR", "x")["retry_recommended"])
         self.assertFalse(structured_error("AUTH_FAILED", "x")["retry_recommended"])
+        self.assertTrue(structured_error("ISSUE_ID_UNRESOLVED", "x")["retry_recommended"])
 
 
 class FetchSummaryErrorsTest(unittest.TestCase):
@@ -252,6 +257,45 @@ class FetchDiagnosticsTest(unittest.TestCase):
         ):
             bundle = source_router.fetch_local_db_bundle("08245")
         self.assertEqual(bundle.lookup.status, "failed")
+
+    def test_local_stock_map_lookup_retains_success_result(self):
+        built = type("Built", (), {
+            "results": {}, "warnings": [], "stock_name": "", "history_depth_days": 0,
+            "latest_date": "",
+        })()
+        with patch("utils.source_router.load_stock_map", return_value={"issue_id": "15949", "name": "Canopy SkyFire"}), patch(
+            "utils.source_router.build_results_from_db", return_value=built,
+        ):
+            bundle = source_router.fetch_local_db_bundle("08245")
+        self.assertEqual(bundle.lookup.status, "success")
+        self.assertEqual(bundle.lookup.issue_id, "15949")
+        self.assertIsNotNone(bundle.lookup.result)
+        self.assertTrue(bundle.lookup.result.ok)
+        self.assertEqual(bundle.lookup.result.method, "cache")
+        self.assertIn("Company / orgdata", bundle.results)
+        self.assertEqual(bundle.results["Company / orgdata"].url, "local_db://stock_map/08245")
+
+    def test_failed_payload_is_not_cached(self):
+        api._stock_cache.clear()
+        failed = {
+            "exported": {
+                "metadata": {"issue_id": "15949"},
+                "fetch_summary": [{"Section": "Holdings", "Status": "failed"}],
+            }
+        }
+        api.cache_set("08245", failed)
+        self.assertIsNone(api.cache_get("08245"))
+
+    def test_cache_metadata_records_served_state(self):
+        payload = api.minimal_base_payload("08245", "15949", [], {})
+        self.assertFalse(payload["exported"]["metadata"]["served_from_cache"])
+        api._set_served_from_cache(payload, True)
+        self.assertTrue(payload["exported"]["metadata"]["served_from_cache"])
+
+    def test_unresolved_summary_does_not_use_parse_placeholder_for_company(self):
+        summary = build_fetch_summary(ParsedCCASS(stock_code="08245"), {})
+        self.assertTrue(all("Issue ID unresolved:" in error for error in summary["Error"]))
+        self.assertNotIn("Parsed table unavailable", " ".join(summary["Error"].tolist()))
 
     def test_local_snapshot_can_continue_without_issue_id(self):
         local_holdings = FetchResult(

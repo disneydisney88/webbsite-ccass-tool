@@ -59,12 +59,18 @@ def fake_base_payload(row_count: int = 100, warning: str | None = None) -> dict:
                 "stock_code": "01592",
                 "stock_name": "Mock Stock",
                 "issue_id": "12345",
+                "id_lookup_method": "extracted from orgdata",
+                "id_lookup_status": "success",
                 "holdings_data_date": "2026-06-26",
                 "changes_trading_date": "2026-06-26",
                 "total_in_ccass_pct": "50.00%",
                 "top5_cumulative_pct": "25.00%",
                 "top10_cumulative_pct": "35.00%",
                 "largest_participant": "Participant 100",
+                "source": "hybrid_local_db_webb",
+                "history_depth_days": 2,
+                "db_restored_from_backup": False,
+                "price_source": "mirror",
             },
             "holdings": [
                 {
@@ -101,6 +107,8 @@ def fake_base_payload(row_count: int = 100, warning: str | None = None) -> dict:
             "fetch_summary": [
                 {
                     "Section": "Holdings",
+                    "url": "local_db://holdings",
+                    "fetch_method": "sdw+local_db",
                     "Status": "success",
                     "Tables found": 1,
                     "Selected table index": 1,
@@ -109,13 +117,36 @@ def fake_base_payload(row_count: int = 100, warning: str | None = None) -> dict:
                 },
                 {
                     "Section": "Changes",
+                    "url": "local_db://changes",
+                    "fetch_method": "sdw+local_db",
                     "Status": "failed" if warning else "success",
                     "Tables found": 0 if warning else 1,
                     "Selected table index": "",
                     "Latest date / data date": "",
                     "Error": warning or "",
                 },
+                {
+                    "Section": "Big Changes",
+                    "url": "https://webb-database.com/ccass/bigchangesissue.asp?i=12345",
+                    "fetch_method": "requests",
+                    "Status": "success",
+                    "Tables found": 1,
+                    "Selected table index": 1,
+                    "Latest date / data date": "2026-06-26",
+                    "Error": "",
+                },
+                {
+                    "Section": "Concentration",
+                    "url": "https://webb-database.com/ccass/cconchist.asp?i=12345",
+                    "fetch_method": "requests",
+                    "Status": "success",
+                    "Tables found": 1,
+                    "Selected table index": 1,
+                    "Latest date / data date": "2026-06-26",
+                    "Error": "",
+                },
             ],
+            "errors": [],
             "analysis_warnings": warnings,
         },
     }
@@ -540,8 +571,102 @@ class AnnouncementPdfTests(unittest.TestCase):
                     with patch.object(api, "parsed_to_json_ready", return_value=exported):
                         first = api.build_base_payload("01592", timeout=30)
                         second = api.build_base_payload("01592", timeout=30)
-        self.assertEqual(first, second)
-        self.assertEqual(fetch_source.call_count, 1)
+                        bypassed = api.build_base_payload("01592", timeout=30, bypass_cache=True)
+        first_without_cache_marker = json.loads(json.dumps(first))
+        second_without_cache_marker = json.loads(json.dumps(second))
+        first_without_cache_marker["exported"]["metadata"].pop("served_from_cache", None)
+        second_without_cache_marker["exported"]["metadata"].pop("served_from_cache", None)
+        self.assertEqual(first_without_cache_marker, second_without_cache_marker)
+        self.assertFalse(first["exported"]["metadata"]["served_from_cache"])
+        self.assertTrue(second["exported"]["metadata"]["served_from_cache"])
+        self.assertFalse(bypassed["exported"]["metadata"]["served_from_cache"])
+        self.assertEqual(fetch_source.call_count, 2)
+
+    def test_issue_lookup_contract_includes_lookup_metadata(self) -> None:
+        with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
+            with patch.object(api, "build_base_payload", return_value=fake_base_payload()):
+                status_code, payload = asgi_get("/api/stock?code=01592", headers=auth_headers())
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["metadata"]["issue_id_lookup_status"], "success")
+        self.assertEqual(payload["metadata"]["issue_id_lookup_method"], "orgdata")
+        self.assertIn("generated_at", payload["metadata"])
+        self.assertIn("source_trace", payload)
+        self.assertIn("cache_status", payload["metadata"])
+
+    def test_issue_lookup_not_found_returns_structured_error(self) -> None:
+        not_found = {
+            "issue_id": None,
+            "exported": {
+                "metadata": {
+                    "stock_code": "03301",
+                    "stock_name": "",
+                    "issue_id": None,
+                    "id_lookup_method": "extracted from orgdata",
+                    "id_lookup_status": "failed",
+                    "source": "",
+                    "history_depth_days": 0,
+                    "db_restored_from_backup": False,
+                },
+                "holdings": [],
+                "changes": [],
+                "bigchanges": [],
+                "concentration": [],
+                "fetch_summary": [],
+                "errors": [api.structured_error("ISSUE_ID_NOT_FOUND", "Unable to resolve Webb-site issue ID for stock 03301.")],
+                "analysis_warnings": ["Unable to resolve Webb-site issue ID for stock 03301."],
+            },
+        }
+        with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
+            with patch.object(api, "build_base_payload", return_value=not_found):
+                status_code, payload = asgi_get("/api/stock?code=03301", headers=auth_headers())
+        self.assertEqual(status_code, 200)
+        self.assertIsNone(payload["metadata"]["issue_id"])
+        self.assertEqual(payload["metadata"]["issue_id_lookup_status"], "not_found")
+        self.assertTrue(any(err["error_code"] == "ISSUE_ID_NOT_FOUND" for err in payload["errors"]))
+        self.assertFalse(any(err["error_code"] == "LOCAL_SNAPSHOT_EMPTY" for err in payload["errors"]))
+
+    def test_source_trace_reports_mixed_sources(self) -> None:
+        mixed = fake_base_payload()
+        mixed["exported"]["metadata"]["id_lookup_method"] = "cache"
+        with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
+            with patch.object(api, "build_base_payload", return_value=mixed):
+                status_code, payload = asgi_get("/api/stock?code=01592", headers=auth_headers())
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["source_trace"]["metadata"], "stock_map")
+        self.assertEqual(payload["source_trace"]["holdings"], "local_db")
+        self.assertEqual(payload["source_trace"]["changes"], "local_db")
+        self.assertEqual(payload["source_trace"]["big_changes"], "webb_mirror")
+        self.assertEqual(payload["source_trace"]["concentration"], "webb_mirror")
+        self.assertEqual(payload["metadata"]["cache_status"], "partial")
+
+    def test_cache_status_hit_for_local_only_sources(self) -> None:
+        local_only = fake_base_payload()
+        local_only["exported"]["metadata"]["source"] = "local_db"
+        local_only["exported"]["fetch_summary"] = [
+            {"Section": "Holdings", "url": "local_db://holdings", "fetch_method": "sdw+local_db", "Status": "success", "Tables found": 1, "Selected table index": 1, "Latest date / data date": "2026-06-26", "Error": ""},
+            {"Section": "Changes", "url": "local_db://changes", "fetch_method": "sdw+local_db", "Status": "success", "Tables found": 1, "Selected table index": 1, "Latest date / data date": "2026-06-26", "Error": ""},
+            {"Section": "Big Changes", "url": "local_db://big_changes", "fetch_method": "sdw+local_db", "Status": "success", "Tables found": 1, "Selected table index": 1, "Latest date / data date": "2026-06-26", "Error": ""},
+            {"Section": "Concentration", "url": "local_db://concentration", "fetch_method": "sdw+local_db", "Status": "success", "Tables found": 1, "Selected table index": 1, "Latest date / data date": "2026-06-26", "Error": ""},
+        ]
+        with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
+            with patch.object(api, "build_base_payload", return_value=local_only):
+                status_code, payload = asgi_get("/api/stock?code=01592", headers=auth_headers())
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["metadata"]["cache_status"], "hit")
+
+    def test_cache_status_miss_for_all_live_sources(self) -> None:
+        live = fake_base_payload()
+        live["exported"]["fetch_summary"] = [
+            {"Section": "Holdings", "url": "https://webb-database.com/ccass/choldings.asp?i=12345", "fetch_method": "requests", "Status": "success", "Tables found": 1, "Selected table index": 1, "Latest date / data date": "2026-06-26", "Error": ""},
+            {"Section": "Changes", "url": "https://webb-database.com/ccass/chldchg.asp?i=12345", "fetch_method": "requests", "Status": "success", "Tables found": 1, "Selected table index": 1, "Latest date / data date": "2026-06-26", "Error": ""},
+            {"Section": "Big Changes", "url": "https://webb-database.com/ccass/bigchangesissue.asp?i=12345", "fetch_method": "requests", "Status": "success", "Tables found": 1, "Selected table index": 1, "Latest date / data date": "2026-06-26", "Error": ""},
+            {"Section": "Concentration", "url": "https://webb-database.com/ccass/cconchist.asp?i=12345", "fetch_method": "requests", "Status": "success", "Tables found": 1, "Selected table index": 1, "Latest date / data date": "2026-06-26", "Error": ""},
+        ]
+        with patch.dict(os.environ, {"API_TOKEN": "correct-token"}, clear=True):
+            with patch.object(api, "build_base_payload", return_value=live):
+                status_code, payload = asgi_get("/api/stock?code=01592", headers=auth_headers())
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["metadata"]["cache_status"], "miss")
 
 
 if __name__ == "__main__":

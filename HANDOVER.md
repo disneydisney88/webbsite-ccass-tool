@@ -7,6 +7,12 @@ Branch: `main`
 
 ## Important Status
 
+The MCP source-preference change is intentionally limited to single-stock
+queries. The default remains `local_db`; `auto` is opt-in for the hybrid Webb
+mirror/browser path. The Render bridge items (P1-1, P1-2, and P1-3 from the
+related task) are deferred and were not changed here. `screen_stocks` remains
+local-snapshot-only and has no source-preference parameter.
+
 This document is written in the GitHub-linked repository. The parser repair and the 08245 golden-case follow-up are committed and pushed to `main`; deployment is still pending live verification. Local test success must not be treated as Streamlit Cloud or Render acceptance.
 
 ## Current Git State

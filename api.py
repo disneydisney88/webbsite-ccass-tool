@@ -53,7 +53,13 @@ from utils.officers import (
 )
 from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
-from utils.source_router import fetch_local_db_bundle, fetch_mirror_bundle, fetch_source_bundle_for_stock, issue_id_for_stock
+from utils.source_router import (
+    fetch_local_db_bundle,
+    fetch_mirror_bundle,
+    fetch_source_bundle_for_stock,
+    has_real_ccass_data,
+    issue_id_for_stock,
+)
 from utils.source_router import resolve_issue_id
 from utils.fetch_yahoo import fetch_yahoo_price_history
 from utils.upstream_probe import probe_url, probe_upstreams
@@ -67,6 +73,7 @@ from utils.snapshot_db import (
     load_watchlist_entries,
     restore_snapshot_db_from_backup,
     upsert_price_history,
+    upsert_stock_map,
 )
 
 
@@ -144,6 +151,7 @@ class HealthResponse(BaseModel):
     ok: bool
     service: str
     version: str
+    commit: str = "unknown"
     uptime_seconds: int
     upstreams: dict[str, Any] | None = None
 
@@ -251,6 +259,16 @@ class StockCompactResponse(BaseModel):
 
 
 def json_safe(value: Any) -> Any:
+    if isinstance(value, str):
+        # Repair names saved after a UTF-8 response was decoded as Latin-1.
+        if any(marker in value for marker in ("Ã", "Â", "å", "æ", "ç", "é")):
+            try:
+                repaired = value.encode("latin1").decode("utf-8")
+                if "�" not in repaired:
+                    return repaired
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                pass
+        return value
     if isinstance(value, dict):
         return {str(key): json_safe(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -663,8 +681,14 @@ def build_base_payload(
     lookup = bundle.lookup
     warnings = []
     source_name = str(bundle.metadata.get("source") or "")
-    requires_issue_id = source_name == "mirror" or not source_name
-    if lookup.status != "success" or (requires_issue_id and not lookup.issue_id):
+    local_ccass_data = source_name == "local_db" and has_real_ccass_data(bundle.results)
+    requires_issue_id = not local_ccass_data
+    if lookup.status == "success" and lookup.issue_id:
+        try:
+            upsert_stock_map(lookup.stock_code or stock_code, lookup.issue_id, name=getattr((bundle.results.get("Company / orgdata") or None), "name", "") or "")
+        except Exception:
+            pass
+    if not local_ccass_data and (lookup.status != "success" or (requires_issue_id and not lookup.issue_id)):
         warning = lookup.message or "Could not resolve Webb-site issue ID within the API timeout budget."
         payload = minimal_base_payload(
             stock_code=stock_code,
@@ -2039,9 +2063,21 @@ async def get_ccass_stock_data(
     changes_limit: Annotated[int, Field(ge=1, le=100)] = 20,
     big_changes_limit: Annotated[int, Field(ge=1, le=100)] = 10,
     concentration_limit: Annotated[int, Field(ge=1, le=100)] = 15,
+    source_preference: Annotated[
+        str,
+        Field(
+            pattern=r"^(local_db|auto)$",
+            description=(
+                "Source preference: local_db (default) reads local snapshots only, "
+                "which is fast and does not fetch upstream; auto uses the hybrid "
+                "Webb mirror path, including browser fallback, and can be much "
+                "slower. Use auto only when the latest data for one stock is needed."
+            ),
+        ),
+    ] = "local_db",
 ) -> dict[str, Any]:
     def work() -> dict[str, Any]:
-        return build_stock_payload(
+        payload = build_stock_payload(
             stock_code=code,
             timeout=20,
             holdings_limit=holdings_limit,
@@ -2049,8 +2085,21 @@ async def get_ccass_stock_data(
             big_changes_limit=big_changes_limit,
             concentration_limit=concentration_limit,
             headless=True,
-            source_preference="local_db",
+            source_preference=source_preference,
         )
+        if source_preference == "local_db":
+            concentration = payload.get("concentration") or {}
+            has_local_snapshot = bool(payload.get("holdings")) or bool(concentration.get("records"))
+            metadata = payload.get("metadata") or {}
+            if str(metadata.get("source") or "") == "local_db" and not has_local_snapshot:
+                guidance = (
+                    "No local snapshot for this stock. Add it to the watchlist, or call again "
+                    "with source_preference='auto' to fetch from the mirror (slower)."
+                )
+                warnings = payload.setdefault("data_quality_warnings", [])
+                if guidance not in warnings:
+                    warnings.append(guidance)
+        return payload
 
     try:
         return await run_ccass_tool_with_budget("get_ccass_stock_data", work, stock_code=code, tool_timeout=30)
@@ -2197,7 +2246,9 @@ async def get_stock_capital(
         "lightweight summary per stock: name, data date, CCASS total %, Top5/Top10 "
         "concentration (both bases), largest participant (name + category + stake), "
         "and the biggest single-participant recent move. Use before drilling into a "
-        "single stock with get_ccass_stock_data."
+        "single stock with get_ccass_stock_data. This batch tool always reads local "
+        "snapshots and intentionally has no source_preference parameter, so it does "
+        "not issue upstream requests for every stock."
     ),
 )
 async def screen_stocks(

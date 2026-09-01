@@ -2,6 +2,8 @@
 
 import unittest
 import tempfile
+import asyncio
+import inspect
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -372,6 +374,41 @@ class FetchDiagnosticsTest(unittest.TestCase):
             bundle = source_router.fetch_local_db_bundle("08245")
         self.assertEqual(bundle.lookup.status, "failed")
 
+    def test_local_stock_map_only_does_not_count_as_ccass_data(self):
+        cache_result = FetchResult(name="Company / orgdata", url="local_db://stock_map/01753", ok=True, tables=[pd.DataFrame([{"Code": "01753"}])])
+        local_bundle = SourceBundle(
+            lookup=IssueLookup(stock_code="01753", issue_id="27922", status="success"),
+            results={"Company / orgdata": cache_result},
+        )
+        hybrid_bundle = SourceBundle(
+            lookup=IssueLookup(stock_code="01753", issue_id="27922", status="success"), results={"Holdings": FetchResult(name="Holdings", url="https://example.test", ok=True, tables=[pd.DataFrame([{"x": 1}])])}
+        )
+        with patch.dict("os.environ", {"CCASS_SOURCE_MODE": "local_db"}), patch("utils.source_router.fetch_local_db_bundle", return_value=local_bundle), patch(
+            "utils.source_router.fetch_hybrid_bundle", return_value=hybrid_bundle
+        ) as hybrid:
+            result = source_router.fetch_source_bundle_for_stock("01753")
+        hybrid.assert_called_once()
+        self.assertIs(result, hybrid_bundle)
+
+    def test_local_real_ccass_data_keeps_fast_return(self):
+        holdings = FetchResult(name="Holdings", url="local_db://ccass_snapshots", ok=True, tables=[pd.DataFrame([{"x": 1}])])
+        local_bundle = SourceBundle(
+            lookup=IssueLookup(stock_code="01753", issue_id="27922", status="success"),
+            results={"Company / orgdata": FetchResult(name="Company / orgdata", url="local_db://stock_map/01753", ok=True), "Holdings": holdings},
+        )
+        with patch.dict("os.environ", {"CCASS_SOURCE_MODE": "local_db"}), patch("utils.source_router.fetch_local_db_bundle", return_value=local_bundle), patch(
+            "utils.source_router.fetch_hybrid_bundle"
+        ) as hybrid:
+            result = source_router.fetch_source_bundle_for_stock("01753")
+        hybrid.assert_not_called()
+        self.assertIs(result, local_bundle)
+
+    def test_json_safe_repairs_latin1_decoded_utf8_name(self):
+        expected = chr(0x5151)
+        mojibake = "Duiba Group Limited " + expected.encode("utf-8").decode("latin1")
+        payload = api.json_safe({"metadata": {"name": mojibake}})
+        self.assertEqual(payload["metadata"]["name"], "Duiba Group Limited " + expected)
+
     def test_local_stock_map_lookup_retains_success_result(self):
         built = type("Built", (), {
             "results": {}, "warnings": [], "stock_name": "", "history_depth_days": 0,
@@ -496,6 +533,45 @@ class HealthUpstreamsTest(unittest.TestCase):
         self.assertIn("commit", payload)
         self.assertEqual(payload["commit"], api.GIT_SHA)
         self.assertEqual(payload["upstreams"]["probes"][0]["source"], "webbsite")
+
+
+class McpSourcePreferenceTest(unittest.TestCase):
+    def _empty_local_payload(self):
+        return {
+            "metadata": {"source": "local_db"},
+            "holdings": [],
+            "changes": [],
+            "big_changes": [],
+            "concentration": {"records": []},
+            "price_history": [],
+            "data_quality_warnings": [],
+        }
+
+    def test_mcp_local_default_explains_missing_snapshot(self):
+        with patch.object(api, "build_stock_payload", return_value=self._empty_local_payload()):
+            payload = asyncio.run(api.get_ccass_stock_data("01753"))
+        self.assertIn(
+            "No local snapshot for this stock. Add it to the watchlist, or call again "
+            "with source_preference='auto' to fetch from the mirror (slower).",
+            payload["data_quality_warnings"],
+        )
+
+    def test_mcp_auto_passes_hybrid_preference(self):
+        payload = {"metadata": {"source": "hybrid_local_db_webb"}}
+        with patch.object(api, "build_stock_payload", return_value=payload) as build:
+            result = asyncio.run(api.get_ccass_stock_data("01753", source_preference="auto"))
+        self.assertIs(result, payload)
+        self.assertEqual(build.call_args.kwargs["source_preference"], "auto")
+
+    def test_screen_stocks_has_no_source_preference_argument(self):
+        self.assertNotIn("source_preference", inspect.signature(api.screen_stocks).parameters)
+
+    def test_api_and_source_router_share_local_data_definition(self):
+        self.assertIs(api.has_real_ccass_data, source_router.has_real_ccass_data)
+        metadata_only = {"Company / orgdata": FetchResult(name="Company / orgdata", url="local_db://stock_map/01753", ok=True)}
+        actual_data = {"Holdings": FetchResult(name="Holdings", url="local_db://ccass_snapshots", ok=True, tables=[pd.DataFrame({"x": [1]})])}
+        self.assertFalse(api.has_real_ccass_data(metadata_only))
+        self.assertTrue(api.has_real_ccass_data(actual_data))
 
 
 class PayloadStatusTest(unittest.TestCase):

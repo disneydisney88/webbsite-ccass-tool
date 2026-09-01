@@ -42,6 +42,7 @@ MIRROR_BROWSER_SECTIONS = {"Holdings", "Changes"}
 PROBE_CACHE_PATH = Path(os.getenv("CCASS_MIRROR_PROBE_CACHE", "data/mirror_probe_status.json"))
 VALID_MODES = {"auto", "mirror", "local_db", "sdw"}
 RENDER_API_DEFAULT = "https://webbsite-ccass-api.onrender.com"
+LOCAL_DATA_SECTIONS = ("Holdings", "Concentration", "Changes", "Big Changes", "Price History")
 
 
 @dataclass
@@ -50,6 +51,20 @@ class SourceBundle:
     results: dict[str, FetchResult]
     metadata: dict[str, object] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+
+
+def has_real_ccass_data(results: dict[str, FetchResult]) -> bool:
+    """Return whether results contain at least one usable CCASS data section.
+
+    A stock-map or orgdata cache row is metadata only and must not make a
+    local-only bundle look complete.
+    """
+    return any(
+        (result := results.get(section)) is not None
+        and result.ok
+        and bool(result.tables)
+        for section in LOCAL_DATA_SECTIONS
+    )
 
 
 def get_source_mode() -> str:
@@ -613,7 +628,7 @@ def fetch_source_bundle_for_stock(stock_code: str, timeout: int = 30, headless: 
     issue_id = issue_id_for_stock(code)
     if mode in {"sdw", "local_db"}:
         local_bundle = fetch_local_db_bundle(code, issue_id=issue_id, timeout=timeout, mirror_status="disabled_by_config")
-        if local_bundle.lookup.issue_id and local_bundle.results:
+        if local_bundle.lookup.issue_id and has_real_ccass_data(local_bundle.results):
             return local_bundle
         hybrid_bundle = fetch_hybrid_bundle(code, timeout=timeout, headless=headless)
         if hybrid_bundle.lookup.issue_id or hybrid_bundle.results:

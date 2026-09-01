@@ -54,6 +54,7 @@ from utils.officers import (
 from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
 from utils.source_router import fetch_local_db_bundle, fetch_mirror_bundle, fetch_source_bundle_for_stock, issue_id_for_stock
+from utils.source_router import resolve_issue_id
 from utils.fetch_yahoo import fetch_yahoo_price_history
 from utils.upstream_probe import probe_url, probe_upstreams
 from utils.snapshot_db import (
@@ -300,6 +301,110 @@ def with_source_fields(payload: dict[str, Any], data_as_of: Any = "", source: An
     return payload
 
 
+def normalize_issue_lookup_status(value: Any, message: Any = "") -> str:
+    text = f"{value or ''} {message or ''}".lower()
+    if value == "success":
+        return "success"
+    if "cannot automatically determine" in text or "unable to resolve" in text or "not found" in text:
+        return "not_found"
+    if value in {"failed", "error"}:
+        return "error"
+    return "error" if text else "unknown"
+
+
+def normalize_issue_lookup_method(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    mapping = {
+        "cache": "cache",
+        "known mapping fallback": "local_mapping",
+        "local mapping": "local_mapping",
+        "manually entered": "unknown",
+        "extracted from orgdata": "orgdata",
+        "orgdata": "orgdata",
+        "extracted from url": "url_extraction",
+        "url_extraction": "url_extraction",
+        "local stock code": "local_mapping",
+    }
+    return mapping.get(text, "unknown")
+
+
+def infer_source_trace(
+    metadata: dict[str, Any],
+    fetch_summary: list[dict[str, Any]],
+    results: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    def section_source(section: str) -> str:
+        item = None
+        for row in fetch_summary or []:
+            row_section = str(row.get("Section") or row.get("section") or "")
+            if row_section.lower() == section.lower():
+                item = row
+                break
+        if item is None and results:
+            result = results.get(section)
+            if result is not None:
+                url = str(getattr(result, "url", "") or "").lower()
+                method = str(getattr(result, "method", "") or "").lower()
+                if url.startswith("local_db://") or method in {"sdw+local_db", "local_db", "cache"}:
+                    return "local_db"
+                if "webb" in url or method in {"requests", "playwright", "render_api"}:
+                    return "webb_mirror"
+                if "sdw" in method:
+                    return "hkex_sdw"
+                return "unavailable"
+        if item is None:
+            return "unavailable"
+        fetch_method = str(item.get("fetch_method") or item.get("fetchMethod") or "").lower()
+        url = str(item.get("url") or "").lower()
+        if url.startswith("local_db://"):
+            return "local_db"
+        if fetch_method == "cache":
+            return "stock_map"
+        if "sdw+local_db" in fetch_method or "sdw" in fetch_method:
+            return "local_db"
+        if "render_api" in fetch_method:
+            return "render_api"
+        if "playwright" in fetch_method or "requests" in fetch_method or "webb" in url:
+            return "webb_mirror"
+        return "unavailable"
+
+    lookup_method = normalize_issue_lookup_method(metadata.get("issue_id_lookup_method") or metadata.get("id_lookup_method"))
+    metadata_source = "stock_map" if lookup_method in {"cache", "local_mapping"} else "webb_orgdata"
+    if lookup_method not in {"cache", "local_mapping"}:
+        if str(metadata.get("source") or "").lower() == "local_db":
+            metadata_source = "local_db"
+        elif str(metadata.get("source") or "").lower() in {"mirror", "hybrid_local_db_webb", "render_api"}:
+            metadata_source = "webb_orgdata" if lookup_method in {"orgdata", "url_extraction"} else str(metadata.get("source") or "").lower()
+    trace = {
+        "metadata": metadata_source,
+        "holdings": section_source("Holdings"),
+        "changes": section_source("Changes"),
+        "big_changes": section_source("Big Changes"),
+        "concentration": section_source("Concentration"),
+        "price": section_source("Price History"),
+    }
+    return trace
+
+
+def determine_cache_status(source_trace: dict[str, str], required_sections: list[str] | None = None) -> str:
+    required_sections = required_sections or ["holdings", "changes", "big_changes", "concentration"]
+    localish = {"stock_map", "local_db", "hkex_sdw"}
+    liveish = {"webb_mirror", "render_api"}
+    required_sources = [str(source_trace.get(section, "unavailable")) for section in required_sections]
+    live_count = sum(source in liveish for source in required_sources)
+    local_count = sum(source in localish for source in required_sources)
+    unavailable_count = sum(source == "unavailable" for source in required_sources)
+    if live_count == 0 and local_count == len(required_sections) and unavailable_count == 0:
+        return "hit"
+    if live_count == 0 and local_count > 0:
+        return "partial" if unavailable_count else "hit"
+    if live_count > 0 and local_count > 0:
+        return "partial"
+    if live_count > 0 and local_count == 0:
+        return "miss"
+    return "partial" if unavailable_count else "miss"
+
+
 def mask_secret(value: str | None) -> str:
     if not value:
         return "<empty>"
@@ -472,7 +577,33 @@ def build_base_payload(
     if cached:
         return cached
 
-    known_issue_id = issue_id_for_stock(stock_code)
+    resolved_lookup = resolve_issue_id(stock_code, timeout=min(timeout, 12), headless=headless)
+    if resolved_lookup.status != "success" or not resolved_lookup.issue_id:
+        warning = f"Unable to resolve Webb-site issue ID for stock {stock_code}."
+        lookup_status = normalize_issue_lookup_status(resolved_lookup.status, warning)
+        resolver_results = {}
+        if resolved_lookup.result is not None:
+            resolver_results["Company / orgdata"] = resolved_lookup.result
+        payload = minimal_base_payload(
+            stock_code=stock_code,
+            issue_id=None,
+            warnings=[warning],
+            results=resolver_results,
+        )
+        payload["exported"]["metadata"].update(
+            {
+                "stock_code": clean_stock_code(stock_code),
+                "stock_name": "",
+                "issue_id": None,
+                "id_lookup_method": resolved_lookup.method or "",
+                "id_lookup_status": lookup_status,
+            }
+        )
+        payload["exported"]["errors"] = [structured_error("ISSUE_ID_NOT_FOUND", warning)]
+        cache_set(stock_code, payload)
+        return copy.deepcopy(payload)
+
+    known_issue_id = resolved_lookup.issue_id or issue_id_for_stock(stock_code)
     source_preference = (source_preference or "auto").strip().lower()
     if source_preference == "sdw":
         source_preference = "local_db"
@@ -529,8 +660,16 @@ def build_base_payload(
     return copy.deepcopy(payload)
 
 
-def minimal_base_payload(stock_code: str, issue_id: str, warnings: list[str]) -> dict[str, Any]:
-    return {"exported": minimal_exported_payload(stock_code, issue_id, warnings, {}), "issue_id": issue_id}
+def minimal_base_payload(
+    stock_code: str,
+    issue_id: str,
+    warnings: list[str],
+    results: dict[str, FetchResult] | None = None,
+) -> dict[str, Any]:
+    return {
+        "exported": minimal_exported_payload(stock_code, issue_id, warnings, results or {}),
+        "issue_id": issue_id,
+    }
 
 
 def minimal_exported_payload(

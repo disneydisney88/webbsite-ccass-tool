@@ -17,6 +17,7 @@ from .fetcher import (
     fetch_all,
     fetch_with_playwright,
     fetch_with_requests,
+    extract_issue_id_from_html,
     issue_urls,
     mirror_base_url,
     orgdata_url,
@@ -40,7 +41,7 @@ from .snapshot_db import (
 CONFIG_PATH = Path(os.getenv("CCASS_SOURCE_CONFIG", "ccass_source_config.json"))
 MIRROR_BROWSER_SECTIONS = {"Holdings", "Changes"}
 PROBE_CACHE_PATH = Path(os.getenv("CCASS_MIRROR_PROBE_CACHE", "data/mirror_probe_status.json"))
-VALID_MODES = {"auto", "mirror", "local_db", "sdw"}
+VALID_MODES = {"auto", "mirror", "local_db", "hybrid_light", "sdw"}
 RENDER_API_DEFAULT = "https://webbsite-ccass-api.onrender.com"
 LOCAL_DATA_SECTIONS = ("Holdings", "Concentration", "Changes", "Big Changes", "Price History")
 
@@ -566,6 +567,84 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
     return bundle
 
 
+def fetch_hybrid_light_bundle(stock_code: str, timeout: int = 30) -> SourceBundle:
+    """Use local data plus requests-only Webb sections, without Playwright."""
+    code = clean_stock_code(stock_code)
+    bundle = fetch_local_db_bundle(code, timeout=timeout, mirror_status="hybrid_light")
+    issue_id = bundle.lookup.issue_id
+
+    if not issue_id:
+        org_result = fetch_with_requests("Company / orgdata", orgdata_url(code), timeout=timeout)
+        issue_id, method = extract_issue_id_from_html(org_result.html)
+        if issue_id:
+            bundle.lookup = IssueLookup(
+                stock_code=code,
+                issue_id=issue_id,
+                method=method or "extracted from orgdata",
+                status="success",
+                message="Issue ID resolved from Webb orgdata via requests.",
+                result=org_result,
+            )
+            bundle.results["Company / orgdata"] = org_result
+            try:
+                upsert_stock_map(code, issue_id, name="")
+            except Exception:
+                pass
+        else:
+            bundle.lookup = IssueLookup(
+                stock_code=code,
+                issue_id="",
+                method="requests",
+                status="failed",
+                message=org_result.error_message or "Unable to resolve Webb-site issue ID.",
+                result=org_result,
+            )
+            bundle.results["Company / orgdata"] = org_result
+            return bundle
+    elif "Company / orgdata" not in bundle.results:
+        bundle.results["Company / orgdata"] = bundle.lookup.result
+
+    urls = issue_urls(issue_id)
+    skipped_message = (
+        "Requires browser; use source_preference='auto' via HTTP API "
+        "(MCP wall-clock budget too short)"
+    )
+    for section in ("Holdings", "Changes"):
+        local_result = bundle.results.get(section)
+        if local_result is not None and local_result.ok and local_result.tables:
+            continue
+        bundle.results[section] = FetchResult(
+            name=section,
+            url=urls[section],
+            final_url=urls[section],
+            method="skipped",
+            ok=False,
+            skipped=True,
+            error_type="BROWSER_REQUIRED",
+            error_message=skipped_message,
+        )
+
+    for section in ("Big Changes", "Concentration", "Price History"):
+        local_result = bundle.results.get(section)
+        if local_result is not None and local_result.ok and local_result.tables:
+            continue
+        result = fetch_with_requests(section, urls[section], timeout=timeout)
+        if result.ok and section == "Price History":
+            for table in result.tables:
+                table["price_source"] = "mirror"
+        bundle.results[section] = result
+
+    bundle.metadata.update(
+        {
+            "source": "hybrid_light",
+            "mirror_status": "requests_only",
+            "mirror_base_url": mirror_base_url(),
+            "browser_sections_skipped": ["Holdings", "Changes"],
+        }
+    )
+    return bundle
+
+
 def fetch_mirror_bundle(stock_code: str, issue_id: str = "", timeout: int = 30, headless: bool = True, mirror_status: str = "ok") -> SourceBundle:
     code = clean_stock_code(stock_code)
     if issue_id:
@@ -637,4 +716,6 @@ def fetch_source_bundle_for_stock(stock_code: str, timeout: int = 30, headless: 
         return local_bundle
     if mode == "mirror":
         return fetch_mirror_bundle(code, issue_id="", timeout=timeout, headless=headless, mirror_status="forced")
+    if mode == "hybrid_light":
+        return fetch_hybrid_light_bundle(code, timeout=timeout)
     return fetch_hybrid_bundle(code, timeout=timeout, headless=headless)

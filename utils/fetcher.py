@@ -99,6 +99,7 @@ class FetchResult:
     error_message: str = ""
     fallback_method_used: str = ""
     attempted_sources: list[dict[str, Any]] = field(default_factory=list)
+    skipped: bool = False
 
     def to_log(self) -> dict:
         return {
@@ -117,6 +118,7 @@ class FetchResult:
             "error_message": self.error_message,
             "response_snippet": self.response_snippet,
             "attempted_sources": getattr(self, "attempted_sources", []),
+            "skipped": getattr(self, "skipped", False),
         }
 
 

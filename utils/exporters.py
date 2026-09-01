@@ -322,6 +322,8 @@ def _section_parse_message(parsed: ParsedCCASS, section: str) -> str:
 
 
 def _section_fetch_status(result: FetchResult | None, row_count: int) -> str:
+    if result and getattr(result, "skipped", False):
+        return "skipped"
     has_rows = row_count > 0
     if result and result.ok and has_rows:
         return "success"

@@ -1487,27 +1487,32 @@ def parse_results(
         if results["Holdings"].ok:
             parse_holdings(results["Holdings"], parsed, selected_indices, directory)
         else:
-            parsed.section_parses["Holdings"] = SectionParse("Holdings", status="failed", error=results["Holdings"].error_message)
+            status = "skipped" if getattr(results["Holdings"], "skipped", False) else "failed"
+            parsed.section_parses["Holdings"] = SectionParse("Holdings", status=status, error=results["Holdings"].error_message)
     if results.get("Changes"):
         if results["Changes"].ok:
             parse_changes(results["Changes"], parsed, selected_indices, directory)
         else:
-            parsed.section_parses["Changes"] = SectionParse("Changes", status="failed", error=results["Changes"].error_message)
+            status = "skipped" if getattr(results["Changes"], "skipped", False) else "failed"
+            parsed.section_parses["Changes"] = SectionParse("Changes", status=status, error=results["Changes"].error_message)
     if results.get("Big Changes"):
         if results["Big Changes"].ok:
             parse_big_changes(results["Big Changes"], parsed, selected_indices, directory)
         else:
-            parsed.section_parses["Big Changes"] = SectionParse("Big Changes", status="failed", error=results["Big Changes"].error_message)
+            status = "skipped" if getattr(results["Big Changes"], "skipped", False) else "failed"
+            parsed.section_parses["Big Changes"] = SectionParse("Big Changes", status=status, error=results["Big Changes"].error_message)
     if results.get("Concentration"):
         if results["Concentration"].ok:
             parse_concentration(results["Concentration"], parsed, selected_indices)
         else:
-            parsed.section_parses["Concentration"] = SectionParse("Concentration", status="failed", error=results["Concentration"].error_message)
+            status = "skipped" if getattr(results["Concentration"], "skipped", False) else "failed"
+            parsed.section_parses["Concentration"] = SectionParse("Concentration", status=status, error=results["Concentration"].error_message)
     if results.get("Price History"):
         if results["Price History"].ok:
             parse_price_history(results["Price History"], parsed, selected_indices)
         else:
-            parsed.section_parses["Price History"] = SectionParse("Price History", status="failed", error=results["Price History"].error_message)
+            status = "skipped" if getattr(results["Price History"], "skipped", False) else "failed"
+            parsed.section_parses["Price History"] = SectionParse("Price History", status=status, error=results["Price History"].error_message)
 
     for section, section_parse in parsed.section_parses.items():
         result = results.get(section)
@@ -1575,7 +1580,9 @@ def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) ->
         result = results.get(section)
         parse = parsed.section_parses.get(section, SectionParse(section))
         status = parse.status
-        if result and not result.ok:
+        if result and getattr(result, "skipped", False):
+            status = "skipped"
+        elif result and not result.ok:
             status = "failed"
         error = parse.error or (result.error_message if result and not result.ok else "")
         if error and result and not result.ok and result.error_type and result.error_type not in error:

@@ -54,6 +54,7 @@ from utils.officers import (
 from utils.participants import categorize
 from utils.parser import parse_date_value, parse_results, to_number
 from utils.source_router import (
+    fetch_hybrid_light_bundle,
     fetch_local_db_bundle,
     fetch_mirror_bundle,
     fetch_source_bundle_for_stock,
@@ -657,7 +658,7 @@ def build_base_payload(
     source_preference = (source_preference or "auto").strip().lower()
     if source_preference == "sdw":
         source_preference = "local_db"
-    if source_preference not in {"auto", "local_db", "mirror"}:
+    if source_preference not in {"auto", "local_db", "hybrid_light", "mirror"}:
         source_preference = "auto"
 
     if source_preference == "auto" and known_issue_id:
@@ -674,6 +675,8 @@ def build_base_payload(
 
     if source_preference == "local_db":
         bundle = fetch_local_db_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, mirror_status="direct_pages_only")
+    elif source_preference == "hybrid_light":
+        bundle = fetch_hybrid_light_bundle(stock_code, timeout=timeout)
     elif source_preference == "mirror":
         bundle = fetch_mirror_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, headless=headless)
     else:
@@ -1063,6 +1066,8 @@ def section_failure_warnings(fetch_summary: list[dict[str, Any]]) -> list[str]:
     for row in fetch_summary:
         section = row.get("Section") or row.get("section") or "Unknown section"
         status_text = str(row.get("Status") or row.get("ok") or "").lower()
+        if status_text == "skipped":
+            continue
         error = row.get("Error") or row.get("error_message") or ""
         failed = status_text in {"failed", "false"} or bool(error)
         if failed:
@@ -1089,6 +1094,8 @@ def section_failure_warnings(fetch_summary: list[dict[str, Any]]) -> list[str]:
 def primary_fetch_failure(fetch_summary: list[dict[str, Any]]) -> dict[str, Any]:
     for row in fetch_summary or []:
         status_text = str(row.get("Status") or row.get("ok") or "").lower()
+        if status_text == "skipped":
+            continue
         error = row.get("Error") or row.get("error_message") or ""
         if status_text in {"failed", "false"} or error:
             return row
@@ -2066,15 +2073,17 @@ async def get_ccass_stock_data(
     source_preference: Annotated[
         str,
         Field(
-            pattern=r"^(local_db|auto)$",
+            pattern=r"^(local_db|hybrid_light|auto)$",
             description=(
-                "Source preference: local_db (default) reads local snapshots only, "
-                "which is fast and does not fetch upstream; auto uses the hybrid "
-                "Webb mirror path, including browser fallback, and can be much "
-                "slower. Use auto only when the latest data for one stock is needed."
+                "Source preference: local_db reads local snapshots only and is fastest; "
+                "hybrid_light (default) reads local snapshots and fetches requests-only "
+                "orgdata, Concentration, Big Changes and Price History, while skipping "
+                "browser-required Holdings/Changes; auto fetches the full hybrid Webb "
+                "path including browser fallback and is much slower. Use auto only for "
+                "the latest data for one stock."
             ),
         ),
-    ] = "local_db",
+    ] = "hybrid_light",
 ) -> dict[str, Any]:
     def work() -> dict[str, Any]:
         payload = build_stock_payload(
@@ -2094,7 +2103,7 @@ async def get_ccass_stock_data(
             if str(metadata.get("source") or "") == "local_db" and not has_local_snapshot:
                 guidance = (
                     "No local snapshot for this stock. Add it to the watchlist, or call again "
-                    "with source_preference='auto' to fetch from the mirror (slower)."
+                    "with source_preference='hybrid_light' or 'auto' to fetch from the mirror (slower)."
                 )
                 warnings = payload.setdefault("data_quality_warnings", [])
                 if guidance not in warnings:

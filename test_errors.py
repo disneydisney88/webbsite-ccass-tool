@@ -547,12 +547,12 @@ class McpSourcePreferenceTest(unittest.TestCase):
             "data_quality_warnings": [],
         }
 
-    def test_mcp_local_default_explains_missing_snapshot(self):
+    def test_mcp_local_mode_explains_missing_snapshot(self):
         with patch.object(api, "build_stock_payload", return_value=self._empty_local_payload()):
-            payload = asyncio.run(api.get_ccass_stock_data("01753"))
+            payload = asyncio.run(api.get_ccass_stock_data("01753", source_preference="local_db"))
         self.assertIn(
             "No local snapshot for this stock. Add it to the watchlist, or call again "
-            "with source_preference='auto' to fetch from the mirror (slower).",
+            "with source_preference='hybrid_light' or 'auto' to fetch from the mirror (slower).",
             payload["data_quality_warnings"],
         )
 

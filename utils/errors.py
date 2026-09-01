@@ -62,6 +62,8 @@ def errors_from_fetch_summary(fetch_summary: list[dict[str, Any]]) -> list[dict[
     for row in fetch_summary or []:
         section = row.get("Section") or row.get("section") or "Unknown section"
         status_text = str(row.get("Status") or row.get("ok") or "").lower()
+        if status_text == "skipped":
+            continue
         error_message = row.get("Error") or row.get("error_message") or ""
         error_type = row.get("Error type") or row.get("error_type") or ""
         failed = status_text in {"failed", "false"} or bool(error_message)

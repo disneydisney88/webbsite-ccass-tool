@@ -19,6 +19,7 @@ jobs:
 
     env:
       API_BASE_URL: https://webbsite-ccass-api.onrender.com
+      SNAPSHOT_MAX_AGE_DAYS: 7
 
     steps:
       - name: Checkout
@@ -53,9 +54,13 @@ jobs:
           python - <<'PY'
           import json
           data = json.load(open("caiji_snapshot_result.json", encoding="utf-8"))
-          print(json.dumps({k: data.get(k) for k in ("ok", "group", "total", "ok_count", "failed_count")}, ensure_ascii=False))
-          if data.get("failed_count", 0):
-              raise SystemExit("caiji snapshot had failed rows")
+          rows = data.get("results") or []
+          succeeded = sum(1 for row in rows if row.get("ok") and not row.get("skipped") and row.get("price_ok", True) is not False)
+          skipped = sum(1 for row in rows if row.get("skipped"))
+          failed = len(rows) - succeeded - skipped
+          print(json.dumps({"group": data.get("group"), "total": len(rows), "succeeded": succeeded, "skipped": skipped, "failed": failed}, ensure_ascii=False))
+          if failed or (rows and succeeded == 0):
+              raise SystemExit("caiji snapshot had failures or was entirely skipped")
           PY
 
       - name: Run lshape snapshots
@@ -66,9 +71,13 @@ jobs:
           python - <<'PY'
           import json
           data = json.load(open("lshape_snapshot_result.json", encoding="utf-8"))
-          print(json.dumps({k: data.get(k) for k in ("ok", "group", "total", "ok_count", "failed_count")}, ensure_ascii=False))
-          if data.get("failed_count", 0):
-              raise SystemExit("lshape snapshot had failed rows")
+          rows = data.get("results") or []
+          succeeded = sum(1 for row in rows if row.get("ok") and not row.get("skipped") and row.get("price_ok", True) is not False)
+          skipped = sum(1 for row in rows if row.get("skipped"))
+          failed = len(rows) - succeeded - skipped
+          print(json.dumps({"group": data.get("group"), "total": len(rows), "succeeded": succeeded, "skipped": skipped, "failed": failed}, ensure_ascii=False))
+          if failed or (rows and succeeded == 0):
+              raise SystemExit("lshape snapshot had failures or was entirely skipped")
           PY
 
       - name: Download snapshot DB backup
@@ -78,6 +87,29 @@ jobs:
             "$API_BASE_URL/api/snapshots/export?key=${{ secrets.CCASS_API_TOKEN }}" \
             --output data/backups/ccass_snapshots_latest.db
           test -s data/backups/ccass_snapshots_latest.db
+
+          python - <<'PY'
+          import os, sqlite3
+          from datetime import date
+          db = sqlite3.connect("data/backups/ccass_snapshots_latest.db")
+          tables = {row[0] for row in db.execute("select name from sqlite_master where type='table'")}
+          latest = None
+          for table in ("ccass_snapshots", "snapshots") & tables:
+              for column in ("snapshot_date", "date", "data_date"):
+                  try:
+                      row = db.execute(f"select max({column}) from {table}").fetchone()
+                  except sqlite3.Error:
+                      continue
+                  if row and row[0]:
+                      latest = max(str(row[0]), latest or "")
+          if latest:
+              age = (date.today() - date.fromisoformat(latest[:10])).days
+              print(f"Latest CCASS snapshot: {latest}; age={age} days")
+              if age > int(os.environ.get("SNAPSHOT_MAX_AGE_DAYS", "7")):
+                  print(f"::warning::Latest CCASS snapshot is stale ({age} days old)")
+          else:
+              print("::warning::Could not determine latest CCASS snapshot date")
+          PY
 
           today="$(date -u +%Y%m%d)"
           weekday="$(date -u +%u)"

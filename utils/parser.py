@@ -1595,6 +1595,7 @@ def build_fetch_summary(parsed: ParsedCCASS, results: dict[str, FetchResult]) ->
             {
                 "Section": section,
                 "URL": result.url if result else "",
+                "Fetch method": result.method if result else "",
                 "Status": status,
                 "Tables found": len(result.tables) if result else 0,
                 "Selected table index": parse.selected_table_index if parse.selected_table_index is not None else "",

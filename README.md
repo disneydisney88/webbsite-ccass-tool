@@ -56,7 +56,7 @@ Default:
 CCASS_SOURCE_MODE=auto
 ```
 
-- `auto`: use the hybrid local DB + direct Webb-site requests path. The currently defined `mirror_probe()` helper is not connected to this route, so auto mode does not currently perform a daily probe. If the direct page is blocked or returns a JavaScript challenge, use the available local fallback.
+- `auto`: use the hybrid local DB + direct Webb-site requests path. The route performs one persisted mirror probe per day. The probe records whether Holdings or Changes require a browser; those sections then go directly through normal Playwright rendering for the rest of that day. If a probe cannot complete, auto mode uses requests first and only invokes the browser for an actual `JS_CHALLENGE`. Timeout, HTTP error, and empty-page failures do not trigger browser fallback. Set `CCASS_BROWSER_FALLBACK=off` to disable it explicitly.
 - `mirror`: force the original Webb-site mirror fetcher/parser.
 - `sdw`: use HKEX SDW plus local snapshots only.
 
@@ -87,7 +87,7 @@ You can set it as an environment variable or in `ccass_source_config.json`:
 }
 ```
 
-`hpu.asp` may work through plain requests on that mirror, while some CCASS pages first return a small JavaScript cookie reload page. The app does not manually bypass this; it only uses the existing Playwright real-browser fallback when the page fetch path requests it and Playwright is available. If Playwright is unavailable, the app falls back to SDW/local DB instead of crashing. The daily auto probe described in earlier documentation is not currently connected.
+`hpu.asp` may work through plain requests on that mirror, while some CCASS pages first return a small JavaScript cookie reload page. The app does not manually bypass this; it only uses normal Playwright page execution for the two browser-required CCASS sections. If Playwright is unavailable, the app preserves the original challenge result and falls back to SDW/local DB instead of crashing. The daily probe is persisted in the local snapshot DB and records which sections need browser rendering.
 
 On Streamlit Cloud, Chromium is installed lazily only when a mirror page actually
 needs browser rendering. A failed browser installation is shown as a warning and
@@ -99,7 +99,9 @@ directory is ignored by Git.
 
 The default Streamlit path is fast hybrid mode: HKEX SDW provides current
 Holdings, local snapshots provide Changes, and direct Webb-site pages provide
-Big Changes, Concentration and Price History. It does not launch a browser.
+Big Changes, Concentration and Price History. Holdings/Changes launch a normal
+browser only when the daily probe or the current response identifies a
+JavaScript challenge; the other sections remain requests-only.
 
 Full mirror Holdings/Changes is optional. To enable the slower Render browser
 path, add these App Secrets (not GitHub Actions secrets):

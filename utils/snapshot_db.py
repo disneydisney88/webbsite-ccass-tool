@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import shutil
 import sqlite3
@@ -132,6 +133,19 @@ def ensure_db(path: Path = DB_PATH) -> None:
                 turnover_est REAL,
                 fetched_at TEXT NOT NULL,
                 PRIMARY KEY (code, date, price_source)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mirror_probe (
+                probe_date TEXT NOT NULL,
+                mirror_base_url TEXT NOT NULL,
+                status TEXT NOT NULL,
+                browser_sections TEXT NOT NULL,
+                error_message TEXT NOT NULL DEFAULT '',
+                probed_at TEXT NOT NULL,
+                PRIMARY KEY (probe_date, mirror_base_url)
             )
             """
         )
@@ -274,6 +288,61 @@ def load_stock_map(code: str, path: Path = DB_PATH) -> dict[str, Any]:
     if not row:
         return {"issue_id": "", "name": "", "updated_at": ""}
     return {"issue_id": row[0] or "", "name": row[1] or "", "updated_at": row[2] or ""}
+
+
+def load_mirror_probe(probe_date: str, mirror_base_url: str, path: Path = DB_PATH) -> dict[str, Any] | None:
+    ensure_db(path)
+    with closing(sqlite3.connect(path)) as conn:
+        row = conn.execute(
+            "SELECT status, browser_sections, error_message, probed_at FROM mirror_probe WHERE probe_date=? AND mirror_base_url=?",
+            (probe_date, mirror_base_url),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        browser_sections = json.loads(row[1] or "[]")
+    except (TypeError, ValueError):
+        browser_sections = []
+    return {
+        "date": probe_date,
+        "mirror_base_url": mirror_base_url,
+        "status": row[0] or "unknown",
+        "browser_sections": browser_sections if isinstance(browser_sections, list) else [],
+        "error_message": row[2] or "",
+        "probed_at": row[3] or "",
+    }
+
+
+def upsert_mirror_probe(
+    probe_date: str,
+    mirror_base_url: str,
+    status: str,
+    browser_sections: list[str] | None = None,
+    error_message: str = "",
+    path: Path = DB_PATH,
+) -> None:
+    ensure_db(path)
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO mirror_probe (probe_date, mirror_base_url, status, browser_sections, error_message, probed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(probe_date, mirror_base_url) DO UPDATE SET
+                status=excluded.status,
+                browser_sections=excluded.browser_sections,
+                error_message=excluded.error_message,
+                probed_at=excluded.probed_at
+            """,
+            (
+                probe_date,
+                mirror_base_url,
+                status,
+                json.dumps(browser_sections or [], ensure_ascii=False),
+                error_message,
+                now_iso(),
+            ),
+        )
+        conn.commit()
 
 
 def upsert_price_history(code: str, table: pd.DataFrame, source: str = "yahoo", path: Path = DB_PATH) -> int:

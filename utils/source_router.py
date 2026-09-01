@@ -22,10 +22,23 @@ from .fetcher import (
     orgdata_url,
     resolve_issue_id_from_stock,
 )
-from .snapshot_db import DB_PATH, build_results_from_db, db_restore_status, history_depth_days, load_price_history, load_stock_map, stock_fetched_today, upsert_price_history, upsert_stock_map
+from .snapshot_db import (
+    DB_PATH,
+    build_results_from_db,
+    db_restore_status,
+    history_depth_days,
+    load_mirror_probe,
+    load_price_history,
+    load_stock_map,
+    stock_fetched_today,
+    upsert_mirror_probe,
+    upsert_price_history,
+    upsert_stock_map,
+)
 
 
 CONFIG_PATH = Path(os.getenv("CCASS_SOURCE_CONFIG", "ccass_source_config.json"))
+MIRROR_BROWSER_SECTIONS = {"Holdings", "Changes"}
 PROBE_CACHE_PATH = Path(os.getenv("CCASS_MIRROR_PROBE_CACHE", "data/mirror_probe_status.json"))
 VALID_MODES = {"auto", "mirror", "local_db", "sdw"}
 RENDER_API_DEFAULT = "https://webbsite-ccass-api.onrender.com"
@@ -117,6 +130,7 @@ def _is_cloudflare_challenge(result: FetchResult) -> bool:
 
 
 def _probe_cache_today() -> dict[str, object] | None:
+    """Read the legacy probe file for backwards-compatible diagnostics."""
     if not PROBE_CACHE_PATH.exists():
         return None
     try:
@@ -126,10 +140,18 @@ def _probe_cache_today() -> dict[str, object] | None:
     return data if data.get("date") == date.today().isoformat() and data.get("mirror_base_url") == mirror_base_url() else None
 
 
-def _write_probe_cache(status: str) -> None:
+def _write_probe_cache(status: str, browser_sections: list[str] | None = None) -> None:
     PROBE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     PROBE_CACHE_PATH.write_text(
-        json.dumps({"date": date.today().isoformat(), "status": status, "mirror_base_url": mirror_base_url()}, indent=2),
+        json.dumps(
+            {
+                "date": date.today().isoformat(),
+                "status": status,
+                "mirror_base_url": mirror_base_url(),
+                "browser_sections": browser_sections or [],
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -140,17 +162,129 @@ def mirror_probe(stock_code: str, issue_id: str, timeout: int, headless: bool = 
         return str(cached.get("status") or "unknown")
     url = issue_urls(issue_id).get("Holdings") if issue_id else orgdata_url(stock_code)
     result = fetch_with_requests("Mirror probe", url, timeout=max(3, min(timeout, 8)))
-    if _is_cloudflare_challenge(result):
-        status = "blocked_by_cloudflare"
-    elif result.ok:
-        status = "ok"
-    elif result.status == 200:
+    browser_sections: list[str] = []
+    if result.error_type == "JS_CHALLENGE" or (result.status == 200 and not result.ok):
+        browser_sections = ["Holdings"]
+    if browser_sections:
         browser_result = fetch_with_playwright("Mirror probe", url, timeout=max(10, min(timeout, 45)), headless=headless)
         status = "ok" if browser_result.ok else "failed"
+    elif result.ok:
+        status = "ok"
     else:
         status = "failed"
-    _write_probe_cache(status)
+    _write_probe_cache(status, browser_sections)
     return status
+
+
+def _browser_fallback_enabled() -> bool:
+    return os.getenv("CCASS_BROWSER_FALLBACK", "on").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _daily_mirror_probe(stock_code: str, issue_id: str, timeout: int, headless: bool = True) -> dict[str, object]:
+    """Probe the two mirror pages once per day and persist the browser requirement."""
+    probe_date = date.today().isoformat()
+    base_url = mirror_base_url()
+    cached = load_mirror_probe(probe_date, base_url, path=DB_PATH)
+    if cached is not None:
+        return cached
+
+    urls = issue_urls(issue_id) if issue_id else {"Holdings": orgdata_url(stock_code)}
+    browser_sections: list[str] = []
+    failures: list[str] = []
+    probe_results: dict[str, FetchResult] = {}
+    checked_sections = [section for section in MIRROR_BROWSER_SECTIONS if section in urls]
+    for section in checked_sections:
+        result = fetch_with_requests("Mirror probe", urls[section], timeout=max(3, min(timeout, 8)))
+        probe_results[section] = result
+        if result.ok:
+            continue
+        if result.error_type == "JS_CHALLENGE":
+            browser_sections.append(section)
+        else:
+            failures.append(f"{section}: {result.error_type or 'probe failed'}")
+
+    if browser_sections:
+        status = "browser_required"
+    elif failures:
+        status = "failed"
+    else:
+        status = "ok"
+    error_message = "; ".join(failures)
+    record = {
+        "date": probe_date,
+        "mirror_base_url": base_url,
+        "status": status,
+        "browser_sections": browser_sections,
+        "error_message": error_message,
+        "_results": probe_results,
+    }
+    upsert_mirror_probe(
+        probe_date,
+        base_url,
+        status,
+        browser_sections=browser_sections,
+        error_message=error_message,
+        path=DB_PATH,
+    )
+    return record
+
+
+def _browser_fallback_result(
+    section: str,
+    request_result: FetchResult,
+    timeout: int,
+    headless: bool,
+    stock_code: str,
+) -> FetchResult:
+    browser_result = fetch_with_playwright(
+        section,
+        request_result.url,
+        timeout=timeout,
+        headless=headless,
+        debug_stock=stock_code,
+    )
+    browser_result.attempted_sources.append(
+        {
+            "source": "requests",
+            "url": request_result.url,
+            "final_url": request_result.final_url,
+            "ok": False,
+            "status_code": request_result.status,
+            "error_type": request_result.error_type,
+            "error_message": request_result.error_message,
+        }
+    )
+    if browser_result.ok:
+        browser_result.method = "playwright_after_challenge"
+        browser_result.fallback_method_used = "requests -> playwright_after_challenge"
+        return browser_result
+
+    detail = browser_result.error_message or "unknown browser error"
+    unavailable = browser_result.error_type == "ImportError" or "unavailable" in detail.lower() or "not installed" in detail.lower()
+    prefix = "browser fallback unavailable in this environment" if unavailable else "browser fallback attempted and failed"
+    request_result.error_message = f"{request_result.error_message}; {prefix}: {detail}"
+    request_result.fallback_method_used = prefix
+    request_result.attempted_sources.append(
+        {
+            "source": "playwright",
+            "url": request_result.url,
+            "final_url": browser_result.final_url,
+            "ok": False,
+            "status_code": browser_result.status,
+            "error_type": browser_result.error_type,
+            "error_message": detail,
+        }
+    )
+    return request_result
+
+
+def _describe_browser_failure(result: FetchResult) -> FetchResult:
+    detail = result.error_message or "unknown browser error"
+    unavailable = result.error_type == "ImportError" or "unavailable" in detail.lower() or "not installed" in detail.lower()
+    prefix = "browser fallback unavailable in this environment" if unavailable else "browser fallback attempted and failed"
+    result.fallback_method_used = prefix
+    result.error_message = f"{prefix}: {detail}"
+    return result
 
 
 def issue_id_for_stock(code: str) -> str:
@@ -323,9 +457,8 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
 
     A local snapshot database does not contain a Webb issue ID for every stock.
     Resolve that ID from the public orgdata page before deciding that the
-    Webb-only history is unavailable.  This path deliberately uses requests
-    only: a failed Webb page leaves the local/Yahoo result intact rather than
-    requiring a browser runtime.
+    Webb-only history is unavailable. A JavaScript challenge on the two
+    browser-required pages may use the normal Playwright fallback.
     """
     bundle = fetch_local_db_bundle(stock_code, timeout=timeout, mirror_status="hybrid")
     issue_id = bundle.lookup.issue_id
@@ -346,11 +479,33 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
             return bundle
 
     urls = issue_urls(issue_id)
+    probe = _daily_mirror_probe(stock_code, issue_id, timeout=timeout, headless=headless)
+    browser_sections = set(probe.get("browser_sections") or [])
+    browser_enabled = _browser_fallback_enabled()
+    if probe.get("status") == "failed":
+        bundle.warnings.append(
+            "Mirror daily probe failed; using requests first and challenge-only browser fallback. "
+            f"{probe.get('error_message') or 'No probe detail available.'}"
+        )
+    if not browser_enabled:
+        bundle.warnings.append("CCASS_BROWSER_FALLBACK is disabled; mirror JS challenges will remain unavailable.")
+    probe_results = probe.get("_results") or {}
     for section in ("Holdings", "Changes", "Big Changes", "Concentration", "Price History"):
         debug_kwargs = {}
         if os.getenv("CCASS_DEBUG_DUMP", "").strip().lower() in {"1", "true", "yes", "on"}:
             debug_kwargs["debug_stock"] = stock_code
-        result = fetch_with_requests(section, urls[section], timeout=timeout, **debug_kwargs)
+        if section in probe_results:
+            result = probe_results[section]
+            result.name = section
+        elif browser_enabled and section in MIRROR_BROWSER_SECTIONS and section in browser_sections:
+            result = fetch_with_playwright(section, urls[section], timeout=timeout, headless=headless, **debug_kwargs)
+            result.method = "playwright"
+            if not result.ok:
+                result = _describe_browser_failure(result)
+        else:
+            result = fetch_with_requests(section, urls[section], timeout=timeout, **debug_kwargs)
+            if browser_enabled and section in MIRROR_BROWSER_SECTIONS and result.error_type == "JS_CHALLENGE":
+                result = _browser_fallback_result(section, result, timeout=timeout, headless=headless, stock_code=stock_code)
         local_result = bundle.results.get(section)
         if result.ok:
             # A successful remote refresh is newer and therefore wins over a

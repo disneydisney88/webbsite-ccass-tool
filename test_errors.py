@@ -1,13 +1,15 @@
 """Tests for structured error codes (handover 1.2)."""
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 
 import pandas as pd
 import api
 import utils.source_router as source_router
-from utils.fetcher import FetchResult, IssueLookup, fetch_with_requests, webb_database_cookie_value
+from utils.fetcher import FetchResult, IssueLookup, fetch_with_playwright, fetch_with_requests, webb_database_cookie_value
 from utils.errors import classify_fetch_message, errors_from_fetch_summary, structured_error
 from utils.parser import ParsedCCASS, build_fetch_summary
 from utils.exporters import _section_context, combined_stock_csv
@@ -67,6 +69,112 @@ class UnauthorizedStructuredTest(unittest.TestCase):
 
 
 class FetchDiagnosticsTest(unittest.TestCase):
+    def test_hybrid_js_challenge_uses_playwright_after_challenge(self):
+        request_result = FetchResult(
+            name="Holdings", url="https://webb-database.com/ccass/choldings.asp?i=15949",
+            status=200, ok=False, error_type="JS_CHALLENGE", error_message="JavaScript challenge",
+        )
+        browser_result = FetchResult(
+            name="Holdings", url=request_result.url, status=200, ok=True,
+            tables=[pd.DataFrame([{"Name": "broker"}])],
+        )
+        local = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"), results={},
+        )
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local), patch(
+            "utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}
+        ), patch("utils.source_router.fetch_with_requests", return_value=request_result), patch(
+            "utils.source_router.fetch_with_playwright", return_value=browser_result
+        ):
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        self.assertTrue(bundle.results["Holdings"].ok)
+        self.assertEqual(bundle.results["Holdings"].method, "playwright_after_challenge")
+        self.assertEqual(bundle.results["Holdings"].attempted_sources[0]["source"], "requests")
+        summary = build_fetch_summary(ParsedCCASS(stock_code="08245", issue_id="15949"), bundle.results)
+        row = summary.loc[summary["Section"] == "Holdings"].iloc[0]
+        self.assertEqual(row["Fetch method"], "playwright_after_challenge")
+
+    def test_hybrid_timeout_does_not_use_browser_fallback(self):
+        timeout_result = FetchResult(
+            name="Holdings", url="https://webb-database.com/ccass/choldings.asp?i=15949",
+            status=None, ok=False, error_type="ReadTimeout", error_message="timed out",
+        )
+        local = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"), results={},
+        )
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local), patch(
+            "utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}
+        ), patch("utils.source_router.fetch_with_requests", return_value=timeout_result), patch(
+            "utils.source_router.fetch_with_playwright"
+        ) as browser:
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        browser.assert_not_called()
+        self.assertEqual(bundle.results["Holdings"].error_type, "ReadTimeout")
+
+    def test_hybrid_404_does_not_use_browser_fallback(self):
+        not_found = FetchResult(
+            name="Changes", url="https://webb-database.com/ccass/chldchg.asp?i=15949",
+            status=404, ok=False, error_type="HTTPError", error_message="HTTP 404",
+        )
+        local = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"), results={},
+        )
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local), patch(
+            "utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}
+        ), patch("utils.source_router.fetch_with_requests", return_value=not_found), patch(
+            "utils.source_router.fetch_with_playwright"
+        ) as browser:
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        browser.assert_not_called()
+        self.assertEqual(bundle.results["Changes"].status, 404)
+
+    def test_hybrid_browser_unavailable_is_distinguished_from_attempted_failure(self):
+        request_result = FetchResult(
+            name="Holdings", url="https://webb-database.com/ccass/choldings.asp?i=15949",
+            status=200, ok=False, error_type="JS_CHALLENGE", error_message="JavaScript challenge",
+        )
+        local = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"), results={},
+        )
+        unavailable = FetchResult(name="Holdings", url=request_result.url, ok=False, error_type="ImportError", error_message="Playwright is not installed")
+        with patch.dict("os.environ", {"CCASS_BROWSER_FALLBACK": "on"}), patch(
+            "utils.source_router.fetch_local_db_bundle", return_value=local
+        ), patch("utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}), patch(
+            "utils.source_router.fetch_with_requests", return_value=request_result
+        ), patch("utils.source_router.fetch_with_playwright", return_value=unavailable):
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        self.assertIn("browser fallback unavailable in this environment", bundle.results["Holdings"].error_message)
+
+    def test_hybrid_browser_attempted_failure_is_distinguished_from_unavailable(self):
+        request_result = FetchResult(
+            name="Changes", url="https://webb-database.com/ccass/chldchg.asp?i=15949",
+            status=200, ok=False, error_type="JS_CHALLENGE", error_message="JavaScript challenge",
+        )
+        local = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"), results={},
+        )
+        failed_browser = FetchResult(name="Changes", url=request_result.url, ok=False, error_type="TimeoutError", error_message="page timed out")
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local), patch(
+            "utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}
+        ), patch("utils.source_router.fetch_with_requests", return_value=request_result), patch(
+            "utils.source_router.fetch_with_playwright", return_value=failed_browser
+        ):
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        self.assertIn("browser fallback attempted and failed", bundle.results["Changes"].error_message)
+
+    def test_daily_probe_is_persisted_and_not_repeated_same_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "probe.db"
+            ok = FetchResult(name="Holdings", url="https://webb-database.com/ccass/choldings.asp?i=15949", status=200, ok=True)
+            with patch("utils.source_router.DB_PATH", db_path), patch(
+                "utils.source_router.fetch_with_requests", return_value=ok
+            ) as fetch:
+                first = source_router._daily_mirror_probe("08245", "15949", timeout=1)
+                second = source_router._daily_mirror_probe("08245", "15949", timeout=1)
+            self.assertEqual(first["status"], "ok")
+            self.assertEqual(second["status"], "ok")
+            self.assertEqual(fetch.call_count, 2)
+
     def test_webb_database_cookie_value_matches_the_challenge_formula(self):
         ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         self.assertEqual(
@@ -163,7 +271,9 @@ class FetchDiagnosticsTest(unittest.TestCase):
         )
         with patch("utils.source_router.fetch_local_db_bundle", return_value=empty), patch(
             "utils.source_router.fetch_with_requests", return_value=failed
-        ):
+        ), patch(
+            "utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}
+        ), patch("utils.source_router.fetch_with_playwright", return_value=failed):
             bundle = fetch_hybrid_bundle("08245", timeout=1, headless=True)
         self.assertIs(bundle.results["Holdings"], failed)
         self.assertEqual(bundle.results["Holdings"].error_type, "JS_CHALLENGE")
@@ -192,7 +302,9 @@ class FetchDiagnosticsTest(unittest.TestCase):
 
         with patch("utils.source_router.fetch_local_db_bundle", return_value=local_bundle), patch(
             "utils.source_router.fetch_with_requests", side_effect=failed_result
-        ):
+        ), patch(
+            "utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}
+        ), patch("utils.source_router.fetch_with_playwright", return_value=FetchResult(name="Holdings", url="", ok=False, error_type="ImportError", error_message="not installed")):
             bundle = fetch_hybrid_bundle("08245", timeout=1)
         self.assertIs(bundle.results["Holdings"], local)
         self.assertTrue(bundle.results["Holdings"].ok)
@@ -214,6 +326,8 @@ class FetchDiagnosticsTest(unittest.TestCase):
 
         with patch("utils.source_router.fetch_local_db_bundle", return_value=local_bundle), patch(
             "utils.source_router.fetch_with_requests", side_effect=successful_result
+        ), patch(
+            "utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}
         ):
             bundle = fetch_hybrid_bundle("08245", timeout=1)
         # Remote success is newer than a local snapshot, so it is authoritative.

@@ -75,6 +75,7 @@ class ParsedCCASS:
     default_pct_basis: str = "issued"
     completeness_status: str = "complete"
     critical_sections_failed: list[str] = field(default_factory=list)
+    section_total_counts: dict[str, int] = field(default_factory=dict)
     non_ccass_table: pd.DataFrame = field(default_factory=pd.DataFrame)
     price_source: str = ""
     issued_securities: str = ""
@@ -696,6 +697,7 @@ def parse_big_changes(
     parsed: ParsedCCASS,
     overrides: dict[str, int] | None,
     directory: dict[str, tuple[str, str]] | None = None,
+    limit: int | None = None,
 ) -> None:
     parse = SectionParse("Big Changes")
     parsed.section_parses[parse.section] = parse
@@ -817,6 +819,9 @@ def parse_big_changes(
     parsed.big_changes_latest_date = latest_date_from_column(parsed.big_changes_table, "Date")
     parse.latest_date = parsed.big_changes_latest_date
     parsed.transfer_flags = detect_transfer_flags(parsed.big_changes_table)
+    parsed.section_total_counts["Big Changes"] = len(parsed.big_changes_table)
+    if limit is not None:
+        parsed.big_changes_table = parsed.big_changes_table.head(max(0, limit)).copy()
 
 
 def detect_transfer_flags(df: pd.DataFrame, threshold_pct: float = 10.0) -> list[str]:
@@ -840,7 +845,12 @@ def detect_transfer_flags(df: pd.DataFrame, threshold_pct: float = 10.0) -> list
     return flags
 
 
-def parse_concentration(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
+def parse_concentration(
+    result: FetchResult,
+    parsed: ParsedCCASS,
+    overrides: dict[str, int] | None,
+    limit: int | None = None,
+) -> None:
     parse = SectionParse("Concentration")
     parsed.section_parses[parse.section] = parse
     table = get_selected_table(parse.section, result, overrides, parse)
@@ -920,9 +930,17 @@ def parse_concentration(result: FetchResult, parsed: ParsedCCASS, overrides: dic
     parsed.concentration_table["issued_shares_at_date"] = issued
     parsed.concentration_table["ccass_total_at_date"] = ccass_total
     parsed.concentration_5day_change = calculate_concentration_5day_change(parsed.concentration_table)
+    parsed.section_total_counts["Concentration"] = len(parsed.concentration_table)
+    if limit is not None:
+        parsed.concentration_table = parsed.concentration_table.head(max(0, limit)).copy()
 
 
-def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dict[str, int] | None) -> None:
+def parse_price_history(
+    result: FetchResult,
+    parsed: ParsedCCASS,
+    overrides: dict[str, int] | None,
+    limit: int | None = None,
+) -> None:
     parse = SectionParse("Price History")
     parsed.section_parses[parse.section] = parse
     table = get_selected_table(parse.section, result, overrides, parse)
@@ -1013,6 +1031,9 @@ def parse_price_history(result: FetchResult, parsed: ParsedCCASS, overrides: dic
             warning = "VWAP is estimated from estimated turnover"
             if warning not in parsed.analysis_warnings:
                 parsed.analysis_warnings.append(warning)
+    parsed.section_total_counts["Price History"] = len(parsed.price_history_table)
+    if limit is not None:
+        parsed.price_history_table = parsed.price_history_table.head(max(0, limit)).copy()
 
 
 def calculate_concentration_5day_change(df: pd.DataFrame) -> dict[str, str]:
@@ -1451,6 +1472,7 @@ def parse_results(
     id_lookup_status: str = "",
     selected_indices: dict[str, int] | None = None,
     source_metadata: dict[str, Any] | None = None,
+    section_limits: dict[str, int] | None = None,
 ) -> ParsedCCASS:
     parsed = ParsedCCASS(
         issue_id=issue_id,
@@ -1481,6 +1503,7 @@ def parse_results(
             parsed.db_price_rows = 0
 
     directory = participant_directory_map(results.get("Participants"))
+    section_limits = section_limits or {}
     if results.get("Company / orgdata"):
         parse_company(results["Company / orgdata"], parsed, selected_indices)
     if results.get("Holdings"):
@@ -1497,19 +1520,35 @@ def parse_results(
             parsed.section_parses["Changes"] = SectionParse("Changes", status=status, error=results["Changes"].error_message)
     if results.get("Big Changes"):
         if results["Big Changes"].ok:
-            parse_big_changes(results["Big Changes"], parsed, selected_indices, directory)
+            parse_big_changes(
+                results["Big Changes"],
+                parsed,
+                selected_indices,
+                directory,
+                section_limits.get("Big Changes"),
+            )
         else:
             status = "skipped" if getattr(results["Big Changes"], "skipped", False) else "failed"
             parsed.section_parses["Big Changes"] = SectionParse("Big Changes", status=status, error=results["Big Changes"].error_message)
     if results.get("Concentration"):
         if results["Concentration"].ok:
-            parse_concentration(results["Concentration"], parsed, selected_indices)
+            parse_concentration(
+                results["Concentration"],
+                parsed,
+                selected_indices,
+                section_limits.get("Concentration"),
+            )
         else:
             status = "skipped" if getattr(results["Concentration"], "skipped", False) else "failed"
             parsed.section_parses["Concentration"] = SectionParse("Concentration", status=status, error=results["Concentration"].error_message)
     if results.get("Price History"):
         if results["Price History"].ok:
-            parse_price_history(results["Price History"], parsed, selected_indices)
+            parse_price_history(
+                results["Price History"],
+                parsed,
+                selected_indices,
+                section_limits.get("Price History"),
+            )
         else:
             status = "skipped" if getattr(results["Price History"], "skipped", False) else "failed"
             parsed.section_parses["Price History"] = SectionParse("Price History", status=status, error=results["Price History"].error_message)

@@ -4,6 +4,7 @@ import json
 import os
 import requests
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -567,7 +568,11 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
     return bundle
 
 
-def fetch_hybrid_light_bundle(stock_code: str, timeout: int = 30) -> SourceBundle:
+def fetch_hybrid_light_bundle(
+    stock_code: str,
+    timeout: int = 30,
+    include_price_history: bool = False,
+) -> SourceBundle:
     """Use local data plus requests-only Webb sections, without Playwright."""
     code = clean_stock_code(stock_code)
     bundle = fetch_local_db_bundle(code, timeout=timeout, mirror_status="hybrid_light")
@@ -624,11 +629,57 @@ def fetch_hybrid_light_bundle(stock_code: str, timeout: int = 30) -> SourceBundl
             error_message=skipped_message,
         )
 
-    for section in ("Big Changes", "Concentration", "Price History"):
+    request_sections = ["Big Changes", "Concentration"]
+    if include_price_history:
+        request_sections.append("Price History")
+    else:
+        local_price = bundle.results.get("Price History")
+        if local_price is None or not local_price.ok or not local_price.tables:
+            price_url = urls["Price History"]
+            bundle.results["Price History"] = FetchResult(
+                name="Price History",
+                url=price_url,
+                final_url=price_url,
+                method="skipped",
+                ok=False,
+                skipped=True,
+                error_type="NOT_REQUESTED",
+                error_message=(
+                    "Not fetched in hybrid_light; use get_webbsite_price_history"
+                ),
+            )
+
+    pending_sections = []
+    for section in request_sections:
         local_result = bundle.results.get(section)
         if local_result is not None and local_result.ok and local_result.tables:
             continue
-        result = fetch_with_requests(section, urls[section], timeout=timeout)
+        pending_sections.append(section)
+
+    fetched_results: dict[str, FetchResult] = {}
+    if pending_sections:
+        with ThreadPoolExecutor(max_workers=min(2, len(pending_sections))) as executor:
+            futures = {
+                executor.submit(fetch_with_requests, section, urls[section], timeout): section
+                for section in pending_sections
+            }
+            for future in as_completed(futures):
+                section = futures[future]
+                try:
+                    fetched_results[section] = future.result()
+                except Exception as exc:  # pragma: no cover - fetcher normally returns failures
+                    fetched_results[section] = FetchResult(
+                        name=section,
+                        url=urls[section],
+                        final_url=urls[section],
+                        method="requests",
+                        ok=False,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+
+    for section in pending_sections:
+        result = fetched_results[section]
         if result.ok and section == "Price History":
             for table in result.tables:
                 table["price_source"] = "mirror"
@@ -640,6 +691,7 @@ def fetch_hybrid_light_bundle(stock_code: str, timeout: int = 30) -> SourceBundl
             "mirror_status": "requests_only",
             "mirror_base_url": mirror_base_url(),
             "browser_sections_skipped": ["Holdings", "Changes"],
+            "include_price_history": include_price_history,
         }
     )
     return bundle

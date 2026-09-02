@@ -90,6 +90,7 @@ API_SERVICE = "webbsite-ccass-api"
 API_VERSION = "1.13.0"
 GIT_SHA = os.getenv("RENDER_GIT_COMMIT", "unknown")
 CACHE_TTL_SECONDS = max(0, int_env("API_CACHE_TTL_SECONDS", 86400))
+STOCK_TOOL_BUDGETS = {"local_db": 15, "hybrid_light": 30, "auto": 45}
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
 # Fetch the CCASS sections concurrently so a slow or late section (notably
@@ -106,6 +107,10 @@ bearer_scheme = HTTPBearer(auto_error=False)
 _stock_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _mcp_session_context: Any = None
 _APP_STARTED_MONOTONIC = time.monotonic()
+
+
+def stock_tool_budget(source_preference: str) -> int:
+    return STOCK_TOOL_BUDGETS.get(source_preference, STOCK_TOOL_BUDGETS["hybrid_light"])
 
 app = FastAPI(
     title=API_TITLE,
@@ -617,13 +622,19 @@ def build_base_payload(
     headless: bool = True,
     source_preference: str = "auto",
     bypass_cache: bool = False,
+    section_limits: dict[str, int] | None = None,
+    include_price_history: bool = False,
 ) -> dict[str, Any]:
     stock_code = clean_stock_code(stock_code)
     if not stock_code:
         raise HTTPException(status_code=400, detail="Provide stock_code.")
 
     bypass_cache = bypass_cache or os.getenv("CCASS_CACHE_BYPASS", "").strip().lower() in {"1", "true", "yes", "on"}
-    cached = None if bypass_cache else cache_get(stock_code)
+    cache_key = stock_code
+    if section_limits is not None:
+        limit_key = ",".join(f"{key}={section_limits[key]}" for key in sorted(section_limits))
+        cache_key = f"{stock_code}|{source_preference}|price={int(include_price_history)}|{limit_key}"
+    cached = None if bypass_cache else cache_get(cache_key)
     if cached:
         return copy.deepcopy(_set_served_from_cache(cached, True))
 
@@ -651,7 +662,7 @@ def build_base_payload(
         )
         payload["exported"]["errors"] = [structured_error("ISSUE_ID_NOT_FOUND", warning)]
         _set_served_from_cache(payload, False)
-        cache_set(stock_code, payload)
+        cache_set(cache_key, payload)
         return copy.deepcopy(payload)
 
     known_issue_id = resolved_lookup.issue_id or issue_id_for_stock(stock_code)
@@ -670,13 +681,17 @@ def build_base_payload(
         if probe.get("error_type") == "MIRROR_BLOCKED" or probe.get("status_code") in {402, 403}:
             payload = probe_failure_base_payload(stock_code=stock_code, issue_id=known_issue_id, probe=probe)
             _set_served_from_cache(payload, False)
-            cache_set(stock_code, payload)
+            cache_set(cache_key, payload)
             return copy.deepcopy(payload)
 
     if source_preference == "local_db":
         bundle = fetch_local_db_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, mirror_status="direct_pages_only")
     elif source_preference == "hybrid_light":
-        bundle = fetch_hybrid_light_bundle(stock_code, timeout=timeout)
+        bundle = fetch_hybrid_light_bundle(
+            stock_code,
+            timeout=timeout,
+            include_price_history=include_price_history,
+        )
     elif source_preference == "mirror":
         bundle = fetch_mirror_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, headless=headless)
     else:
@@ -700,7 +715,7 @@ def build_base_payload(
             results=bundle.results,
         )
         _set_served_from_cache(payload, False)
-        cache_set(stock_code, payload)
+        cache_set(cache_key, payload)
         return payload
 
     results = bundle.results
@@ -713,6 +728,7 @@ def build_base_payload(
             id_lookup_method=lookup.method,
             id_lookup_status=lookup.status,
             source_metadata=bundle.metadata,
+            section_limits=section_limits,
         )
         parsed.analysis_warnings.extend(item for item in warnings if item not in parsed.analysis_warnings)
         exported = parsed_to_json_ready(parsed, results)
@@ -723,7 +739,7 @@ def build_base_payload(
 
     payload = {"exported": exported, "issue_id": lookup.issue_id}
     _set_served_from_cache(payload, False)
-    cache_set(stock_code, payload)
+    cache_set(cache_key, payload)
     return copy.deepcopy(payload)
 
 
@@ -1230,13 +1246,21 @@ def build_stock_payload(
     headless: bool = True,
     bypass_cache: bool = False,
     source_preference: str = "sdw",
+    include_price_history: bool = False,
 ) -> dict[str, Any]:
+    section_limits = {
+        "Big Changes": big_changes_limit,
+        "Concentration": concentration_limit,
+        "Price History": 20,
+    }
     base = build_base_payload(
         stock_code=stock_code,
         timeout=timeout,
         headless=headless,
         source_preference=source_preference,
         bypass_cache=bypass_cache,
+        section_limits=section_limits,
+        include_price_history=include_price_history,
     )
     exported = base.get("exported", {})
     metadata = exported.get("metadata", {})
@@ -1252,6 +1276,10 @@ def build_stock_payload(
     compact_big_changes = compact_records(big_changes, "big_changes", big_changes_limit)
     compact_concentration = compact_records(concentration, "concentration", concentration_limit)
     compact_price_history = compact_records(price_history, "price_history", 20)
+    section_total_counts = metadata.get("section_total_counts") or {}
+    big_changes_total_count = int(section_total_counts.get("Big Changes", len(big_changes)))
+    concentration_total_count = int(section_total_counts.get("Concentration", len(concentration)))
+    price_history_total_count = int(section_total_counts.get("Price History", len(price_history)))
 
     # Enrich big changes with participant_id (joined from Holdings) and slim,
     # explicitly-named fields; existing keys are preserved for compatibility.
@@ -1286,8 +1314,9 @@ def build_stock_payload(
         [
             len(holdings) > len(compact_holdings),
             len(changes) > len(compact_changes),
-            len(big_changes) > len(compact_big_changes),
-            len(concentration) > len(compact_concentration),
+            big_changes_total_count > len(compact_big_changes),
+            concentration_total_count > len(compact_concentration),
+            price_history_total_count > len(compact_price_history),
         ]
     )
 
@@ -1318,9 +1347,9 @@ def build_stock_payload(
                 "holdings_returned_count": len(compact_holdings),
                 "changes_total_count": len(changes),
                 "changes_returned_count": len(compact_changes),
-                "big_changes_total_count": len(big_changes),
+                "big_changes_total_count": big_changes_total_count,
                 "big_changes_returned_count": len(compact_big_changes),
-                "concentration_total_count": len(concentration),
+                "concentration_total_count": concentration_total_count,
                 "concentration_returned_count": len(compact_concentration),
                 "truncated": truncated,
             },
@@ -2077,13 +2106,22 @@ async def get_ccass_stock_data(
             description=(
                 "Source preference: local_db reads local snapshots only and is fastest; "
                 "hybrid_light (default) reads local snapshots and fetches requests-only "
-                "orgdata, Concentration, Big Changes and Price History, while skipping "
+                "orgdata, Concentration and Big Changes, while skipping Price History and "
                 "browser-required Holdings/Changes; auto fetches the full hybrid Webb "
                 "path including browser fallback and is much slower. Use auto only for "
                 "the latest data for one stock."
             ),
         ),
     ] = "hybrid_light",
+    include_price_history: Annotated[
+        bool,
+        Field(
+            description=(
+                "Include Webb-site Price History in hybrid_light mode. False by default; "
+                "prefer the separate get_webbsite_price_history tool when prices are needed."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     def work() -> dict[str, Any]:
         payload = build_stock_payload(
@@ -2095,6 +2133,7 @@ async def get_ccass_stock_data(
             concentration_limit=concentration_limit,
             headless=True,
             source_preference=source_preference,
+            include_price_history=include_price_history,
         )
         if source_preference == "local_db":
             concentration = payload.get("concentration") or {}
@@ -2111,7 +2150,12 @@ async def get_ccass_stock_data(
         return payload
 
     try:
-        return await run_ccass_tool_with_budget("get_ccass_stock_data", work, stock_code=code, tool_timeout=30)
+        return await run_ccass_tool_with_budget(
+            "get_ccass_stock_data",
+            work,
+            stock_code=code,
+            tool_timeout=stock_tool_budget(source_preference),
+        )
     except Exception as exc:
         logger.exception("get_ccass_stock_data failed")
         return mcp_exception_payload("get_ccass_stock_data", exc)
@@ -2409,7 +2453,7 @@ def fetch_announcement_pdf_endpoint(
 def get_stock(
     code: str | None = Query(None, description="HK stock code, e.g. 01592."),
     stock_code: str | None = Query(None, description="Backward-compatible alias for code."),
-    timeout: int = Query(30, ge=10, le=35, description="Overall compact API timeout budget in seconds."),
+    timeout: int = Query(30, ge=10, le=35, description="Per-upstream-fetch timeout in seconds."),
     holdings_limit: int = Query(15, ge=1, le=100, description="Maximum holdings rows returned."),
     bypass_cache: bool = Query(False, description="Bypass the in-memory stock payload cache for diagnostics."),
     changes_limit: int = Query(20, ge=1, le=100, description="Maximum changes rows returned."),

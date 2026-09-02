@@ -128,6 +128,7 @@ def metadata_dict(parsed: ParsedCCASS) -> dict:
         "default_pct_basis": getattr(parsed, "default_pct_basis", "issued") or "issued",
         "completeness_status": getattr(parsed, "completeness_status", "complete") or "complete",
         "critical_sections_failed": getattr(parsed, "critical_sections_failed", []),
+        "section_total_counts": getattr(parsed, "section_total_counts", {}),
         "holdings_data_date": parsed.holdings_data_date,
         "holdings_implied_trade_date": _parsed_value(parsed, "holdings_implied_trade_date", ""),
         "changes_date_range": parsed.changes_date_range,

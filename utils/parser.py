@@ -1193,9 +1193,27 @@ def unavailable(value: str, reason: str) -> str:
 
 def add_cross_section_warnings(parsed: ParsedCCASS) -> None:
     if not parsed.concentration_table.empty and parsed.holdings_table.empty:
-        parsed.analysis_warnings.append("Concentration succeeded, but Holdings failed. Full broker-level analysis is incomplete.")
+        holdings = parsed.section_parses.get("Holdings")
+        if holdings and holdings.status == "skipped":
+            if "requires browser" in holdings.error.lower():
+                parsed.analysis_warnings.append(
+                    "Holdings not fetched in hybrid_light (requires browser); broker-level analysis unavailable."
+                )
+        else:
+            parsed.analysis_warnings.append(
+                "Concentration succeeded, but Holdings failed. Full broker-level analysis is incomplete."
+            )
     if not parsed.big_changes_table.empty and parsed.changes_table.empty:
-        parsed.analysis_warnings.append("Big Changes succeeded, but daily Changes failed. Recent daily movement cannot be confirmed.")
+        changes = parsed.section_parses.get("Changes")
+        if changes and changes.status == "skipped":
+            if "requires browser" in changes.error.lower():
+                parsed.analysis_warnings.append(
+                    "Daily Changes not fetched in hybrid_light (requires browser); recent daily movement cannot be confirmed."
+                )
+        else:
+            parsed.analysis_warnings.append(
+                "Big Changes succeeded, but daily Changes failed. Recent daily movement cannot be confirmed."
+            )
 
 
 def _annotate_frame_dates(
@@ -1576,30 +1594,44 @@ def parse_results(
 
 def assess_completeness(parsed: ParsedCCASS) -> None:
     """Classify output completeness so failed critical data cannot look complete."""
-    critical = ("Holdings", "Concentration", "Price History")
+    # Price History is optional in hybrid_light and is not required for CCASS
+    # completeness. Browser-required skips still make the result partial or
+    # degraded, but they are not reported as fetch failures.
+    critical = ("Holdings", "Concentration")
     degraded = ("Changes", "Big Changes")
     failed_critical = []
+    skipped_critical = []
     for section in critical:
         result = parsed.section_parses.get(section)
         frame = {
             "Holdings": parsed.holdings_table,
             "Concentration": parsed.concentration_table,
-            "Price History": parsed.price_history_table,
         }[section]
-        if result is None or result.status not in {"success", "manually selected"} or frame.empty:
+        if result is not None and result.status == "skipped":
+            skipped_critical.append(section)
+        elif result is None or result.status not in {"success", "manually selected"} or frame.empty:
             failed_critical.append(section)
     parsed.critical_sections_failed = failed_critical
-    failed_degraded = [
-        section for section in degraded
-        if (parsed.section_parses.get(section) is None
-            or parsed.section_parses[section].status not in {"success", "manually selected"})
-    ]
+    failed_degraded = []
+    skipped_degraded = []
+    for section in degraded:
+        result = parsed.section_parses.get(section)
+        if result is not None and result.status == "skipped":
+            skipped_degraded.append(section)
+        elif result is None or result.status not in {"success", "manually selected"}:
+            failed_degraded.append(section)
     if failed_critical:
         parsed.completeness_status = "partial"
         message = "Critical sections failed: " + ", ".join(failed_critical) + ". Primary export must be treated as partial."
+    elif skipped_critical:
+        parsed.completeness_status = "partial"
+        message = ""
     elif failed_degraded:
         parsed.completeness_status = "degraded"
         message = "Degraded sections failed: " + ", ".join(failed_degraded) + "."
+    elif skipped_degraded:
+        parsed.completeness_status = "degraded"
+        message = ""
     else:
         parsed.completeness_status = "complete"
         message = ""

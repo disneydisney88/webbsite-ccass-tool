@@ -90,6 +90,22 @@ Future maintainers must not re-add `packages.txt` as a routine fix. Any new
 attempt requires an isolated deployment test, explicit approval, and a rollback
 plan that protects Concentration/Big Changes availability.
 
+## Issued Shares Basis
+
+- The current CCASS pipeline obtains issued shares from the Webb Holdings page
+  summary or from `stock_meta.issued_shares`, which is populated by HKEX SDW
+  snapshots.
+- The current `orgdata.asp` parser does not provide issued shares.
+- The 10jqka F10 integration can produce `shares_approx`, but that value is not
+  currently connected to the `hybrid_light` CCASS pipeline.
+- A single current share-count basis must not be applied across historical Big
+  Changes. Rights issues, consolidations and placements change the denominator
+  over time; 08245, with two consolidations and five placements, is a concrete
+  counterexample.
+- Any future integration must use a point-in-time share-capital series matched
+  to each observation date. Using today's issued shares for the whole history
+  would produce incorrect `change_shares` estimates.
+
 ## Verification Evidence
 
 Completed locally in the GitHub-linked repo:

@@ -10,7 +10,14 @@ import pandas as pd
 import api
 from utils.exporters import parsed_to_json_ready
 from utils.fetcher import FetchResult, IssueLookup
-from utils.parser import ParsedCCASS, SectionParse, assess_completeness, build_fetch_summary, parse_results
+from utils.parser import (
+    ParsedCCASS,
+    SectionParse,
+    add_cross_section_warnings,
+    assess_completeness,
+    build_fetch_summary,
+    parse_results,
+)
 from utils.source_router import SourceBundle, fetch_hybrid_light_bundle
 
 
@@ -109,16 +116,66 @@ class HybridLightRoutingTest(unittest.TestCase):
     def test_skipped_critical_section_is_not_complete(self):
         parsed = ParsedCCASS(stock_code="08245", issue_id="15949")
         parsed.section_parses = {
-            "Holdings": SectionParse("Holdings", status="skipped"),
+            "Holdings": SectionParse(
+                "Holdings",
+                status="skipped",
+                error="Requires browser; use source_preference='auto' via HTTP API",
+            ),
             "Concentration": SectionParse("Concentration", status="success"),
-            "Price History": SectionParse("Price History", status="success"),
-            "Changes": SectionParse("Changes", status="skipped"),
+            "Price History": SectionParse(
+                "Price History",
+                status="skipped",
+                error="Not fetched in hybrid_light; use get_webbsite_price_history",
+            ),
+            "Changes": SectionParse(
+                "Changes",
+                status="skipped",
+                error="Requires browser; use source_preference='auto' via HTTP API",
+            ),
             "Big Changes": SectionParse("Big Changes", status="success"),
         }
         parsed.concentration_table = pd.DataFrame([{"Date": "2026-08-01"}])
-        parsed.price_history_table = pd.DataFrame([{"Date": "2026-08-01"}])
+        parsed.big_changes_table = pd.DataFrame([{"Date": "2026-08-01"}])
+        add_cross_section_warnings(parsed)
         assess_completeness(parsed)
+
         self.assertEqual(parsed.completeness_status, "partial")
+        self.assertEqual(parsed.critical_sections_failed, [])
+        self.assertIn(
+            "Holdings not fetched in hybrid_light (requires browser); broker-level analysis unavailable.",
+            parsed.analysis_warnings,
+        )
+        self.assertIn(
+            "Daily Changes not fetched in hybrid_light (requires browser); recent daily movement cannot be confirmed.",
+            parsed.analysis_warnings,
+        )
+        self.assertFalse(any("Critical sections failed" in item for item in parsed.analysis_warnings))
+        self.assertFalse(any("Price History" in item for item in parsed.analysis_warnings))
+
+    def test_not_requested_price_history_does_not_reduce_completeness(self):
+        parsed = ParsedCCASS(stock_code="08245", issue_id="15949")
+        parsed.section_parses = {
+            "Holdings": SectionParse("Holdings", status="success"),
+            "Concentration": SectionParse("Concentration", status="success"),
+            "Changes": SectionParse("Changes", status="success"),
+            "Big Changes": SectionParse("Big Changes", status="success"),
+            "Price History": SectionParse(
+                "Price History",
+                status="skipped",
+                error="Not fetched in hybrid_light; use get_webbsite_price_history",
+            ),
+        }
+        parsed.holdings_table = pd.DataFrame([{"Participant": "Example"}])
+        parsed.concentration_table = pd.DataFrame([{"Date": "2026-08-01"}])
+        parsed.changes_table = pd.DataFrame([{"Date": "2026-08-01"}])
+        parsed.big_changes_table = pd.DataFrame([{"Date": "2026-08-01"}])
+
+        add_cross_section_warnings(parsed)
+        assess_completeness(parsed)
+
+        self.assertEqual(parsed.completeness_status, "complete")
+        self.assertEqual(parsed.critical_sections_failed, [])
+        self.assertEqual(parsed.analysis_warnings, [])
 
 
 class SnapshotWorkflowContractTest(unittest.TestCase):

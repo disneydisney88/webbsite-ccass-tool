@@ -46,7 +46,40 @@ playwright install chromium
 streamlit run app.py
 ```
 
-On Streamlit Cloud, Playwright system dependencies can conflict with `packages.txt` because one missing apt package makes the entire requirements install fail. Since the current primary CCASS path is HKEX SDW via `requests`, `packages.txt` is intentionally kept empty and Playwright is treated as optional/lazy for mirror-only browser fallback. If the mirror is unblocked later and Streamlit needs browser fetching, test any apt package additions one by one in Streamlit Cloud.
+### Streamlit Cloud capability boundary
+
+The repository intentionally has no `packages.txt`. On Streamlit Cloud the
+Playwright Chromium binary may be present, but it cannot start because required
+system libraries such as `libglib-2.0.so.0` are unavailable (`exitCode=127`).
+This is a fixed deployment limitation, not an intermittent browser failure.
+
+Consequently, the requests-only Webb pages remain available on Streamlit Cloud:
+
+- Company / orgdata
+- Big Changes
+- Concentration
+- Price History
+
+Holdings and daily Changes require a working browser and are not available from
+the Streamlit Cloud deployment. Their rows must remain visibly skipped/partial;
+they must not be presented as a complete result. For broker-level Holdings or
+daily Changes, run Streamlit locally in `mirror` mode or use the Render API,
+where the Docker image installs the Chromium runtime libraries.
+
+Do not reintroduce `packages.txt` without a separate deployment experiment and
+explicit approval. Two earlier attempts were removed:
+
+- `15a2441` added the larger Playwright apt dependency path and caused the
+  Streamlit dependency build to fail when package names were incompatible.
+- `c9d0c74` reduced the file to only `libglib2.0-0`; it was subsequently removed
+  by `84a6d10` because the Streamlit package-build dependency remained unsafe.
+
+`Dockerfile.api` is based on `python:3.11-slim` (Debian 12 at the time of this
+decision), while Streamlit Community Cloud uses Debian 11. Apt package names and
+availability differ between those environments (including audio-library package
+variants such as `libasound2` / `libasound2t64`), so the Docker apt list must not
+be copied wholesale into Streamlit Cloud. One invalid package can fail the whole
+app build and remove access to the otherwise working requests-only sections.
 
 ## CCASS Source Mode
 
@@ -89,19 +122,21 @@ You can set it as an environment variable or in `ccass_source_config.json`:
 
 `hpu.asp` may work through plain requests on that mirror, while some CCASS pages first return a small JavaScript cookie reload page. The app does not manually bypass this; it only uses normal Playwright page execution for the two browser-required CCASS sections. If Playwright is unavailable, the app preserves the original challenge result and falls back to SDW/local DB instead of crashing. The daily probe is persisted in the local snapshot DB and records which sections need browser rendering.
 
-On Streamlit Cloud, Chromium is installed lazily only when a mirror page actually
-needs browser rendering. A failed browser installation is shown as a warning and
-does not stop the SDW/local DB fallback.
+The Streamlit Cloud browser boundary above applies even when lazy installation
+successfully downloads Chromium: the binary still exits with code 127 when its
+system shared libraries are absent. The app can continue with requests/local
+data, but that is a partial result rather than successful Holdings/Changes
+degradation.
 
 Set `CCASS_DEBUG_DUMP=true` only for a controlled diagnosis. It writes raw
 Holdings/Changes HTML and metadata under `debug/`; the default is off and the
 directory is ignored by Git.
 
-The default Streamlit path is fast hybrid mode: HKEX SDW provides current
-Holdings, local snapshots provide Changes, and direct Webb-site pages provide
-Big Changes, Concentration and Price History. Holdings/Changes launch a normal
-browser only when the daily probe or the current response identifies a
-JavaScript challenge; the other sections remain requests-only.
+The default Streamlit path keeps direct requests-only pages available for Big
+Changes, Concentration and Price History. Local snapshots may supplement a stock
+when they exist. On Streamlit Cloud, live Holdings/Changes cannot launch the
+browser described by the auto route and therefore remain skipped/partial; local
+Streamlit and the Render API can use that browser path.
 
 Full mirror Holdings/Changes is optional. To enable the slower Render browser
 path, add these App Secrets (not GitHub Actions secrets):

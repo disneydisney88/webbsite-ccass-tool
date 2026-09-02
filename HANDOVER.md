@@ -60,6 +60,36 @@ Still open from the 08245 brief: independent Non-CCASS time-series output, struc
 - `mirror_probe()` remains defined but is not connected to the `auto` route. The current decision is **do not connect it in this task**. Connecting it later would add a daily upstream request, probe-cache semantics, and a decision about whether a failed probe triggers SDW fallback or a browser fetch. This needs a separate reviewed change because it affects frequency and source selection.
 - README was corrected so it no longer promises a daily auto probe that does not currently run.
 
+## Streamlit Cloud Browser Decision
+
+Decision: do **not** add a root `packages.txt` for Playwright on Streamlit
+Community Cloud. Preserve the working requests-only deployment instead.
+
+- The Chromium binary can download successfully under
+  `/home/appuser/.cache/ms-playwright/`, but startup fails with `exitCode=127`
+  because `libglib-2.0.so.0` and other system shared libraries are unavailable.
+- Streamlit Cloud therefore supports Company/orgdata, Big Changes,
+  Concentration and Price History through requests, but not live Holdings or
+  daily Changes. Those browser-required sections must remain visibly
+  skipped/partial.
+- Use local Streamlit in `mirror` mode or the Render API when Holdings/Changes
+  are required. Render uses `Dockerfile.api`, which installs the Chromium binary
+  and its system runtime libraries.
+- This is an explicit reliability tradeoff. A bad apt package in `packages.txt`
+  fails the entire Streamlit build, which would also remove the currently
+  working requests-only sections.
+- Historical evidence: `15a2441` documented failure of the larger Playwright apt
+  dependency path; `c9d0c74` tried a minimal `libglib2.0-0` package; `84a6d10`
+  removed the Streamlit package-build dependency again.
+- `Dockerfile.api` used a Debian 12 `python:3.11-slim` base when this decision was
+  recorded, while Streamlit Community Cloud uses Debian 11. Apt package names
+  and availability differ between the two environments, so the Docker list is
+  not a safe drop-in Streamlit package list.
+
+Future maintainers must not re-add `packages.txt` as a routine fix. Any new
+attempt requires an isolated deployment test, explicit approval, and a rollback
+plan that protects Concentration/Big Changes availability.
+
 ## Verification Evidence
 
 Completed locally in the GitHub-linked repo:

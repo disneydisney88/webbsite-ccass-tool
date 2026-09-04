@@ -11,7 +11,12 @@ REPORT_COLUMNS = {
     "holdings": ["trade_date", "settlement_date", "Rank", "Participant", "CCASS ID", "Holding", "Stake %", "Cumulative %"],
     "changes": ["trade_date", "settlement_date", "Participant", "Change", "Change %", "Holding after", "Stake after"],
     "concentration": ["trade_date", "settlement_date", "Date", "Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"],
-    "price_history": ["Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP", "price_source", "turnover_est", "vwap_est"],
+    "price_history": [
+        "Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP",
+        "price_source", "turnover_est", "vwap_est", "volume_pct_issued",
+        "vwap_close_divergence_pct", "BLOCK_TRADE_SUSPECT", "implied_block_price_est",
+        "implied_block_price_method",
+    ],
 }
 
 

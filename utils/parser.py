@@ -1025,7 +1025,12 @@ def parse_price_history(
         parsed.latest_price_turnover = safe_str(latest.get("Turnover"))
         parsed.latest_price_vwap = safe_str(latest.get("VWAP"))
         parsed.price_source = safe_str(latest.get("price_source"))
-        if parsed.price_source == "yahoo" or "turnover_est" in parsed.price_history_table.columns:
+        turnover_estimated = parsed.price_source == "yahoo"
+        if not turnover_estimated and "turnover_est" in parsed.price_history_table.columns:
+            estimated = pd.to_numeric(parsed.price_history_table["turnover_est"], errors="coerce")
+            actual = pd.to_numeric(parsed.price_history_table.get("Turnover"), errors="coerce")
+            turnover_estimated = estimated.notna().any() and actual.notna().sum() == 0
+        if turnover_estimated:
             warning = "Turnover is estimated as volume \u00d7 close, not actual turnover"
             if warning not in parsed.analysis_warnings:
                 parsed.analysis_warnings.append(warning)

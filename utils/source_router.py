@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from .fetch_yahoo import fetch_yahoo_price_history
 from .fetcher import (
@@ -44,6 +45,7 @@ MIRROR_BROWSER_SECTIONS = {"Holdings", "Changes"}
 PROBE_CACHE_PATH = Path(os.getenv("CCASS_MIRROR_PROBE_CACHE", "data/mirror_probe_status.json"))
 VALID_MODES = {"auto", "mirror", "local_db", "hybrid_light", "sdw"}
 RENDER_API_DEFAULT = "https://webbsite-ccass-api.onrender.com"
+SECONDARY_MIRROR_DEFAULT = "https://webbsite.0xmd.com"
 LOCAL_DATA_SECTIONS = ("Holdings", "Concentration", "Changes", "Big Changes", "Price History")
 
 
@@ -252,6 +254,8 @@ def _browser_fallback_result(
     timeout: int,
     headless: bool,
     stock_code: str,
+    prior_attempts: list[dict[str, object]] | None = None,
+    fallback_chain: str = "requests -> playwright",
 ) -> FetchResult:
     request_attempt = {
         "source": "requests",
@@ -269,10 +273,12 @@ def _browser_fallback_result(
         headless=headless,
         debug_stock=stock_code,
     )
-    browser_result.attempted_sources.append(request_attempt)
+    browser_result.attempted_sources = list(prior_attempts or []) + [request_attempt] + list(
+        browser_result.attempted_sources
+    )
     if browser_result.ok:
         browser_result.method = "playwright_after_challenge"
-        browser_result.fallback_method_used = "requests -> playwright_after_challenge"
+        browser_result.fallback_method_used = fallback_chain
         return browser_result
 
     detail = browser_result.error_message or "unknown browser error"
@@ -286,8 +292,8 @@ def _browser_fallback_result(
         )
     else:
         request_result.error_message = f"{request_result.error_message}; {prefix}: {detail}"
-    request_result.fallback_method_used = prefix
-    request_result.attempted_sources.insert(0, request_attempt)
+    request_result.fallback_method_used = fallback_chain
+    request_result.attempted_sources = list(prior_attempts or []) + [request_attempt]
     request_result.attempted_sources.append(
         {
             "source": "playwright",
@@ -300,6 +306,71 @@ def _browser_fallback_result(
         }
     )
     return request_result
+
+
+def _secondary_mirror_url(url: str) -> str:
+    base = os.getenv("CCASS_SECONDARY_MIRROR_BASE_URL", SECONDARY_MIRROR_DEFAULT).strip().rstrip("/")
+    if not base:
+        return ""
+    source = urlsplit(url)
+    target = urlsplit(base)
+    if source.netloc.lower() == target.netloc.lower():
+        return ""
+    return urlunsplit((target.scheme or "https", target.netloc, source.path, source.query, ""))
+
+
+def _attempt_record(result: FetchResult, source: str) -> dict[str, object]:
+    return {
+        "source": source,
+        "url": result.url,
+        "final_url": result.final_url,
+        "ok": result.ok,
+        "status_code": result.status,
+        "error_type": result.error_type,
+        "error_message": result.error_message,
+    }
+
+
+def _challenge_fallback_result(
+    section: str,
+    primary_result: FetchResult,
+    timeout: int,
+    headless: bool,
+    stock_code: str,
+    browser_enabled: bool,
+    debug_kwargs: dict[str, str],
+) -> FetchResult:
+    primary_attempt = _attempt_record(primary_result, "requests")
+    secondary_url = _secondary_mirror_url(primary_result.url)
+    if not secondary_url:
+        if browser_enabled:
+            return _browser_fallback_result(
+                section,
+                primary_result,
+                timeout=timeout,
+                headless=headless,
+                stock_code=stock_code,
+            )
+        primary_result.fallback_method_used = "requests"
+        return primary_result
+
+    secondary_result = fetch_with_requests(section, secondary_url, timeout=timeout, **debug_kwargs)
+    secondary_result.attempted_sources = [primary_attempt] + list(secondary_result.attempted_sources)
+    secondary_result.fallback_method_used = "requests -> 0xmd"
+    if secondary_result.ok:
+        secondary_result.method = "requests_0xmd_after_challenge"
+        return secondary_result
+    if not browser_enabled:
+        return secondary_result
+    return _browser_fallback_result(
+        section,
+        secondary_result,
+        timeout=timeout,
+        headless=headless,
+        stock_code=stock_code,
+        prior_attempts=[primary_attempt],
+        fallback_chain="requests -> 0xmd -> playwright",
+    )
 
 
 def _describe_browser_failure(result: FetchResult) -> FetchResult:
@@ -524,8 +595,16 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
             result.name = section
         else:
             result = fetch_with_requests(section, urls[section], timeout=timeout, **debug_kwargs)
-        if browser_enabled and section in MIRROR_BROWSER_SECTIONS and result.error_type == "JS_CHALLENGE":
-            result = _browser_fallback_result(section, result, timeout=timeout, headless=headless, stock_code=stock_code)
+        if section in MIRROR_BROWSER_SECTIONS and result.error_type == "JS_CHALLENGE":
+            result = _challenge_fallback_result(
+                section,
+                result,
+                timeout=timeout,
+                headless=headless,
+                stock_code=stock_code,
+                browser_enabled=browser_enabled,
+                debug_kwargs=debug_kwargs,
+            )
         local_result = bundle.results.get(section)
         if result.ok:
             # A successful remote refresh is newer and therefore wins over a

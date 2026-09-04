@@ -95,6 +95,10 @@ class FetchDiagnosticsTest(unittest.TestCase):
             bundle = fetch_hybrid_bundle("08245", timeout=1)
         self.assertTrue(bundle.results["Holdings"].ok)
         self.assertEqual(bundle.results["Holdings"].method, "playwright_after_challenge")
+        self.assertEqual(
+            bundle.results["Holdings"].fallback_method_used,
+            "requests -> 0xmd -> playwright",
+        )
         self.assertEqual(bundle.results["Holdings"].attempted_sources[0]["source"], "requests")
         summary = build_fetch_summary(ParsedCCASS(stock_code="08245", issue_id="15949"), bundle.results)
         row = summary.loc[summary["Section"] == "Holdings"].iloc[0]
@@ -156,6 +160,34 @@ class FetchDiagnosticsTest(unittest.TestCase):
             bundle = fetch_hybrid_bundle("08245", timeout=1)
         browser.assert_not_called()
         self.assertEqual(bundle.results["Holdings"].method, "requests")
+
+    def test_secondary_mirror_success_avoids_browser(self):
+        def fetch_result(section, url, timeout, **kwargs):
+            if section == "Holdings" and "webb-database.com" in url:
+                return FetchResult(
+                    name=section, url=url, status=200, ok=False,
+                    error_type="JS_CHALLENGE", error_message="JavaScript challenge",
+                )
+            return FetchResult(
+                name=section, url=url, status=200, ok=True, method="requests",
+                tables=[pd.DataFrame([{"Name": "broker"}])],
+            )
+
+        local = SourceBundle(
+            lookup=IssueLookup(stock_code="06182", issue_id="25809", status="success"), results={},
+        )
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local), patch(
+            "utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}
+        ), patch("utils.source_router.fetch_with_requests", side_effect=fetch_result), patch(
+            "utils.source_router.fetch_with_playwright"
+        ) as browser:
+            bundle = fetch_hybrid_bundle("06182", timeout=1)
+        browser.assert_not_called()
+        result = bundle.results["Holdings"]
+        self.assertTrue(result.ok)
+        self.assertEqual(result.method, "requests_0xmd_after_challenge")
+        self.assertEqual(result.fallback_method_used, "requests -> 0xmd")
+        self.assertIn("webbsite.0xmd.com", result.url)
 
     def test_hybrid_404_does_not_use_browser_fallback(self):
         not_found = FetchResult(

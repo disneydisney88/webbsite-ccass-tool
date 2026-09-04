@@ -1,8 +1,10 @@
 import unittest
+from io import StringIO
 
 import pandas as pd
 
 from utils.fetcher import FetchResult
+from utils.exporters import combined_stock_csv
 from utils.parser import ParsedCCASS, parse_price_history
 
 
@@ -57,6 +59,8 @@ class Stock06182BlockTradeRegressionTest(unittest.TestCase):
 
     def parsed_prices(self, issued_shares: str = "800000000") -> ParsedCCASS:
         table = self.price_table()
+        table["price_source"] = "mirror"
+        table["turnover_est"] = table["Close"] * table["Volume"]
         result = FetchResult(
             name="Price History",
             url="fixture://06182/prices",
@@ -91,6 +95,10 @@ class Stock06182BlockTradeRegressionTest(unittest.TestCase):
             prices.at["2026-09-03", "implied_block_price_method"],
             "daily_ohlcv_residual",
         )
+        self.assertNotIn(
+            "Turnover is estimated as volume \u00d7 close, not actual turnover",
+            parsed.analysis_warnings,
+        )
 
     def test_block_trade_warning_points_to_t_plus_two_snapshot(self):
         parsed = self.parsed_prices()
@@ -104,6 +112,34 @@ class Stock06182BlockTradeRegressionTest(unittest.TestCase):
         prices = parsed.price_history_table
         self.assertFalse(prices["BLOCK_TRADE_SUSPECT"].any())
         self.assertTrue(prices["volume_pct_issued"].isna().all())
+
+    def test_block_trade_metrics_and_warning_are_exported_to_csv(self):
+        parsed = self.parsed_prices()
+        result = FetchResult(
+            name="Price History",
+            url="fixture://06182/prices",
+            ok=True,
+            method="requests",
+            tables=[self.price_table()],
+        )
+        text = combined_stock_csv(parsed, {"Price History": result}).decode("utf-8-sig")
+        frame = pd.read_csv(StringIO(text), comment="#")
+        price_rows = frame[
+            (frame["section"] == "Price History") & (frame["record_type"] == "data")
+        ]
+        target = price_rows[price_rows["Date"] == "2026-09-03"].iloc[0]
+        for column in (
+            "volume_pct_issued",
+            "vwap_close_divergence_pct",
+            "BLOCK_TRADE_SUSPECT",
+            "implied_block_price_est",
+            "implied_block_price_method",
+        ):
+            self.assertIn(column, frame.columns)
+        self.assertTrue(bool(target["BLOCK_TRADE_SUSPECT"]))
+        self.assertEqual(target["implied_block_price_method"], "daily_ohlcv_residual")
+        warnings = frame[frame["section"] == "Data Quality Warnings"]["error_message"].astype(str)
+        self.assertTrue(warnings.str.contains("BLOCK_TRADE_SUSPECT: 2026-09-03", regex=False).any())
 
 
 if __name__ == "__main__":

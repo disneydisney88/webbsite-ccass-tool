@@ -268,3 +268,49 @@ Render Free Web Service 可能會冷啟動，第一次抓取會較慢。
 - 不登入、不繞過付費牆、不破解 CAPTCHA。
 - 如果某頁失敗，工具會在 Markdown 報告列出 failed URL、error type、error message，並繼續輸出其他成功頁面。
 - 如果 Concentration 頁失敗，工具會用 Holdings 頁的 cumulative stake 即時計算 Top 5 / Top 10 作備案。
+
+## Longbridge Secondary CCASS Source
+
+The API can use Longbridge's official MCP as a read-only secondary source for
+broker holdings. It never performs an upstream call at process startup.
+
+1. Set `LONGBRIDGE_TOKEN_KEY` to a strong secret on the server.
+2. Preferred route: call token-protected `POST /admin/longbridge/device_start`.
+   Open the returned verification URL, approve the displayed user code, then
+   call `POST /admin/longbridge/device_poll` with the returned `session_id` at
+   the supplied interval until its status is `authenticated`. Device codes and
+   tokens are never returned by the API.
+3. Fallback route: generate a one-use Agent Auth Code at
+   `https://open.longbridge.com/connect`, then redeem it with
+   `POST /admin/longbridge/authenticate?key=...` and JSON body
+   `{"auth_code":"..."}`. Longbridge's official Agent Auth documentation says
+   this code is valid for 10 minutes and one use; an external task brief that
+   said five minutes conflicts with that primary source.
+4. Last-resort local route: use the official Longbridge SDK OAuth token file on
+   a trusted workstation. This server does not ingest plaintext SDK token files.
+5. Check `/health`: it reports authentication method, expiry timestamp,
+   remaining seconds, and refresh-token availability. Expired OAuth credentials
+   are refreshed before a Longbridge data call when a refresh token exists.
+
+Credentials are encrypted before being written to SQLite. Set
+`LONGBRIDGE_TOKEN_FILE` only when a persistent secret-file mount is available;
+the encrypted file is created with mode 0600 where the operating system permits.
+
+`source_preference` modes:
+
+- `local_db`: no upstream request.
+- `hybrid_light`: existing requests-only Webb sections, with Longbridge filling
+  missing Holdings/Changes when authentication is available.
+- `longbridge`: Longbridge Holdings plus locally derived Changes and
+  Concentration; unrelated sections remain available from local DB.
+- `auto`: full Webb path plus a Longbridge cross-check. Numeric comparisons are
+  made only when source dates match.
+
+Every successful full Longbridge holding snapshot is stored in
+`longbridge_holdings_daily`. Derived daily changes require two distinct stored
+dates. The first successful day therefore has Holdings and Concentration but no
+derived Big Changes, which is reported explicitly.
+
+The server enforces a fixed read-only Longbridge tool whitelist. Authentication
+failure never turns the whole stock request into HTTP 500: Webb/local data is
+returned with a `LONGBRIDGE_AUTH_EXPIRED` warning.

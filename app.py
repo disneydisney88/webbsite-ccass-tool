@@ -26,6 +26,7 @@ except ImportError:
 import utils.exporters as exporters
 from utils.hkexnews import HKEXAnnouncementResult, fetch_announcements
 from utils.fetcher import (
+    FetchResult,
     USER_AGENT,
     IssueLookup,
     clean_stock_code,
@@ -33,8 +34,10 @@ from utils.fetcher import (
     fetch_all,
     fetch_with_requests,
     issue_urls,
+    now_iso,
     resolve_issue_id_from_stock,
 )
+from utils.longbridge import LongbridgeAuthError, LongbridgeError, fetch_longbridge_stock
 from utils.parser import SECTIONS, build_fetch_summary, parse_results, table_preview_records
 from utils.report import build_report
 from utils.events import events_url, parse_events_html, parse_events_name
@@ -116,6 +119,52 @@ def env_bool(name: str, default: bool) -> bool:
 
 def empty_lookup() -> IssueLookup:
     return IssueLookup(stock_code="", issue_id="", method="", status="", message="")
+
+
+def longbridge_fetch_results(data) -> dict[str, FetchResult]:
+    holdings = pd.DataFrame(data.holdings).rename(
+        columns={
+            "data_date": "Date",
+            "ccass_id": "CCASS ID",
+            "participant_name": "Participant",
+            "holding_shares": "Holding",
+            "stake_pct_of_issued": "Stake %",
+            "stake_pct_of_ccass": "Stake % of CCASS",
+        }
+    )
+    changes = pd.DataFrame(data.changes).rename(
+        columns={
+            "data_date": "Date",
+            "ccass_id": "CCASS ID",
+            "participant_name": "Participant",
+            "change_shares": "Change",
+            "change_pct_of_issued": "Change %",
+            "holding_after": "Holding after",
+        }
+    )
+    concentration = pd.DataFrame(data.concentration).rename(
+        columns={
+            "data_date": "Date",
+            "top5_pct_of_ccass": "Top 5 %",
+            "top10_pct_of_ccass": "Top 10 %",
+            "ccass_total_pct_of_issued": "Stake in CCASS %",
+        }
+    )
+    tables = {"Holdings": holdings, "Changes": changes, "Concentration": concentration}
+    results = {}
+    for section, table in tables.items():
+        results[section] = FetchResult(
+            name=section,
+            url="longbridge://mcp/broker_holding_detail",
+            final_url="longbridge://mcp/broker_holding_detail",
+            fetched_time=now_iso(),
+            method="longbridge_mcp",
+            ok=not table.empty,
+            tables=[table] if not table.empty else [],
+            error_type="" if not table.empty else "NO_RESULT",
+            error_message="" if not table.empty else f"Longbridge returned no {section} rows.",
+        )
+    return results
 
 
 def apply_source_metadata(parsed, metadata: dict, warnings: list[str]) -> None:
@@ -1328,8 +1377,14 @@ with st.sidebar:
         step=5,
     )
     announcement_years = st.selectbox("HKEX announcements period", [1, 2], index=0, format_func=lambda value: f"{value} year" if value == 1 else f"{value} years")
+    source_choice = st.segmented_control(
+        "Source",
+        ["Webb-site", "Longbridge", "Hybrid"],
+        default="Hybrid",
+        help="Hybrid uses Webb-site first and fills missing broker holdings from Longbridge.",
+    )
     headless = st.toggle("Playwright headless", value=env_bool("PLAYWRIGHT_HEADLESS", True))
-    fetch_clicked = st.button("Fetch Webb-site Data", type="primary", use_container_width=True)
+    fetch_clicked = st.button("Fetch CCASS Data", type="primary", use_container_width=True)
 
 if "results" not in st.session_state:
     st.session_state.results = None
@@ -1371,8 +1426,41 @@ if fetch_clicked:
             if input_type == "Stock Code":
                 stock_code = clean_stock_code(raw_input)
                 st.write(f"Stock code: {stock_code}")
-                st.write(f"Source mode: {get_source_mode()}")
-                bundle = fetch_source_bundle_for_stock(stock_code, timeout=int(timeout), headless=headless)
+                st.write(f"Source selection: {source_choice}")
+                if source_choice == "Longbridge":
+                    bundle = fetch_local_db_bundle(stock_code, timeout=int(timeout), mirror_status="longbridge_only")
+                    try:
+                        longbridge_data = fetch_longbridge_stock(stock_code, timeout=min(int(timeout), 30))
+                        bundle.results.update(longbridge_fetch_results(longbridge_data))
+                        bundle.metadata.update({"source": "longbridge", "longbridge_data_date": longbridge_data.data_date})
+                        bundle.warnings.extend(longbridge_data.warnings)
+                    except LongbridgeAuthError:
+                        bundle.warnings.append(
+                            "LONGBRIDGE_AUTH_EXPIRED: authenticate the server through the Device Flow admin endpoint; Agent Auth Code is a fallback."
+                        )
+                    except LongbridgeError as exc:
+                        bundle.warnings.append(f"LONGBRIDGE_FETCH_FAILED: {exc}")
+                else:
+                    bundle = fetch_source_bundle_for_stock(stock_code, timeout=int(timeout), headless=headless)
+                    if source_choice == "Hybrid" and (
+                        not (bundle.results.get("Holdings") and bundle.results["Holdings"].ok)
+                        or not (bundle.results.get("Changes") and bundle.results["Changes"].ok)
+                    ):
+                        try:
+                            longbridge_data = fetch_longbridge_stock(stock_code, timeout=min(int(timeout), 30))
+                            supplement = longbridge_fetch_results(longbridge_data)
+                            for section in ("Holdings", "Changes"):
+                                current = bundle.results.get(section)
+                                if not current or not current.ok:
+                                    bundle.results[section] = supplement[section]
+                            bundle.metadata.update({"source": "hybrid_webb_longbridge", "longbridge_data_date": longbridge_data.data_date})
+                            bundle.warnings.extend(longbridge_data.warnings)
+                        except LongbridgeAuthError:
+                            bundle.warnings.append(
+                                "LONGBRIDGE_AUTH_EXPIRED: Webb-site result retained; use the Longbridge Device Flow admin endpoint to enable fallback."
+                            )
+                        except LongbridgeError as exc:
+                            bundle.warnings.append(f"LONGBRIDGE_FETCH_FAILED: {exc}")
                 lookup = bundle.lookup
                 issue_id = lookup.issue_id
                 source_metadata = bundle.metadata
@@ -1428,6 +1516,8 @@ if fetch_clicked:
             with st.status("Fetching Webb-site events & officers...", expanded=True) as status:
                 events_records, events_name, events_warn = [], "", []
                 try:
+                    if not issue_id:
+                        raise ValueError("Webb-site issue ID unavailable; supplementary events were skipped.")
                     ev = fetch_with_requests("Events", events_url(issue_id), timeout=min(int(timeout), 20))
                     if ev.html:
                         events_records = parse_events_html(ev.html)

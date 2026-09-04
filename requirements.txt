@@ -8,6 +8,7 @@ pandas_market_calendars>=5,<6
 beautifulsoup4>=4.12,<5
 lxml>=5.2,<7
 requests>=2.32,<3
+cryptography>=43,<47
 playwright>=1.44,<2
 openpyxl>=3.1,<4
 tabulate>=0.9,<1

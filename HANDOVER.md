@@ -90,6 +90,25 @@ Future maintainers must not re-add `packages.txt` as a routine fix. Any new
 attempt requires an isolated deployment test, explicit approval, and a rollback
 plan that protects Concentration/Big Changes availability.
 
+## Longbridge Authentication Decision
+
+- Route A, OAuth 2.0 Device Authorization, is the preferred server login path.
+  The protected API exposes `/admin/longbridge/device_start` and
+  `/admin/longbridge/device_poll`; secret device and token values remain
+  encrypted in SQLite.
+- Route B, Agent Auth Code, remains available through
+  `/admin/longbridge/authenticate` when Device Flow is unavailable. Longbridge's
+  official Agent Auth documentation states 10 minutes and one use. The revised
+  external brief's five-minute statement was not adopted because it conflicts
+  with the primary source.
+- Route C, the official SDK OAuth token file, remains a local-workstation
+  fallback and is not imported as plaintext by the service.
+- Device Flow dynamically registers and reuses an OAuth client, alternates AP
+  and US token polling without exposing the device code, stores refresh tokens
+  encrypted, and refreshes expired access tokens before data calls.
+- No live account authorization was performed. Production region eligibility
+  and live token lifetime remain unknown / unconfirmed.
+
 ## Issued Shares Basis
 
 - The current CCASS pipeline obtains issued shares from the Webb Holdings page
@@ -190,6 +209,26 @@ For 08191:
 - Public pages only; no login or paywall bypass.
 - Keep request frequency polite and preserve raw HTML/table previews for diagnosis.
 - Never print or commit API tokens. If logging configuration, show only masked values.
+
+## Longbridge Round 3 Work (2026-09-04)
+
+The working tree contains an uncommitted Longbridge secondary-source
+implementation: a minimal Streamable HTTP MCP client, strict read-only
+whitelist, encrypted SQLite/secret-file credential storage, daily broker
+snapshot persistence, API/MCP source routing, cross-check output, and a
+Streamlit source selector.
+
+Live authentication has not been run because no account authorization was
+completed. Device start/poll, encrypted persistence, and refresh rotation pass
+offline fixtures; actual token lifetime, production region eligibility, the
+three required 06182 live JSON files, and the 28-stock `caiji` run remain
+unverified. Do not describe these live checks as passed until Device Flow or the
+Agent Auth fallback has been completed and the manifest regenerated.
+
+Official public documentation does not guarantee that `static_info` supplies
+issued shares. The implementation infers an issued-share basis only when broker
+rows contain a consistent native holding percentage; otherwise issued-basis
+fields are withheld with a warning.
 
 ## Deployment State
 

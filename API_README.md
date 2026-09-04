@@ -287,6 +287,49 @@ flows depend on the current schema.
 
 ### Unreleased
 
+- **Longbridge secondary source:** `/api/stock` and MCP
+  `get_ccass_stock_data` accept `source_preference=longbridge`. The existing
+  `hybrid_light` mode fills missing Holdings/Changes from Longbridge when the
+  server is authenticated; `auto` also emits a date-safe `cross_check` block.
+  Holdings rows carry both issued-share and CCASS-total percentage bases.
+- **Longbridge administration:** token-protected
+  `POST /admin/longbridge/device_start` and
+  `POST /admin/longbridge/device_poll` implement the preferred OAuth 2.0 Device
+  Authorization flow. The start response exposes only a verification URL,
+  user code, opaque session ID, expiry, and polling interval. It never exposes
+  the OAuth device code or access token. The fallback
+  `POST /admin/longbridge/authenticate` redeems a one-use Agent Auth Code;
+  `POST /admin/longbridge/snapshot_watchlist?group=caiji|lshape` stores complete
+  daily broker snapshots with a minimum 1.5-second delay between stocks.
+- **Longbridge token lifecycle:** `/health` reports authentication method,
+  expiry, remaining seconds, and refresh availability. Device-flow credentials
+  refresh automatically before use. The official Agent Auth documentation says
+  its one-use code remains valid for 10 minutes.
+
+Device Flow request sequence:
+
+```http
+POST /admin/longbridge/device_start?key=<admin-token>
+```
+
+The response contains `verification_url`, `user_code`, `session_id`,
+`expires_in`, `interval`, and `status`. After browser approval, poll no faster
+than `interval` seconds:
+
+```http
+POST /admin/longbridge/device_poll?key=<admin-token>
+Content-Type: application/json
+
+{"session_id":"<opaque-session-id>"}
+```
+
+`authorization_pending` and `slow_down` responses include `retry_after`.
+Success returns `status=authenticated`, token expiry, and whether refresh is
+available. Neither endpoint returns the private device code, access token, or
+refresh token.
+- **Longbridge participant history:** MCP `get_longbridge_broker_daily` accepts
+  a five-digit stock code, CCASS participant ID, and up to 60 days.
+
 - **Structured error codes (handover 1.2):** the compact `/api/stock` response
   gains an `errors` array of `{error_code, message, retry_recommended}`
   (COLD_START / SOURCE_TIMEOUT / SOURCE_FETCH_FAILED / SOURCE_CHANGED /

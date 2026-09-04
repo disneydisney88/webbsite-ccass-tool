@@ -149,7 +149,164 @@ def ensure_db(path: Path = DB_PATH) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS longbridge_holdings_daily (
+                code TEXT NOT NULL,
+                data_date TEXT NOT NULL,
+                ccass_id TEXT NOT NULL,
+                participant_name TEXT NOT NULL,
+                holding_shares INTEGER NOT NULL,
+                stake_pct_of_issued REAL,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (code, data_date, ccass_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS longbridge_credentials (
+                credential_id TEXT PRIMARY KEY,
+                encrypted_payload BLOB NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
+
+
+def upsert_longbridge_holdings(
+    code: str,
+    data_date: str,
+    rows: list[dict[str, Any]],
+    path: Path = DB_PATH,
+) -> int:
+    ensure_db(path)
+    fetched_at = now_iso()
+    values = []
+    for row in rows:
+        ccass_id = str(row.get("ccass_id") or "").strip().upper()
+        if not ccass_id:
+            continue
+        values.append(
+            (
+                str(code).zfill(5),
+                str(data_date),
+                ccass_id,
+                str(row.get("participant_name") or ""),
+                int(row.get("holding_shares") or 0),
+                row.get("stake_pct_of_issued"),
+                fetched_at,
+            )
+        )
+    with closing(sqlite3.connect(path)) as conn:
+        conn.executemany(
+            """
+            INSERT INTO longbridge_holdings_daily
+                (code, data_date, ccass_id, participant_name, holding_shares,
+                 stake_pct_of_issued, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code, data_date, ccass_id) DO UPDATE SET
+                participant_name=excluded.participant_name,
+                holding_shares=excluded.holding_shares,
+                stake_pct_of_issued=excluded.stake_pct_of_issued,
+                fetched_at=excluded.fetched_at
+            """,
+            values,
+        )
+        conn.commit()
+    return len(values)
+
+
+def load_longbridge_holdings(
+    code: str,
+    data_date: str = "",
+    path: Path = DB_PATH,
+) -> list[dict[str, Any]]:
+    ensure_db(path)
+    normalized = str(code).zfill(5)
+    with closing(sqlite3.connect(path)) as conn:
+        conn.row_factory = sqlite3.Row
+        wanted_date = data_date
+        if not wanted_date:
+            row = conn.execute(
+                "SELECT MAX(data_date) AS data_date FROM longbridge_holdings_daily WHERE code=?",
+                (normalized,),
+            ).fetchone()
+            wanted_date = str(row["data_date"] or "") if row else ""
+        rows = conn.execute(
+            """
+            SELECT code, data_date, ccass_id, participant_name, holding_shares,
+                   stake_pct_of_issued, fetched_at
+            FROM longbridge_holdings_daily
+            WHERE code=? AND data_date=?
+            ORDER BY holding_shares DESC, ccass_id
+            """,
+            (normalized, wanted_date),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_longbridge_snapshot_dates(
+    code: str,
+    limit: int = 2,
+    path: Path = DB_PATH,
+) -> list[str]:
+    ensure_db(path)
+    with closing(sqlite3.connect(path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT data_date FROM longbridge_holdings_daily
+            WHERE code=? ORDER BY data_date DESC LIMIT ?
+            """,
+            (str(code).zfill(5), max(1, int(limit))),
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def save_longbridge_secret(
+    credential_id: str,
+    encrypted_payload: bytes,
+    path: Path = DB_PATH,
+) -> None:
+    ensure_db(path)
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO longbridge_credentials (credential_id, encrypted_payload, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(credential_id) DO UPDATE SET
+                encrypted_payload=excluded.encrypted_payload,
+                updated_at=excluded.updated_at
+            """,
+            (credential_id, encrypted_payload, now_iso()),
+        )
+        conn.commit()
+
+
+def load_longbridge_secret(credential_id: str, path: Path = DB_PATH) -> bytes | None:
+    ensure_db(path)
+    with closing(sqlite3.connect(path)) as conn:
+        row = conn.execute(
+            "SELECT encrypted_payload FROM longbridge_credentials WHERE credential_id=?",
+            (credential_id,),
+        ).fetchone()
+    return bytes(row[0]) if row else None
+
+
+def delete_longbridge_secret(credential_id: str, path: Path = DB_PATH) -> None:
+    ensure_db(path)
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("DELETE FROM longbridge_credentials WHERE credential_id=?", (credential_id,))
+        conn.commit()
+
+
+def save_longbridge_credential(encrypted_payload: bytes, path: Path = DB_PATH) -> None:
+    save_longbridge_secret("primary", encrypted_payload, path=path)
+
+
+def load_longbridge_credential(path: Path = DB_PATH) -> bytes | None:
+    return load_longbridge_secret("primary", path=path)
 
 
 def snapshot_exists(code: str, date: str, path: Path = DB_PATH) -> bool:

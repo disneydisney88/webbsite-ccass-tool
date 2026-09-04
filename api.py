@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import os
 import re
@@ -31,6 +32,7 @@ from utils.fetcher import (
     fetch_with_requests,
     issue_urls,
     orgdata_url,
+    now_iso,
     resolve_issue_id_from_stock,
 )
 from utils.events import events_url, parse_events_html, parse_events_name
@@ -77,6 +79,17 @@ from utils.snapshot_db import (
     upsert_price_history,
     upsert_stock_map,
 )
+from utils.longbridge import (
+    LongbridgeAuthError,
+    LongbridgeData,
+    LongbridgeError,
+    authenticate_agent_code,
+    fetch_broker_daily,
+    fetch_longbridge_stock,
+    longbridge_health,
+    poll_device_authorization,
+    start_device_authorization,
+)
 
 
 def int_env(name: str, default: int) -> int:
@@ -91,7 +104,7 @@ API_SERVICE = "webbsite-ccass-api"
 API_VERSION = "1.13.0"
 GIT_SHA = os.getenv("RENDER_GIT_COMMIT", "unknown")
 CACHE_TTL_SECONDS = max(0, int_env("API_CACHE_TTL_SECONDS", 86400))
-STOCK_TOOL_BUDGETS = {"local_db": 15, "hybrid_light": 30, "auto": 45}
+STOCK_TOOL_BUDGETS = {"local_db": 15, "hybrid_light": 30, "longbridge": 30, "auto": 45}
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
 SECTION_NAMES = ["Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
 # Fetch the CCASS sections concurrently so a slow or late section (notably
@@ -161,12 +174,19 @@ class HealthResponse(BaseModel):
     commit: str = "unknown"
     uptime_seconds: int
     upstreams: dict[str, Any] | None = None
+    longbridge: str = "not_authenticated"
+    longbridge_token_expires_at: str | None = None
+    longbridge_token_expires_in_seconds: int | None = None
+    longbridge_refresh_available: bool = False
+    longbridge_auth_method: str = "unknown"
 
 
 class StockMetadata(BaseModel):
     code: str
     name: str
-    issue_id: str
+    issue_id: str | None = None
+    issue_id_lookup_status: str = ""
+    issue_id_lookup_method: str = ""
     holdings_date: str
     changes_date: str
     date_basis: str = "settlement"
@@ -177,8 +197,12 @@ class StockMetadata(BaseModel):
     mirror_base_url: str = ""
     history_depth_days: int = Field(default=0, ge=0)
     db_restored_from_backup: bool = False
+    issued_shares_may_be_stale: bool = False
     price_source: str = ""
+    generated_at: str = ""
+    cache_status: str = ""
     served_from_cache: bool = False
+    section_asof: dict[str, Any] = Field(default_factory=dict)
 
 
 class HoldingsSummary(BaseModel):
@@ -255,6 +279,7 @@ class StockCompactResponse(BaseModel):
     data_as_of: str = ""
     source: str = ""
     metadata: StockMetadata
+    source_trace: dict[str, str] = Field(default_factory=dict)
     holdings_summary: HoldingsSummary
     holdings: list[HoldingRecord]
     changes: list[ChangeRecord]
@@ -264,6 +289,15 @@ class StockCompactResponse(BaseModel):
     fetch_summary: list[dict[str, Any]]
     data_quality_warnings: list[str]
     errors: list[dict[str, Any]] = []
+    cross_check: dict[str, Any] | None = None
+
+
+class LongbridgeAuthRequest(BaseModel):
+    auth_code: str = Field(min_length=1, max_length=4096)
+
+
+class LongbridgeDevicePollRequest(BaseModel):
+    session_id: str = Field(min_length=16, max_length=256)
 
 
 def json_safe(value: Any) -> Any:
@@ -686,7 +720,7 @@ def build_base_payload(
     source_preference = (source_preference or "auto").strip().lower()
     if source_preference == "sdw":
         source_preference = "local_db"
-    if source_preference not in {"auto", "local_db", "hybrid_light", "mirror"}:
+    if source_preference not in {"auto", "local_db", "hybrid_light", "longbridge", "mirror"}:
         source_preference = "auto"
 
     if source_preference == "auto" and known_issue_id:
@@ -701,7 +735,7 @@ def build_base_payload(
             cache_set(cache_key, payload)
             return copy.deepcopy(payload)
 
-    if source_preference == "local_db":
+    if source_preference in {"local_db", "longbridge"}:
         bundle = fetch_local_db_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, mirror_status="direct_pages_only")
     elif source_preference == "hybrid_light":
         bundle = fetch_hybrid_light_bundle(
@@ -1204,6 +1238,22 @@ def mcp_probe_challenge_payload(tool: str, probe: dict[str, Any]) -> dict[str, A
     return with_source_fields(payload, data_as_of="", source="Webb-site")
 
 
+def _lookup_method_name(value: Any) -> str:
+    return normalize_issue_lookup_method(value)
+
+
+def _lookup_status_name(value: Any, message: Any = "") -> str:
+    return normalize_issue_lookup_status(value, message)
+
+
+def _build_source_trace(
+    metadata: dict[str, Any],
+    fetch_summary: list[dict[str, Any]],
+    results: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    return infer_source_trace(metadata, fetch_summary, results)
+
+
 async def run_ccass_tool_with_budget(
     tool: str,
     work,
@@ -1253,6 +1303,228 @@ async def run_ccass_tool_with_budget(
         raise
 
 
+def _longbridge_fetch_summary(section: str, data: LongbridgeData, row_count: int) -> dict[str, Any]:
+    return {
+        "Section": section,
+        "Status": "success" if row_count else "failed",
+        "URL": "longbridge://mcp/broker_holding_detail",
+        "Latest date": data.data_date,
+        "Rows": row_count,
+        "Source": "longbridge",
+        "Fetch method": "longbridge_mcp",
+        "Error Type": "" if row_count else "NO_RESULT",
+        "Error": "" if row_count else f"Longbridge returned no {section} rows.",
+    }
+
+
+def _replace_fetch_summary(rows: list[dict[str, Any]], replacement: dict[str, Any]) -> list[dict[str, Any]]:
+    section = replacement.get("Section")
+    output = [row for row in rows if row.get("Section") != section]
+    output.append(replacement)
+    order = {name: index for index, name in enumerate(["Company / orgdata", *SECTION_NAMES])}
+    return sorted(output, key=lambda row: order.get(str(row.get("Section")), 99))
+
+
+def _holding_identity(row: dict[str, Any]) -> str:
+    return str(row.get("ccass_id") or row.get("CCASS ID") or row.get("participant_id") or "").upper()
+
+
+def _holding_shares(row: dict[str, Any]) -> int:
+    value = row.get("holding_shares", row.get("Holding", row.get("shares", 0)))
+    try:
+        return int(float(str(value or 0).replace(",", "")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def build_longbridge_cross_check(
+    webb_rows: list[dict[str, Any]], data: LongbridgeData, webb_date_hint: str = ""
+) -> dict[str, Any]:
+    webb_date = str(webb_date_hint or "")[:10]
+    if webb_rows:
+        webb_date = str(webb_rows[0].get("data_date") or webb_rows[0].get("Date") or "")[:10]
+    longbridge_date = data.data_date
+    aligned = bool(webb_date and longbridge_date and webb_date == longbridge_date)
+    cross_check: dict[str, Any] = {
+        "webb_data_date": webb_date or None,
+        "longbridge_data_date": longbridge_date or None,
+        "date_aligned": aligned,
+        "ccass_total_diff_shares": None,
+        "top5_by_ccass_diff_pp": None,
+        "participant_count_webb": len(webb_rows),
+        "participant_count_longbridge": len(data.holdings),
+        "mismatched_participants": [],
+    }
+    if not aligned:
+        cross_check["note"] = "dates differ; no numeric comparison performed"
+        return cross_check
+    webb_map = {_holding_identity(row): _holding_shares(row) for row in webb_rows if _holding_identity(row)}
+    longbridge_map = {row["ccass_id"]: int(row["holding_shares"]) for row in data.holdings}
+    cross_check["ccass_total_diff_shares"] = sum(longbridge_map.values()) - sum(webb_map.values())
+    webb_top5 = sum(sorted(webb_map.values(), reverse=True)[:5])
+    webb_total = sum(webb_map.values())
+    longbridge_concentration = data.concentration[0] if data.concentration else {}
+    webb_top5_pct = webb_top5 / webb_total * 100 if webb_total else None
+    lb_top5_pct = longbridge_concentration.get("top5_pct_of_ccass")
+    if webb_top5_pct is not None and lb_top5_pct is not None:
+        cross_check["top5_by_ccass_diff_pp"] = round(float(lb_top5_pct) - webb_top5_pct, 6)
+    mismatches = []
+    for ccass_id in sorted(set(webb_map) | set(longbridge_map)):
+        before = webb_map.get(ccass_id, 0)
+        after = longbridge_map.get(ccass_id, 0)
+        if before != after:
+            mismatches.append(
+                {
+                    "ccass_id": ccass_id,
+                    "webb_holding_shares": before,
+                    "longbridge_holding_shares": after,
+                    "difference_shares": after - before,
+                }
+            )
+    cross_check["mismatched_participants"] = sorted(
+        mismatches, key=lambda row: abs(row["difference_shares"]), reverse=True
+    )[:20]
+    return cross_check
+
+
+def apply_longbridge_payload(
+    payload: dict[str, Any],
+    code: str,
+    source_preference: str,
+    holdings_limit: int,
+    changes_limit: int,
+    big_changes_limit: int,
+    timeout: int,
+    webb_holdings_full: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    mode = (source_preference or "auto").lower()
+    should_fetch = mode in {"longbridge", "auto"} or (
+        mode == "hybrid_light" and (not payload.get("holdings") or not payload.get("changes"))
+    )
+    if not should_fetch:
+        return payload
+    original_holdings = list(payload.get("holdings") or [])
+    cross_check_holdings = list(webb_holdings_full) if webb_holdings_full is not None else original_holdings
+    original_summary = {
+        str(row.get("Section")): row for row in payload.get("fetch_summary", [])
+    }
+    try:
+        data = fetch_longbridge_stock(code, timeout=min(max(timeout, 10), 30))
+    except LongbridgeAuthError:
+        warning = (
+            "LONGBRIDGE_AUTH_EXPIRED: use POST /admin/longbridge/device_start "
+            "to authenticate again; Agent Auth Code remains a fallback"
+        )
+        if warning not in payload.setdefault("data_quality_warnings", []):
+            payload["data_quality_warnings"].append(warning)
+        return payload
+    except LongbridgeError as exc:
+        warning = f"LONGBRIDGE_FETCH_FAILED: {exc}"
+        if warning not in payload.setdefault("data_quality_warnings", []):
+            payload["data_quality_warnings"].append(warning)
+        return payload
+
+    replace_holdings = mode == "longbridge" or not original_holdings
+    replace_changes = mode == "longbridge" or not payload.get("changes")
+    current_concentration = payload.get("concentration") or {}
+    replace_concentration = mode == "longbridge" or not current_concentration.get("records")
+    if replace_holdings:
+        payload["holdings"] = data.holdings[:holdings_limit]
+        summary = payload.setdefault("holdings_summary", {})
+        ccass_total = sum(row["holding_shares"] for row in data.holdings)
+        ccass_pct = data.concentration[0].get("ccass_total_pct_of_issued") if data.concentration else None
+        summary.update(
+            {
+                "total_in_ccass": str(ccass_total),
+                "total_in_ccass_pct": f"{ccass_pct:.2f}%" if ccass_pct is not None else "",
+                "securities_not_in_ccass": str(max(data.issued_shares - ccass_total, 0)) if data.issued_shares else "",
+                "largest_participant": data.holdings[0].get("participant_name", "") if data.holdings else "",
+                "holdings_total_count": len(data.holdings),
+                "holdings_returned_count": min(len(data.holdings), holdings_limit),
+                "truncated": bool(summary.get("truncated")) or len(data.holdings) > holdings_limit,
+            }
+        )
+        payload["fetch_summary"] = _replace_fetch_summary(
+            payload.get("fetch_summary", []), _longbridge_fetch_summary("Holdings", data, len(data.holdings))
+        )
+        previous = original_summary.get("Holdings", {})
+        previous_error = previous.get("Error") or previous.get("Error Type")
+        if previous_error:
+            payload.setdefault("data_quality_warnings", []).append(
+                f"Holdings sourced from Longbridge (Webb-site failed: {previous_error})"
+            )
+    if replace_concentration:
+        payload["concentration"] = {
+            "top5_pct": "",
+            "top10_pct": "",
+            "latest_date": data.data_date,
+            "top5_pct_of_ccass": data.concentration[0].get("top5_pct_of_ccass") if data.concentration else None,
+            "top10_pct_of_ccass": data.concentration[0].get("top10_pct_of_ccass") if data.concentration else None,
+            "top5_pct_of_issued": data.concentration[0].get("top5_pct_of_issued") if data.concentration else None,
+            "top10_pct_of_issued": data.concentration[0].get("top10_pct_of_issued") if data.concentration else None,
+            "issued_shares": data.issued_shares or "",
+            "issued_shares_as_of": data.data_date,
+            "issued_shares_may_be_stale": False,
+            "records": data.concentration,
+        }
+    if replace_changes:
+        payload["changes"] = data.changes[:changes_limit]
+        payload["holdings_summary"]["changes_total_count"] = len(data.changes)
+        payload["holdings_summary"]["changes_returned_count"] = min(len(data.changes), changes_limit)
+        payload["fetch_summary"] = _replace_fetch_summary(
+            payload.get("fetch_summary", []), _longbridge_fetch_summary("Changes", data, len(data.changes))
+        )
+        previous = original_summary.get("Changes", {})
+        previous_error = previous.get("Error") or previous.get("Error Type")
+        if data.changes and previous_error:
+            payload.setdefault("data_quality_warnings", []).append(
+                f"Changes sourced from Longbridge (Webb-site failed: {previous_error})"
+            )
+    if mode == "longbridge":
+        payload["big_changes"] = data.big_changes[:big_changes_limit]
+    if mode == "auto" or (cross_check_holdings and data.holdings):
+        payload["cross_check"] = build_longbridge_cross_check(
+            cross_check_holdings,
+            data,
+            str((payload.get("metadata") or {}).get("holdings_date") or ""),
+        )
+    metadata = payload.setdefault("metadata", {})
+    metadata["source"] = "longbridge" if mode == "longbridge" else "hybrid_webb_longbridge"
+    if replace_holdings:
+        metadata["holdings_date"] = data.data_date
+        metadata["data_as_of_trading_date"] = data.data_date
+    section_asof = metadata.setdefault("section_asof", {})
+    if replace_holdings:
+        section_asof["Holdings"] = {"date": data.data_date, "rows": len(data.holdings), "source": "longbridge"}
+    if replace_concentration:
+        section_asof["Concentration"] = {"date": data.data_date, "rows": len(data.concentration), "source": "longbridge"}
+    if replace_changes:
+        section_asof["Changes"] = {"date": data.data_date, "rows": len(data.changes), "source": "longbridge"}
+    source_trace = payload.setdefault("source_trace", {})
+    if replace_holdings:
+        source_trace["Holdings"] = "longbridge"
+    if replace_concentration:
+        source_trace["Concentration"] = "longbridge_derived"
+    if replace_changes:
+        source_trace["Changes"] = "longbridge_derived_daily_snapshots"
+    for warning in data.warnings:
+        if warning not in payload.setdefault("data_quality_warnings", []):
+            payload["data_quality_warnings"].append(warning)
+    replaced_sections = set()
+    if replace_holdings:
+        replaced_sections.add("Holdings")
+    if replace_concentration:
+        replaced_sections.add("Concentration")
+    if replace_changes and data.changes:
+        replaced_sections.add("Changes")
+    payload["errors"] = [
+        error for error in payload.get("errors", [])
+        if str(error.get("section") or "") not in replaced_sections
+    ]
+    payload.update(payload_status_fields(payload.get("errors", []), payload.get("fetch_summary", [])))
+    return payload
+
+
 def build_stock_payload(
     stock_code: str,
     timeout: int = 30,
@@ -1261,8 +1533,8 @@ def build_stock_payload(
     big_changes_limit: int = 10,
     concentration_limit: int = 15,
     headless: bool = True,
+    source_preference: str = "auto",
     bypass_cache: bool = False,
-    source_preference: str = "sdw",
     include_price_history: bool = False,
 ) -> dict[str, Any]:
     section_limits = {
@@ -1337,12 +1609,44 @@ def build_stock_payload(
         ]
     )
 
-    errors = collect_structured_errors(fetch_summary, warnings)
+    source_trace = _build_source_trace(metadata, fetch_summary)
+    cache_status = determine_cache_status(source_trace)
+    metadata_issue_id = metadata.get("issue_id", base.get("issue_id", ""))
+    normalized_lookup_status = _lookup_status_name(
+        metadata.get("id_lookup_status"), metadata.get("id_lookup_message", "")
+    )
+    normalized_lookup_method = _lookup_method_name(metadata.get("id_lookup_method"))
+    exported_errors = list(exported.get("errors", []))
+    issue_not_found = any(
+        str(error.get("error_code") or "") == "ISSUE_ID_NOT_FOUND"
+        for error in exported_errors
+    )
+    errors = exported_errors + collect_structured_errors(fetch_summary, warnings)
+    if metadata_issue_id in {"", None} and (
+        issue_not_found or normalized_lookup_status == "not_found"
+    ):
+        issue_lookup_error = structured_error(
+            "ISSUE_ID_NOT_FOUND",
+            f"Unable to resolve Webb-site issue ID for stock {metadata.get('stock_code', clean_stock_code(stock_code))}.",
+        )
+        if issue_lookup_error not in errors:
+            errors.insert(0, issue_lookup_error)
     payload = {
             "metadata": {
                 "code": metadata.get("stock_code", clean_stock_code(stock_code)),
                 "name": metadata.get("stock_name", ""),
-                "issue_id": metadata.get("issue_id", base.get("issue_id", "")),
+                "issue_id": metadata_issue_id if metadata_issue_id not in {"", None} else None,
+                "issue_id_lookup_status": (
+                    "not_found"
+                    if metadata_issue_id in {"", None}
+                    and (
+                        issue_not_found
+                        or normalized_lookup_status in {"not_found", "error"}
+                    )
+                    else normalized_lookup_status
+                    or ("success" if metadata_issue_id else "error")
+                ),
+                "issue_id_lookup_method": normalized_lookup_method,
                 "holdings_date": metadata.get("holdings_data_date", ""),
                 "changes_date": metadata.get("changes_trading_date", ""),
                 "date_basis": "settlement",
@@ -1352,10 +1656,15 @@ def build_stock_payload(
                 "mirror_status": metadata.get("mirror_status", ""),
                 "mirror_base_url": metadata.get("mirror_base_url", ""),
                 "history_depth_days": int(metadata.get("history_depth_days") or 0),
-                "served_from_cache": bool(metadata.get("served_from_cache", False)),
                 "db_restored_from_backup": bool(metadata.get("db_restored_from_backup", False)),
+                "issued_shares_may_be_stale": bool(concentration_stale),
                 "price_source": metadata.get("price_source", ""),
+                "generated_at": metadata.get("generated_at") or now_iso(),
+                "cache_status": cache_status,
+                "served_from_cache": bool(metadata.get("served_from_cache", False)),
+                "section_asof": metadata.get("section_asof") or {},
             },
+            "source_trace": source_trace,
             "holdings_summary": {
                 "total_in_ccass": metadata.get("total_in_ccass", ""),
                 "total_in_ccass_pct": metadata.get("total_in_ccass_pct", ""),
@@ -1398,6 +1707,16 @@ def build_stock_payload(
         data_as_of=payload["metadata"].get("data_as_of_trading_date", ""),
         source=payload["metadata"].get("source", "") or "local_db_or_webbsite_fallback",
     )
+    payload = apply_longbridge_payload(
+        payload,
+        code=clean_stock_code(stock_code),
+        source_preference=source_preference,
+        holdings_limit=holdings_limit,
+        changes_limit=changes_limit,
+        big_changes_limit=big_changes_limit,
+        timeout=timeout,
+        webb_holdings_full=holdings,
+    )
     return json_safe(payload)
 
 
@@ -1434,6 +1753,8 @@ def compact_payload_to_markdown(payload: dict[str, Any]) -> str:
         f"- Holdings date: {meta.get('holdings_date', '')}",
         f"- Changes trading date: {meta.get('changes_date', '')}",
         f"- Settlement: {meta.get('settlement_note', '')}",
+        f"- Source: {meta.get('source', payload.get('source', ''))}",
+        f"- Section as-of: {json.dumps(meta.get('section_asof', {}), ensure_ascii=False)}",
         "",
         "## Holdings Summary",
         f"- Total in CCASS: {summary.get('total_in_ccass', '')} ({summary.get('total_in_ccass_pct', '')})",
@@ -1458,6 +1779,9 @@ def compact_payload_to_markdown(payload: dict[str, Any]) -> str:
     ]
     warnings = payload.get("data_quality_warnings", [])
     parts.append("\n".join(f"- {warning}" for warning in warnings) if warnings else "- none")
+    if payload.get("cross_check"):
+        parts.append("\n## Source Cross-check")
+        parts.append("```json\n" + json.dumps(payload["cross_check"], ensure_ascii=False, indent=2) + "\n```")
     errors = payload.get("errors", [])
     if errors:
         parts.append("\n## Errors")
@@ -2121,14 +2445,14 @@ async def get_ccass_stock_data(
     source_preference: Annotated[
         str,
         Field(
-            pattern=r"^(local_db|hybrid_light|auto)$",
+            pattern=r"^(local_db|hybrid_light|longbridge|auto)$",
             description=(
                 "Source preference: local_db reads local snapshots only and is fastest; "
                 "hybrid_light (default) reads local snapshots and fetches requests-only "
-                "orgdata, Concentration and Big Changes, while skipping Price History and "
-                "browser-required Holdings/Changes; auto fetches the full hybrid Webb "
-                "path including browser fallback and is much slower. Use auto only for "
-                "the latest data for one stock."
+                "orgdata, Concentration and Big Changes, and fills missing Holdings/Changes "
+                "from Longbridge when authenticated; longbridge uses Longbridge Holdings "
+                "and locally derived Changes/Concentration; auto fetches the full Webb path "
+                "and Longbridge cross-check and is much slower."
             ),
         ),
     ] = "hybrid_light",
@@ -2178,6 +2502,44 @@ async def get_ccass_stock_data(
     except Exception as exc:
         logger.exception("get_ccass_stock_data failed")
         return mcp_exception_payload("get_ccass_stock_data", exc)
+
+
+@mcp_server.tool(
+    name="get_longbridge_broker_daily",
+    description=(
+        "Read one CCASS participant's recent daily holding history from Longbridge. "
+        "Requires prior server authentication and returns date, holding shares, "
+        "issued-share percentage and daily share change."
+    ),
+)
+async def get_longbridge_broker_daily(
+    code: Annotated[str, Field(pattern=r"^[0-9]{5}$", description="Hong Kong stock code.")],
+    participant_id: Annotated[str, Field(pattern=r"^[A-Ca-c]\d{5}$", description="CCASS participant ID.")],
+    days: Annotated[int, Field(ge=1, le=60)] = 60,
+) -> dict[str, Any]:
+    try:
+        rows = await asyncio.to_thread(fetch_broker_daily, code, participant_id, days, 20.0)
+        return {
+            "ok": True,
+            "code": clean_stock_code(code),
+            "participant_id": participant_id.upper(),
+            "source": "longbridge",
+            "records": rows,
+            "data_quality_warnings": [],
+        }
+    except LongbridgeAuthError:
+        return {
+            "ok": False,
+            "code": clean_stock_code(code),
+            "participant_id": participant_id.upper(),
+            "source": "longbridge",
+            "records": [],
+            "data_quality_warnings": [
+                "LONGBRIDGE_AUTH_EXPIRED: use POST /admin/longbridge/device_start to authenticate again; Agent Auth Code remains a fallback"
+            ],
+        }
+    except Exception as exc:
+        return mcp_exception_payload("get_longbridge_broker_daily", exc)
 
 
 @mcp_server.tool(
@@ -2427,16 +2789,82 @@ def root() -> dict[str, Any]:
 
 @app.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and F10 upstreams.")) -> dict[str, Any]:
+    lb_health = longbridge_health()
     payload: dict[str, Any] = {
         "ok": True,
         "service": API_SERVICE,
         "version": API_VERSION,
         "commit": GIT_SHA,
         "uptime_seconds": int(max(0.0, time.monotonic() - _APP_STARTED_MONOTONIC)),
+        "longbridge": lb_health.get("status", "not_authenticated"),
+        "longbridge_token_expires_at": lb_health.get("token_expires_at"),
+        "longbridge_token_expires_in_seconds": lb_health.get("token_expires_in_seconds"),
+        "longbridge_refresh_available": bool(lb_health.get("refresh_available")),
+        "longbridge_auth_method": str(lb_health.get("auth_method") or "unknown"),
     }
     if upstreams:
         payload["upstreams"] = probe_upstreams(timeout=5)
     return payload
+
+
+@app.post("/admin/longbridge/authenticate", dependencies=[Depends(verify_api_token)])
+def authenticate_longbridge(request: LongbridgeAuthRequest) -> dict[str, Any]:
+    try:
+        details = authenticate_agent_code(request.auth_code, timeout=20.0)
+    except (LongbridgeAuthError, LongbridgeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "longbridge": "authenticated", **details}
+
+
+@app.post("/admin/longbridge/device_start", dependencies=[Depends(verify_api_token)])
+def start_longbridge_device_login() -> dict[str, Any]:
+    try:
+        details = start_device_authorization(timeout=20.0)
+    except (LongbridgeAuthError, LongbridgeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, **details}
+
+
+@app.post("/admin/longbridge/device_poll", dependencies=[Depends(verify_api_token)])
+def poll_longbridge_device_login(request: LongbridgeDevicePollRequest) -> dict[str, Any]:
+    try:
+        details = poll_device_authorization(request.session_id, timeout=20.0)
+    except (LongbridgeAuthError, LongbridgeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, **details}
+
+
+@app.post("/admin/longbridge/snapshot_watchlist", dependencies=[Depends(verify_api_token)])
+def snapshot_longbridge_watchlist(
+    group: str = Query("caiji", pattern=r"^(caiji|lshape)$"),
+    sleep_seconds: float = Query(1.5, ge=1.5, le=10.0),
+) -> dict[str, Any]:
+    rows = []
+    for index, entry in enumerate(load_watchlist_entries(group=group)):
+        if index:
+            time.sleep(sleep_seconds)
+        try:
+            data = fetch_longbridge_stock(entry.code, timeout=30.0)
+            rows.append(
+                {
+                    "code": entry.code,
+                    "ok": True,
+                    "data_date": data.data_date,
+                    "participant_count": len(data.holdings),
+                }
+            )
+        except LongbridgeAuthError:
+            rows.append({"code": entry.code, "ok": False, "error_type": "LONGBRIDGE_AUTH_EXPIRED"})
+            break
+        except LongbridgeError as exc:
+            rows.append({"code": entry.code, "ok": False, "error_type": "LONGBRIDGE_FETCH_FAILED", "error": str(exc)})
+    return {
+        "ok": bool(rows) and all(row.get("ok") for row in rows),
+        "group": group,
+        "succeeded": sum(1 for row in rows if row.get("ok")),
+        "failed": sum(1 for row in rows if not row.get("ok")),
+        "results": rows,
+    }
 
 
 @app.on_event("startup")
@@ -2497,6 +2925,15 @@ def get_stock(
     changes_limit: int = Query(20, ge=1, le=100, description="Maximum changes rows returned."),
     big_changes_limit: int = Query(10, ge=1, le=100, description="Maximum big changes rows returned."),
     concentration_limit: int = Query(15, ge=1, le=100, description="Maximum concentration rows returned."),
+    source_preference: str = Query(
+        "auto",
+        pattern=r"^(auto|local_db|hybrid_light|longbridge|mirror)$",
+        description="Source preference: auto, local_db, hybrid_light, longbridge, or mirror.",
+    ),
+    include_price_history: bool = Query(
+        False,
+        description="Include Price History when source_preference=hybrid_light.",
+    ),
     format: str = Query("json", description="Response format: 'json' (default) or 'markdown'."),
 ):
     requested_code = code or stock_code or ""
@@ -2509,6 +2946,8 @@ def get_stock(
         changes_limit=changes_limit,
         big_changes_limit=big_changes_limit,
         concentration_limit=concentration_limit,
+        source_preference=source_preference,
+        include_price_history=include_price_history,
         headless=True,
         bypass_cache=bypass_cache,
     )

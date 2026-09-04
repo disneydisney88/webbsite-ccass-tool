@@ -21,6 +21,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
 from pydantic import BaseModel, ConfigDict, Field
 
+from utils.date_semantics import ANALYSIS_DATE_NOTICE, align_event_date
 from utils.exporters import parsed_to_json_ready
 from utils.fetcher import (
     FetchResult,
@@ -168,6 +169,7 @@ class StockMetadata(BaseModel):
     issue_id: str
     holdings_date: str
     changes_date: str
+    date_basis: str = "settlement"
     data_as_of_trading_date: str = ""
     settlement_note: str = ""
     source: str = ""
@@ -291,6 +293,21 @@ def json_safe(value: Any) -> Any:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
+
+
+def build_event_alignment_payload(
+    event_date: str,
+    basis: str = "trade",
+    latest_snapshot_date: str = "",
+) -> dict[str, Any]:
+    try:
+        alignment, warning = align_event_date(event_date, basis, latest_snapshot_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "event_alignment": alignment,
+        "data_quality_warnings": [warning] if warning else [],
+    }
 
 
 def unauthorized() -> HTTPException:
@@ -1328,6 +1345,7 @@ def build_stock_payload(
                 "issue_id": metadata.get("issue_id", base.get("issue_id", "")),
                 "holdings_date": metadata.get("holdings_data_date", ""),
                 "changes_date": metadata.get("changes_trading_date", ""),
+                "date_basis": "settlement",
                 "data_as_of_trading_date": metadata.get("holdings_data_date", ""),
                 "settlement_note": SETTLEMENT_NOTE,
                 "source": metadata.get("source", ""),
@@ -1407,6 +1425,7 @@ def compact_payload_to_markdown(payload: dict[str, Any]) -> str:
     conc = payload.get("concentration", {})
     parts = [
         f"# {meta.get('code', '')} {meta.get('name', '')}｜Webb-site CCASS",
+        f"> {ANALYSIS_DATE_NOTICE}",
         "",
         "## Metadata",
         f"- Stock code: {meta.get('code', '')}",
@@ -2201,6 +2220,25 @@ async def get_webbsite_price_history(
 
 
 @mcp_server.tool(
+    name="align_ccass_event_date",
+    description=(
+        "Convert a Hong Kong trade or settlement date to the matching T+2 CCASS dates "
+        "using the XHKG trading calendar. Optionally compare with the latest available "
+        "snapshot and report how many trading sessions remain."
+    ),
+)
+async def align_ccass_event_date(
+    event_date: Annotated[str, Field(description="Event date in YYYY-MM-DD format.")],
+    basis: Annotated[str, Field(pattern=r"^(trade|settlement)$")] = "trade",
+    latest_snapshot_date: Annotated[
+        str,
+        Field(description="Optional latest available CCASS settlement date in YYYY-MM-DD format."),
+    ] = "",
+) -> dict[str, Any]:
+    return build_event_alignment_payload(event_date, basis, latest_snapshot_date)
+
+
+@mcp_server.tool(
     name="get_hkex_announcements",
     description=(
         "Fetch HKEXnews announcement list for a Hong Kong listed stock. "
@@ -2490,6 +2528,22 @@ def get_stock_events_endpoint(
     if not requested_code:
         raise HTTPException(status_code=400, detail="Provide code.")
     return build_events_payload(stock_code=requested_code, limit=limit, timeout=timeout, headless=True)
+
+
+@app.get(
+    "/api/date-alignment",
+    operation_id="alignCCASSEventDate",
+    dependencies=[Depends(verify_api_token)],
+)
+def get_date_alignment_endpoint(
+    event_date: str = Query(..., description="Event date in YYYY-MM-DD format."),
+    basis: str = Query("trade", pattern=r"^(trade|settlement)$"),
+    latest_snapshot_date: str = Query(
+        "",
+        description="Optional latest available CCASS settlement date in YYYY-MM-DD format.",
+    ),
+) -> dict[str, Any]:
+    return build_event_alignment_payload(event_date, basis, latest_snapshot_date)
 
 
 @app.get("/api/stock/officers", operation_id="getStockOfficers", dependencies=[Depends(verify_api_token)])

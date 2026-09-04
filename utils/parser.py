@@ -13,6 +13,7 @@ from .date_semantics import (
     SETTLEMENT_NOTE,
     annotate_records,
     derive_dates,
+    shift_trading_date,
     trading_sessions_between,
     unavailable_data_as_of,
 )
@@ -993,6 +994,7 @@ def parse_price_history(
         yahoo_source = output["price_source"].astype(str).str.lower().eq("yahoo")
         missing_vwap = pd.to_numeric(output.get("VWAP"), errors="coerce").isna()
         output["vwap_est"] = (turnover_est / volume.where(volume.ne(0))).where(yahoo_source & missing_vwap).round(3)
+    add_block_trade_metrics(output, parsed)
     parsed.price_history_table = output
 
     if parsed.price_history_table.empty:
@@ -1034,6 +1036,79 @@ def parse_price_history(
     parsed.section_total_counts["Price History"] = len(parsed.price_history_table)
     if limit is not None:
         parsed.price_history_table = parsed.price_history_table.head(max(0, limit)).copy()
+
+
+def add_block_trade_metrics(output: pd.DataFrame, parsed: ParsedCCASS) -> None:
+    """Add daily aggregate indicators for possible off-market block activity."""
+    output["vwap_close_divergence_pct"] = None
+    output["volume_pct_issued"] = None
+    output["BLOCK_TRADE_SUSPECT"] = False
+    output["implied_block_price_est"] = None
+    output["implied_block_price_method"] = "unavailable"
+
+    issued_shares = to_number(parsed.issued_securities)
+    if issued_shares is None or issued_shares <= 0:
+        return
+
+    chronological = output.copy()
+    chronological["_date"] = chronological["Date"].map(parse_date_value)
+    chronological["_volume"] = pd.to_numeric(chronological.get("Volume"), errors="coerce")
+    chronological = chronological.dropna(subset=["_date"]).sort_values("_date")
+    prior_volumes: list[float] = []
+    for index, row in chronological.iterrows():
+        close = to_number(row.get("Close"))
+        volume = to_number(row.get("Volume"))
+        turnover = to_number(row.get("Turnover"))
+        vwap = to_number(row.get("VWAP"))
+        if vwap is None:
+            vwap = to_number(row.get("vwap_est"))
+
+        if close and vwap is not None:
+            divergence = abs(vwap - close) / close * 100
+            output.at[index, "vwap_close_divergence_pct"] = round(divergence, 4)
+        else:
+            divergence = None
+        if volume is not None:
+            output.at[index, "volume_pct_issued"] = round(volume / issued_shares * 100, 4)
+        volume_pct = to_number(output.at[index, "volume_pct_issued"])
+        suspect = bool(
+            volume_pct is not None
+            and volume_pct >= 5
+            and divergence is not None
+            and divergence >= 30
+        )
+        output.at[index, "BLOCK_TRADE_SUSPECT"] = suspect
+
+        if suspect and volume and turnover is not None:
+            normal_volume = float(pd.Series(prior_volumes[-20:]).median()) if prior_volumes else 0.0
+            block_volume = volume - normal_volume
+            if block_volume > 0 and close is not None:
+                implied = (turnover - normal_volume * close) / block_volume
+                output.at[index, "implied_block_price_est"] = round(implied, 4)
+                output.at[index, "implied_block_price_method"] = "daily_ohlcv_residual"
+            else:
+                output.at[index, "implied_block_price_est"] = round(vwap, 4) if vwap is not None else None
+                output.at[index, "implied_block_price_method"] = "daily_vwap_fallback"
+
+            settlement_date, calendar_warning = shift_trading_date(row.get("Date"), 2)
+            implied_text = output.at[index, "implied_block_price_est"]
+            warning = (
+                f"BLOCK_TRADE_SUSPECT: {row.get('Date')} volume {int(volume):,} shares "
+                f"({volume_pct:.1f}% of issued), VWAP {vwap:.3f} differs from close {close:.3f} "
+                f"by {divergence:.1f}%; implied block price estimate {implied_text}. "
+                "The implied price is a daily-bar estimate; an exact block price requires "
+                "tick or special-trade data. "
+                f"Check T+2 Holdings Diff on {settlement_date or 'an unavailable settlement date'}."
+            )
+            if warning not in parsed.analysis_warnings:
+                parsed.analysis_warnings.append(warning)
+            if calendar_warning:
+                calendar_message = f"Price History: {calendar_warning}"
+                if calendar_message not in parsed.analysis_warnings:
+                    parsed.analysis_warnings.append(calendar_message)
+
+        if volume is not None and volume >= 0:
+            prior_volumes.append(volume)
 
 
 def calculate_concentration_5day_change(df: pd.DataFrame) -> dict[str, str]:

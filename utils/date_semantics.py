@@ -36,11 +36,16 @@ SETTLEMENT_NOTE = (
     "XHKG trading sessions, including Hong Kong market holidays."
 )
 
+ANALYSIS_DATE_NOTICE = (
+    "Holdings/Concentration 日期為交收日；對應交易日 = 日期 - 2 個交易日。"
+    "DisclosureTracker 用交易日，對照時請以 trade_date 欄為準。"
+)
+
 DATE_SEMANTICS_HEADER_LINES = (
     "日期基準：Holdings/Big Changes/Concentration = 持股日（結算日，T+2）",
     "         Changes = 頁面明列交易日",
     "成交日 = 持股日 - 2 個交易日（已計港股假期）",
-    "每行另有 implied_trade_date 欄",
+    "每行同時輸出 trade_date 與 settlement_date；implied_* 欄保留作向後相容",
 )
 
 DATE_SEMANTICS_SUMMARY = " ".join(line.strip() for line in DATE_SEMANTICS_HEADER_LINES)
@@ -210,6 +215,37 @@ def build_date_query_plan(
     return plan, warning
 
 
+def align_event_date(
+    event_date: Any,
+    basis: str = "trade",
+    latest_snapshot_date: Any = "",
+) -> tuple[dict[str, Any], str]:
+    """Map an event date to its T+2 CCASS snapshot and report remaining sessions."""
+    plan, warning = build_date_query_plan(event_date, event_date, basis, max_sessions=1)
+    aligned = dict(plan[0])
+    latest = normalize_date(latest_snapshot_date)
+    aligned["latest_snapshot_date"] = latest
+    aligned["remaining_trading_sessions"] = None
+    aligned["status"] = "latest_snapshot_unknown"
+    if not latest:
+        return aligned, warning
+
+    target = aligned["settlement_date"]
+    if latest >= target:
+        aligned["remaining_trading_sessions"] = 0
+        aligned["status"] = "available"
+        return aligned, warning
+
+    sessions, sessions_warning = trading_sessions_between(latest, target)
+    if sessions:
+        aligned["remaining_trading_sessions"] = max(len(sessions) - 1, 0)
+        aligned["status"] = "pending"
+    else:
+        aligned["status"] = "calendar_unavailable"
+    combined_warning = " ".join(item for item in (warning, sessions_warning) if item).strip()
+    return aligned, combined_warning
+
+
 def shift_trading_date(value: Any, offset: int) -> tuple[str, str]:
     source_iso = normalize_date(value)
     if not source_iso:
@@ -274,6 +310,8 @@ def date_fields(value: Any, basis: str) -> tuple[dict[str, str], str]:
     derived = derive_dates(value, basis)
     return {
         "ccass_date": derived.ccass_date,
+        "trade_date": derived.implied_trade_date,
+        "settlement_date": derived.implied_settlement_date,
         "implied_trade_date": derived.implied_trade_date,
         "implied_settlement_date": derived.implied_settlement_date,
         "date_basis": derived.date_basis,

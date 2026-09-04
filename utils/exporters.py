@@ -36,6 +36,8 @@ COMMON_EXPORT_COLUMNS = [
     "fetched_time",
     "data_date_or_latest_date",
     "ccass_date",
+    "trade_date",
+    "settlement_date",
     "implied_trade_date",
     "implied_settlement_date",
     "date_basis",
@@ -117,6 +119,7 @@ def metadata_dict(parsed: ParsedCCASS) -> dict:
         "db_price_rows": getattr(parsed, "db_price_rows", 0),
         "fetched_time": parsed.fetched_time,
         "listing_date": getattr(parsed, "listing_date", ""),
+        "date_basis": "settlement",
         "data_as_of_trading_date": _data_as_of_trading_date(parsed),
         "date_basis_by_section": _date_basis_map(parsed),
         "section_asof": getattr(parsed, "section_asof", {}),
@@ -409,7 +412,14 @@ def _section_data_frame(
     context = _section_context(parsed, section, description, data_date, result, len(out))
     context["record_type"] = "data"
     row_dated_section = section in {"Big Changes", "Concentration", "Price History"}
-    row_date_columns = {"ccass_date", "implied_trade_date", "implied_settlement_date", "date_basis"}
+    row_date_columns = {
+        "ccass_date",
+        "trade_date",
+        "settlement_date",
+        "implied_trade_date",
+        "implied_settlement_date",
+        "date_basis",
+    }
     protected_columns = {"data_quality_status", "data_quality_warning"}
     if row_dated_section:
         protected_columns.update(row_date_columns)

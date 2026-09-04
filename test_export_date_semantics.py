@@ -4,6 +4,7 @@ import unittest
 import pandas as pd
 
 import api
+from utils.date_semantics import ANALYSIS_DATE_NOTICE
 from utils.exporters import combined_stock_csv
 from utils.fetcher import FetchResult
 from utils.parser import ParsedCCASS, apply_date_semantics
@@ -45,9 +46,14 @@ class ExportDateSemanticsTest(unittest.TestCase):
         frame = pd.read_csv(StringIO(text), comment="#")
         holdings = frame[(frame["section"] == "Holdings") & (frame["record_type"] == "data")]
         self.assertEqual(holdings.iloc[0]["ccass_date"], "2026-08-11")
+        self.assertEqual(holdings.iloc[0]["settlement_date"], "2026-08-11")
+        self.assertEqual(holdings.iloc[0]["trade_date"], "2026-08-07")
         self.assertEqual(holdings.iloc[0]["implied_trade_date"], "2026-08-07")
         self.assertEqual(holdings.iloc[0]["date_basis"], "settlement")
         self.assertEqual(parsed.data_as_of_trading_date, "2026-08-10")
+
+        metadata = frame[(frame["section"] == "Metadata") & (frame["record_type"] == "metadata")]
+        self.assertEqual(metadata.iloc[0]["date_basis"], "settlement")
 
     def test_streamlit_and_api_markdown_start_with_semantic_notice(self):
         parsed = self.make_parsed()
@@ -65,7 +71,7 @@ class ExportDateSemanticsTest(unittest.TestCase):
             "errors": [],
         }
         api_markdown = api.compact_payload_to_markdown(payload)
-        self.assertIn("> 日期基準：Holdings/Big Changes/Concentration", api_markdown)
+        self.assertIn(f"> {ANALYSIS_DATE_NOTICE}", api_markdown)
 
 
 if __name__ == "__main__":

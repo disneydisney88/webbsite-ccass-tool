@@ -2,20 +2,22 @@
 
 import pandas as pd
 
-from .date_semantics import date_semantics_header
+from .date_semantics import ANALYSIS_DATE_NOTICE, date_semantics_header
 from .fetcher import FetchResult
 from .parser import ParsedCCASS, build_fetch_summary
 
 
 REPORT_COLUMNS = {
-    "holdings": ["Rank", "Participant", "CCASS ID", "Holding", "Stake %", "Cumulative %"],
-    "changes": ["Participant", "Change", "Change %", "Holding after", "Stake after"],
-    "concentration": ["Date", "Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"],
+    "holdings": ["trade_date", "settlement_date", "Rank", "Participant", "CCASS ID", "Holding", "Stake %", "Cumulative %"],
+    "changes": ["trade_date", "settlement_date", "Participant", "Change", "Change %", "Holding after", "Stake after"],
+    "concentration": ["trade_date", "settlement_date", "Date", "Top 5 %", "Top 10 %", "Top 10 + NCIP %", "Stake in CCASS %"],
     "price_history": ["Date", "Close", "Open", "High", "Low", "Volume", "Turnover", "VWAP", "price_source", "turnover_est", "vwap_est"],
 }
 
 
 BIG_CHANGE_REPORT_COLUMNS = [
+    "trade_date",
+    "settlement_date",
     "Date",
     "Participant",
     "CCASS ID",
@@ -183,6 +185,8 @@ def build_report(parsed: ParsedCCASS, results: dict[str, FetchResult], hkex_anno
 {date_semantics_header(prefix="> ")}
 
 ## AI Analysis Ready Summary
+
+> {ANALYSIS_DATE_NOTICE}
 
 * Stock code: {parsed.stock_code}
 * Stock name: {parsed.stock_name}

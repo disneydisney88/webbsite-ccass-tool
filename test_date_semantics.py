@@ -1,6 +1,8 @@
 import unittest
 
+import api
 from utils.date_semantics import (
+    align_event_date,
     annotate_records,
     build_date_query_plan,
     derive_dates,
@@ -16,6 +18,8 @@ class HKEXTradingCalendarTest(unittest.TestCase):
             "2026-05-19": "2026-05-15",
             "2026-08-11": "2026-08-07",
             "2026-08-12": "2026-08-10",
+            "2026-09-03": "2026-09-01",
+            "2026-09-07": "2026-09-03",
         }
         for settlement_date, expected_trade_date in cases.items():
             with self.subTest(settlement_date=settlement_date):
@@ -55,6 +59,8 @@ class RowDateSemanticsTest(unittest.TestCase):
             "Big Changes",
         )
         self.assertEqual(rows[0]["ccass_date"], "2026-05-11")
+        self.assertEqual(rows[0]["settlement_date"], "2026-05-11")
+        self.assertEqual(rows[0]["trade_date"], "2026-05-07")
         self.assertEqual(rows[0]["implied_trade_date"], "2026-05-07")
         self.assertEqual(rows[0]["implied_settlement_date"], "2026-05-11")
         self.assertEqual(rows[0]["date_basis"], "settlement")
@@ -67,12 +73,35 @@ class RowDateSemanticsTest(unittest.TestCase):
             default_date="2026-08-07",
         )
         self.assertEqual(rows[0]["ccass_date"], "2026-08-07")
+        self.assertEqual(rows[0]["trade_date"], "2026-08-07")
+        self.assertEqual(rows[0]["settlement_date"], "2026-08-11")
         self.assertEqual(rows[0]["implied_trade_date"], "2026-08-07")
         self.assertEqual(rows[0]["implied_settlement_date"], "2026-08-11")
         self.assertEqual(rows[0]["date_basis"], "trade")
 
 
 class DateQueryPlanTest(unittest.TestCase):
+    def test_event_alignment_reports_target_snapshot_and_remaining_sessions(self):
+        aligned, _warning = align_event_date(
+            "2026-09-03",
+            "trade",
+            latest_snapshot_date="2026-09-03",
+        )
+        self.assertEqual(aligned["trade_date"], "2026-09-03")
+        self.assertEqual(aligned["settlement_date"], "2026-09-07")
+        self.assertEqual(aligned["latest_snapshot_date"], "2026-09-03")
+        self.assertEqual(aligned["remaining_trading_sessions"], 2)
+        self.assertEqual(aligned["status"], "pending")
+
+    def test_api_event_alignment_helper_exposes_the_same_dates(self):
+        payload = api.build_event_alignment_payload(
+            "2026-09-03",
+            "trade",
+            "2026-09-03",
+        )
+        self.assertEqual(payload["event_alignment"]["settlement_date"], "2026-09-07")
+        self.assertEqual(payload["event_alignment"]["remaining_trading_sessions"], 2)
+
     def test_trade_range_converts_to_required_settlement_dates(self):
         plan, _warning = build_date_query_plan("2026-08-07", "2026-08-10", "trade")
         self.assertEqual(

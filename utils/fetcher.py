@@ -36,6 +36,24 @@ WEBB_DATABASE_CHALLENGE_COOKIE_MAGIC = "94run15wglA7NegzhIu4D"
 WEBB_DATABASE_CHALLENGE_COOKIE_TTL_SECONDS = 600
 
 
+def chromium_unavailable_error(exc: BaseException | str) -> bool:
+    """Return whether a Playwright launch failed because Chromium cannot run."""
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "error while loading shared libraries",
+            "libglib-2.0.so.0",
+            "exitcode=127",
+            "exit code 127",
+            "executable doesn't exist",
+            "browser executable",
+            "playwright chromium is unavailable",
+            "automatic installation failed",
+        )
+    )
+
+
 def ensure_playwright_chromium() -> tuple[bool, str]:
     """Install Chromium once, only after a mirror page needs browser rendering."""
     global _PLAYWRIGHT_INSTALL_ATTEMPTED, _PLAYWRIGHT_INSTALL_READY, _PLAYWRIGHT_INSTALL_ERROR
@@ -475,7 +493,10 @@ def fetch_with_playwright(name: str, url: str, timeout: int, headless: bool, deb
                 raise ValueError("no table found")
             result.ok = True
     except Exception as exc:
-        result.error_type = type(exc).__name__
+        if type(exc).__name__ == "ImportError" or chromium_unavailable_error(exc):
+            result.error_type = "CHROMIUM_UNAVAILABLE"
+        else:
+            result.error_type = type(exc).__name__
         if type(exc).__name__ == "ImportError":
             result.error_message = "Playwright is not installed; mirror browser fallback is unavailable."
         else:

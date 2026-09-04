@@ -23,6 +23,7 @@ RETRYABLE = {
     "ISSUE_LOOKUP_FAILED": True,
     "ISSUE_ID_NOT_FOUND": False,
     "ISSUE_ID_UNRESOLVED": True,
+    "CHROMIUM_UNAVAILABLE": False,
 }
 
 
@@ -39,6 +40,8 @@ def classify_fetch_message(error_type: str | None, message: str | None) -> str:
     text = f"{error_type or ''} {message or ''}".lower()
     if "issue id unresolved" in text or "no resolver result" in text:
         return "ISSUE_ID_UNRESOLVED"
+    if "chromium_unavailable" in text or "browser engine unavailable" in text or "瀏覽器引擎不可用" in text:
+        return "CHROMIUM_UNAVAILABLE"
     if "timeoutbudget" in text or "budget exhausted" in text:
         return "COLD_START"
     if "timeout" in text or "timed out" in text:

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pandas as pd
 import api
 import utils.source_router as source_router
-from utils.fetcher import FetchResult, IssueLookup, fetch_with_playwright, fetch_with_requests, webb_database_cookie_value
+from utils.fetcher import FetchResult, IssueLookup, chromium_unavailable_error, fetch_with_playwright, fetch_with_requests, webb_database_cookie_value
 from utils.errors import classify_fetch_message, errors_from_fetch_summary, structured_error
 from utils.parser import ParsedCCASS, build_fetch_summary
 from utils.exporters import _section_context, combined_stock_csv
@@ -29,6 +29,10 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(
             classify_fetch_message("", "Issue ID unresolved: no resolver result was retained"),
             "ISSUE_ID_UNRESOLVED",
+        )
+        self.assertEqual(
+            classify_fetch_message("CHROMIUM_UNAVAILABLE", "browser engine unavailable"),
+            "CHROMIUM_UNAVAILABLE",
         )
 
     def test_structured_error_retry_flag(self):
@@ -113,6 +117,46 @@ class FetchDiagnosticsTest(unittest.TestCase):
         browser.assert_not_called()
         self.assertEqual(bundle.results["Holdings"].error_type, "ReadTimeout")
 
+    def test_cached_probe_still_uses_requests_before_browser(self):
+        request_result = FetchResult(
+            name="Holdings", url="https://webb-database.com/ccass/choldings.asp?i=15949",
+            status=200, ok=False, error_type="JS_CHALLENGE", error_message="JavaScript challenge",
+        )
+        browser_result = FetchResult(
+            name="Holdings", url=request_result.url, status=200, ok=True,
+            tables=[pd.DataFrame([{"Name": "broker"}])],
+        )
+        local = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"), results={},
+        )
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local), patch(
+            "utils.source_router._daily_mirror_probe",
+            return_value={"status": "browser_required", "browser_sections": ["Holdings", "Changes"]},
+        ), patch("utils.source_router.fetch_with_requests", return_value=request_result) as requests_fetch, patch(
+            "utils.source_router.fetch_with_playwright", return_value=browser_result
+        ) as browser_fetch:
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        self.assertTrue(bundle.results["Holdings"].ok)
+        self.assertGreaterEqual(requests_fetch.call_count, 1)
+        self.assertGreaterEqual(browser_fetch.call_count, 1)
+
+    def test_static_success_never_starts_browser(self):
+        static_result = FetchResult(
+            name="Holdings", url="https://webb-database.com/ccass/choldings.asp?i=15949",
+            status=200, ok=True, method="requests", tables=[pd.DataFrame([{"Name": "broker"}])],
+        )
+        local = SourceBundle(
+            lookup=IssueLookup(stock_code="08245", issue_id="15949", status="success"), results={},
+        )
+        with patch("utils.source_router.fetch_local_db_bundle", return_value=local), patch(
+            "utils.source_router._daily_mirror_probe", return_value={"status": "ok", "browser_sections": []}
+        ), patch("utils.source_router.fetch_with_requests", return_value=static_result), patch(
+            "utils.source_router.fetch_with_playwright"
+        ) as browser:
+            bundle = fetch_hybrid_bundle("08245", timeout=1)
+        browser.assert_not_called()
+        self.assertEqual(bundle.results["Holdings"].method, "requests")
+
     def test_hybrid_404_does_not_use_browser_fallback(self):
         not_found = FetchResult(
             name="Changes", url="https://webb-database.com/ccass/chldchg.asp?i=15949",
@@ -145,7 +189,15 @@ class FetchDiagnosticsTest(unittest.TestCase):
             "utils.source_router.fetch_with_requests", return_value=request_result
         ), patch("utils.source_router.fetch_with_playwright", return_value=unavailable):
             bundle = fetch_hybrid_bundle("08245", timeout=1)
+        self.assertEqual(bundle.results["Holdings"].error_type, "CHROMIUM_UNAVAILABLE")
         self.assertIn("browser fallback unavailable in this environment", bundle.results["Holdings"].error_message)
+
+    def test_missing_shared_library_is_chromium_unavailable(self):
+        self.assertTrue(
+            chromium_unavailable_error(
+                "chrome: error while loading shared libraries: libglib-2.0.so.0; exitCode=127"
+            )
+        )
 
     def test_hybrid_browser_attempted_failure_is_distinguished_from_unavailable(self):
         request_result = FetchResult(

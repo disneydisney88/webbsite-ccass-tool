@@ -253,6 +253,15 @@ def _browser_fallback_result(
     headless: bool,
     stock_code: str,
 ) -> FetchResult:
+    request_attempt = {
+        "source": "requests",
+        "url": request_result.url,
+        "final_url": request_result.final_url,
+        "ok": False,
+        "status_code": request_result.status,
+        "error_type": request_result.error_type,
+        "error_message": request_result.error_message,
+    }
     browser_result = fetch_with_playwright(
         section,
         request_result.url,
@@ -260,27 +269,25 @@ def _browser_fallback_result(
         headless=headless,
         debug_stock=stock_code,
     )
-    browser_result.attempted_sources.append(
-        {
-            "source": "requests",
-            "url": request_result.url,
-            "final_url": request_result.final_url,
-            "ok": False,
-            "status_code": request_result.status,
-            "error_type": request_result.error_type,
-            "error_message": request_result.error_message,
-        }
-    )
+    browser_result.attempted_sources.append(request_attempt)
     if browser_result.ok:
         browser_result.method = "playwright_after_challenge"
         browser_result.fallback_method_used = "requests -> playwright_after_challenge"
         return browser_result
 
     detail = browser_result.error_message or "unknown browser error"
-    unavailable = browser_result.error_type == "ImportError" or "unavailable" in detail.lower() or "not installed" in detail.lower()
+    unavailable = browser_result.error_type in {"ImportError", "CHROMIUM_UNAVAILABLE"} or "unavailable" in detail.lower() or "not installed" in detail.lower()
     prefix = "browser fallback unavailable in this environment" if unavailable else "browser fallback attempted and failed"
-    request_result.error_message = f"{request_result.error_message}; {prefix}: {detail}"
+    if unavailable:
+        request_result.error_type = "CHROMIUM_UNAVAILABLE"
+        request_result.error_message = (
+            "瀏覽器引擎不可用，已改用靜態抓取；靜態抓取返回 JS challenge。"
+            f" {prefix}: {detail}"
+        )
+    else:
+        request_result.error_message = f"{request_result.error_message}; {prefix}: {detail}"
     request_result.fallback_method_used = prefix
+    request_result.attempted_sources.insert(0, request_attempt)
     request_result.attempted_sources.append(
         {
             "source": "playwright",
@@ -297,8 +304,10 @@ def _browser_fallback_result(
 
 def _describe_browser_failure(result: FetchResult) -> FetchResult:
     detail = result.error_message or "unknown browser error"
-    unavailable = result.error_type == "ImportError" or "unavailable" in detail.lower() or "not installed" in detail.lower()
+    unavailable = result.error_type in {"ImportError", "CHROMIUM_UNAVAILABLE"} or "unavailable" in detail.lower() or "not installed" in detail.lower()
     prefix = "browser fallback unavailable in this environment" if unavailable else "browser fallback attempted and failed"
+    if unavailable:
+        result.error_type = "CHROMIUM_UNAVAILABLE"
     result.fallback_method_used = prefix
     result.error_message = f"{prefix}: {detail}"
     return result
@@ -497,7 +506,6 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
 
     urls = issue_urls(issue_id)
     probe = _daily_mirror_probe(stock_code, issue_id, timeout=timeout, headless=headless)
-    browser_sections = set(probe.get("browser_sections") or [])
     browser_enabled = _browser_fallback_enabled()
     if probe.get("status") == "failed":
         bundle.warnings.append(
@@ -514,15 +522,10 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
         if section in probe_results:
             result = probe_results[section]
             result.name = section
-        elif browser_enabled and section in MIRROR_BROWSER_SECTIONS and section in browser_sections:
-            result = fetch_with_playwright(section, urls[section], timeout=timeout, headless=headless, **debug_kwargs)
-            result.method = "playwright"
-            if not result.ok:
-                result = _describe_browser_failure(result)
         else:
             result = fetch_with_requests(section, urls[section], timeout=timeout, **debug_kwargs)
-            if browser_enabled and section in MIRROR_BROWSER_SECTIONS and result.error_type == "JS_CHALLENGE":
-                result = _browser_fallback_result(section, result, timeout=timeout, headless=headless, stock_code=stock_code)
+        if browser_enabled and section in MIRROR_BROWSER_SECTIONS and result.error_type == "JS_CHALLENGE":
+            result = _browser_fallback_result(section, result, timeout=timeout, headless=headless, stock_code=stock_code)
         local_result = bundle.results.get(section)
         if result.ok:
             # A successful remote refresh is newer and therefore wins over a
@@ -538,6 +541,7 @@ def fetch_hybrid_bundle(stock_code: str, timeout: int = 30, headless: bool = Tru
                     local_result.attempted_sources = attempted_sources
                 except AttributeError:
                     pass
+            attempted_sources.extend(getattr(result, "attempted_sources", []) or [])
             attempted_sources.append(
                 {
                     "source": "mirror",

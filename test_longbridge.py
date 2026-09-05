@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -6,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import requests
+from fastapi.testclient import TestClient
 
 import api
 from utils.longbridge import (
@@ -142,6 +144,52 @@ class LongbridgeSecurityTest(unittest.TestCase):
         self.assertIn("longbridge_token_expires_in_seconds", health_fields)
         self.assertIn("longbridge_refresh_available", health_fields)
         self.assertIn("longbridge_auth_method", health_fields)
+        self.assertIn("api_token_configured", health_fields)
+        self.assertIn("api_token_length", health_fields)
+
+    def test_same_api_token_authenticates_mcp_and_device_start(self):
+        token = "fixture-shared-api-token"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/event-stream",
+        }
+        initialize = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "auth-test", "version": "1"},
+            },
+        }
+        with patch.dict(os.environ, {"API_TOKEN": token}, clear=False), patch(
+            "api.start_device_authorization",
+            return_value={"session_id": "fixture-session", "status": "authorization_pending"},
+        ), TestClient(api.app, base_url="http://localhost:8000") as client:
+            admin_response = client.post("/admin/longbridge/device_start", headers=headers)
+            mcp_response = client.post(
+                "/mcp/",
+                headers={**headers, "Content-Type": "application/json"},
+                json=initialize,
+            )
+            admin_query_response = client.post(f"/admin/longbridge/device_start?key={token}")
+            mcp_query_response = client.post(
+                f"/mcp/?key={token}",
+                headers={"Accept": "application/json, text/event-stream"},
+                json=initialize,
+            )
+            wrong_headers = {"Authorization": "Bearer wrong-token"}
+            rejected_admin_response = client.post("/admin/longbridge/device_start", headers=wrong_headers)
+            rejected_mcp_response = client.post("/mcp/", headers=wrong_headers)
+
+        self.assertEqual(admin_response.status_code, 200)
+        self.assertEqual(admin_response.json()["session_id"], "fixture-session")
+        self.assertEqual(mcp_response.status_code, 200)
+        self.assertEqual(admin_query_response.status_code, 200)
+        self.assertEqual(mcp_query_response.status_code, 200)
+        self.assertEqual(rejected_admin_response.status_code, 401)
+        self.assertEqual(rejected_mcp_response.status_code, 401)
 
 
 class LongbridgeNormalizationTest(unittest.TestCase):

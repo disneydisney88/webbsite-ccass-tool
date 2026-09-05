@@ -16,7 +16,7 @@ from typing import Annotated, Any
 
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
@@ -179,6 +179,8 @@ class HealthResponse(BaseModel):
     longbridge_token_expires_in_seconds: int | None = None
     longbridge_refresh_available: bool = False
     longbridge_auth_method: str = "unknown"
+    api_token_configured: bool = False
+    api_token_length: int = 0
 
 
 class StockMetadata(BaseModel):
@@ -489,6 +491,53 @@ def mask_secret(value: str | None) -> str:
     return f"{value[:4]}...{value[-4:]} (len={len(value)})"
 
 
+def _api_token_candidates(
+    request: Request,
+    *,
+    key: str | None = None,
+    api_token: str | None = None,
+    credentials: HTTPAuthorizationCredentials | None = None,
+) -> tuple[list[str], dict[str, bool]]:
+    query_key = key if key is not None else request.query_params.get("key")
+    query_api_token = api_token if api_token is not None else request.query_params.get("api_token")
+    header_key = request.headers.get("X-API-Key", "")
+    bearer_token = ""
+    if credentials and credentials.scheme.lower() == "bearer":
+        bearer_token = credentials.credentials
+    else:
+        authorization = request.headers.get("Authorization", "")
+        scheme, separator, token = authorization.partition(" ")
+        if separator and scheme.lower() == "bearer":
+            bearer_token = token
+    candidates = [candidate for candidate in (query_api_token, query_key, header_key, bearer_token) if candidate]
+    return candidates, {
+        "has_key": bool(query_key),
+        "has_api_token": bool(query_api_token),
+        "has_x_api_key": bool(header_key),
+        "has_bearer": bool(bearer_token),
+    }
+
+
+def _request_has_valid_api_token(
+    request: Request,
+    *,
+    key: str | None = None,
+    api_token: str | None = None,
+    credentials: HTTPAuthorizationCredentials | None = None,
+) -> tuple[bool, str, dict[str, bool]]:
+    expected_token = os.getenv("API_TOKEN", "")
+    candidates, supplied = _api_token_candidates(
+        request,
+        key=key,
+        api_token=api_token,
+        credentials=credentials,
+    )
+    if not expected_token:
+        return True, candidates[0] if candidates else "", supplied
+    valid = any(secrets.compare_digest(candidate, expected_token) for candidate in candidates)
+    return valid, candidates[0] if candidates else "", supplied
+
+
 def verify_api_token(
     request: Request,
     key: str | None = Query(None, description="Optional API token for URL-only clients."),
@@ -496,27 +545,46 @@ def verify_api_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> None:
     expected_token = os.getenv("API_TOKEN", "")
-    if not expected_token:
+    valid, supplied_token, supplied = _request_has_valid_api_token(
+        request,
+        key=key,
+        api_token=api_token,
+        credentials=credentials,
+    )
+    if valid:
         return
-    query_token = api_token or key
-    if query_token and secrets.compare_digest(query_token, expected_token):
-        return
-    header_key = request.headers.get("X-API-Key", "")
-    if header_key and secrets.compare_digest(header_key, expected_token):
-        return
-    if credentials and credentials.scheme.lower() == "bearer" and secrets.compare_digest(credentials.credentials, expected_token):
-        return
-    supplied_token = query_token or header_key or (credentials.credentials if credentials else "")
     logger.warning(
         "API auth rejected: expected=%s supplied=%s has_key=%s has_api_token=%s has_x_api_key=%s has_bearer=%s",
         mask_secret(expected_token),
         mask_secret(supplied_token),
-        bool(key),
-        bool(api_token),
-        bool(header_key),
-        bool(credentials),
+        supplied["has_key"],
+        supplied["has_api_token"],
+        supplied["has_x_api_key"],
+        supplied["has_bearer"],
     )
     raise unauthorized()
+
+
+@app.middleware("http")
+async def authenticate_mcp_requests(request: Request, call_next: Callable[..., Any]) -> Response:
+    if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
+        valid, supplied_token, supplied = _request_has_valid_api_token(request)
+        if not valid:
+            logger.warning(
+                "MCP auth rejected: expected=%s supplied=%s has_key=%s has_api_token=%s has_x_api_key=%s has_bearer=%s",
+                mask_secret(os.getenv("API_TOKEN", "")),
+                mask_secret(supplied_token),
+                supplied["has_key"],
+                supplied["has_api_token"],
+                supplied["has_x_api_key"],
+                supplied["has_bearer"],
+            )
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Invalid or missing API token."},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    return await call_next(request)
 
 
 def verify_bearer_token(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> None:
@@ -2790,6 +2858,7 @@ def root() -> dict[str, Any]:
 @app.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and F10 upstreams.")) -> dict[str, Any]:
     lb_health = longbridge_health()
+    api_token = os.getenv("API_TOKEN", "")
     payload: dict[str, Any] = {
         "ok": True,
         "service": API_SERVICE,
@@ -2801,6 +2870,8 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
         "longbridge_token_expires_in_seconds": lb_health.get("token_expires_in_seconds"),
         "longbridge_refresh_available": bool(lb_health.get("refresh_available")),
         "longbridge_auth_method": str(lb_health.get("auth_method") or "unknown"),
+        "api_token_configured": bool(api_token),
+        "api_token_length": len(api_token),
     }
     if upstreams:
         payload["upstreams"] = probe_upstreams(timeout=5)

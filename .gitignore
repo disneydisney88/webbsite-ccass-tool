@@ -8,3 +8,5 @@ __pycache__/
 data/*.db
 data/mirror_probe_status.json
 debug/
+
+longbridge_token.enc

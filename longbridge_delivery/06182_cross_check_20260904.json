@@ -1,0 +1,10 @@
+{
+  "ok": false,
+  "status": "blocked",
+  "code": "06182",
+  "reason": "No comparable Webb-site holdings payload was available from the live hybrid_light probe in this run; Longbridge live payload is preserved separately.",
+  "longbridge_date": "2026-09-04",
+  "longbridge_rows": 103,
+  "webb_date": null,
+  "webb_rows": 0
+}

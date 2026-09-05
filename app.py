@@ -23,6 +23,11 @@ try:
 except ImportError:
     alt = None
 
+try:
+    import plotly.express as px
+except ImportError:
+    px = None
+
 import utils.exporters as exporters
 from utils.hkexnews import HKEXAnnouncementResult, fetch_announcements
 from utils.fetcher import (
@@ -37,13 +42,13 @@ from utils.fetcher import (
     now_iso,
     resolve_issue_id_from_stock,
 )
-from utils.longbridge import LongbridgeAuthError, LongbridgeError, fetch_longbridge_stock
+from utils.longbridge import LongbridgeAuthError, LongbridgeError, fetch_broker_daily, fetch_longbridge_stock
 from utils.parser import SECTIONS, build_fetch_summary, parse_results, table_preview_records
 from utils.report import build_report
 from utils.events import events_url, parse_events_html, parse_events_name
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html
 from utils.f10_equity import f10_equity_url, parse_f10_buybacks, parse_f10_share_changes
-from utils.snapshot_db import DB_PATH, export_db_bytes
+from utils.snapshot_db import DB_PATH, export_db_bytes, load_longbridge_holding_history
 from utils.source_router import fetch_local_db_bundle, fetch_mirror_bundle, fetch_render_api_bundle, fetch_source_bundle_for_stock, get_source_mode, stock_code_for_issue_id
 
 exporters = importlib.reload(exporters)
@@ -831,6 +836,80 @@ def participant_label(name: str, ccass_id: str) -> str:
     if len(clean) > 34:
         clean = clean[:31].rstrip() + "..."
     return f"{clean} ({ccass_id})" if ccass_id else clean
+
+
+def build_longbridge_broker_rainbow(stock_code: str, parsed, days: int = 60, timeout: float = 20.0) -> pd.DataFrame:
+    """Fetch Top-10 daily histories, persist them, then build chart rows."""
+    top = current_top_participants(parsed, 10)
+    if not top:
+        return pd.DataFrame()
+    for broker in top:
+        fetch_broker_daily(stock_code, broker["ccass_id"], days=days, timeout=timeout)
+    history = load_longbridge_holding_history(stock_code)
+    wanted = {broker["ccass_id"] for broker in top}
+    labels = {broker["ccass_id"]: broker["label"] for broker in top}
+    frame = pd.DataFrame(history)
+    if frame.empty:
+        return frame
+    frame["data_date"] = pd.to_datetime(frame["data_date"], errors="coerce")
+    frame = frame[frame["ccass_id"].isin(wanted)].copy()
+    if frame.empty:
+        return frame
+    frame["broker"] = frame["ccass_id"].map(labels).fillna(frame["ccass_id"])
+    frame["metric_shares"] = pd.to_numeric(frame["holding_shares"], errors="coerce").fillna(0)
+    frame["daily_change"] = pd.to_numeric(frame.get("change_shares"), errors="coerce")
+    frame["pct_issued"] = pd.to_numeric(frame["stake_pct_of_issued"], errors="coerce")
+    totals = (pd.DataFrame(history).assign(data_date=lambda x: pd.to_datetime(x["data_date"], errors="coerce"))
+              .groupby("data_date", as_index=False)["holding_shares"].sum()
+              .rename(columns={"holding_shares": "ccass_total_shares"}))
+    frame = frame.merge(totals, on="data_date", how="left")
+    frame["pct_ccass"] = frame["metric_shares"] / frame["ccass_total_shares"].replace(0, pd.NA) * 100
+    # Add the residual CCASS balance so the stack always represents 100% of
+    # the available denominator, with an explicit grey Others band.
+    residual = frame.groupby("data_date", as_index=False).agg(
+        ccass_total_shares=("ccass_total_shares", "first"),
+        top_shares=("metric_shares", "sum"),
+        top_issued=("pct_issued", "sum"),
+        top_ccass=("pct_ccass", "sum"),
+    )
+    residual["ccass_id"] = "OTHERS"
+    residual["broker"] = "Others"
+    residual["metric_shares"] = (residual["ccass_total_shares"] - residual["top_shares"]).clip(lower=0)
+    residual["pct_ccass"] = (100 - residual["top_ccass"]).clip(lower=0)
+    residual["pct_issued"] = (100 - residual["top_issued"]).clip(lower=0)
+    residual["daily_change"] = pd.NA
+    residual = residual[frame.columns.intersection(residual.columns, sort=False)]
+    return pd.concat([frame, residual], ignore_index=True, sort=False).sort_values(["data_date", "broker"])
+
+
+def render_longbridge_broker_rainbow(stock_code: str, parsed, timeout: float = 20.0) -> None:
+    st.subheader("Longbridge Broker Holdings")
+    if px is None:
+        st.warning("Plotly is not installed; broker history remains available through MCP.")
+        return
+    controls = st.columns([1, 2])
+    days = int(controls[0].number_input("Days", min_value=1, max_value=60, value=60, step=1, key="lb_rainbow_days"))
+    metric = controls[1].selectbox("Y-axis", ["Shares", "% of issued", "% of CCASS"], key="lb_rainbow_metric")
+    cache_key = f"{stock_code}:{days}"
+    if st.session_state.get("longbridge_rainbow_key") != cache_key:
+        try:
+            with st.spinner("Loading Top-10 broker history..."):
+                st.session_state.longbridge_rainbow_data = build_longbridge_broker_rainbow(stock_code, parsed, days, timeout)
+            st.session_state.longbridge_rainbow_key = cache_key
+        except (LongbridgeAuthError, LongbridgeError) as exc:
+            st.warning(f"Longbridge broker history unavailable: {exc}")
+            return
+    frame = st.session_state.get("longbridge_rainbow_data", pd.DataFrame()).copy()
+    if frame.empty:
+        st.info("No persisted or live broker history is available for this stock.")
+        return
+    value_col = {"Shares": "metric_shares", "% of issued": "pct_issued", "% of CCASS": "pct_ccass"}[metric]
+    chart = px.area(frame, x="data_date", y=value_col, color="broker", line_group="ccass_id",
+                    color_discrete_map={"Others": "#9ca3af"},
+                    hover_data=["ccass_id", "metric_shares", "daily_change", "pct_issued", "pct_ccass"],
+                    title="Top-10 Longbridge broker holdings")
+    chart.update_layout(yaxis_title=metric, legend_title="Broker")
+    st.plotly_chart(chart, use_container_width=True)
 
 
 def current_top_participants(parsed, limit: int) -> list[dict[str, object]]:
@@ -1827,6 +1906,8 @@ if parse and parse.status == "partial success":
 with st.expander("Show concentration band chart (not DT rainbow)", expanded=False):
     render_rainbow_chart(parsed)
 render_concentration_change(parsed)
+if parsed.stock_code and "longbridge" in source_metadata.get("source", ""):
+    render_longbridge_broker_rainbow(parsed.stock_code, parsed, timeout=min(float(timeout), 20.0))
 
 st.divider()
 st.markdown('<div id="price-history"></div>', unsafe_allow_html=True)

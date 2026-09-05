@@ -1,0 +1,296 @@
+{
+  "ok": true,
+  "code": "06182",
+  "participant_id": "B01438",
+  "source": "longbridge",
+  "row_count": 40,
+  "records": [
+    {
+      "date": "2026-09-04",
+      "holding_shares": 540928000,
+      "stake_pct_of_issued": 67.61,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-09-03",
+      "holding_shares": 540928000,
+      "stake_pct_of_issued": 67.61,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-09-02",
+      "holding_shares": 540928000,
+      "stake_pct_of_issued": 67.61,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-09-01",
+      "holding_shares": 540928000,
+      "stake_pct_of_issued": 67.61,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-31",
+      "holding_shares": 540928000,
+      "stake_pct_of_issued": 67.61,
+      "change_shares": -90000000.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-28",
+      "holding_shares": 630928000,
+      "stake_pct_of_issued": 78.86,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-27",
+      "holding_shares": 630928000,
+      "stake_pct_of_issued": 78.86,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-26",
+      "holding_shares": 630928000,
+      "stake_pct_of_issued": 78.86,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-25",
+      "holding_shares": 630928000,
+      "stake_pct_of_issued": 78.86,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-24",
+      "holding_shares": 630928000,
+      "stake_pct_of_issued": 78.86,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-21",
+      "holding_shares": 630928000,
+      "stake_pct_of_issued": 78.86,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-20",
+      "holding_shares": 630928000,
+      "stake_pct_of_issued": 78.86,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-19",
+      "holding_shares": 630928000,
+      "stake_pct_of_issued": 78.86,
+      "change_shares": -872000.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-18",
+      "holding_shares": 631800000,
+      "stake_pct_of_issued": 78.97,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-17",
+      "holding_shares": 631800000,
+      "stake_pct_of_issued": 78.97,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-14",
+      "holding_shares": 631800000,
+      "stake_pct_of_issued": 78.97,
+      "change_shares": -9456000.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-13",
+      "holding_shares": 641256000,
+      "stake_pct_of_issued": 80.15,
+      "change_shares": -616000.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-12",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-11",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-10",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-07",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-06",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-05",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-04",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-08-03",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-31",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-30",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-29",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-28",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-27",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-24",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-23",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-22",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-21",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-20",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-17",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-16",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-15",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-14",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    },
+    {
+      "date": "2026-07-13",
+      "holding_shares": 641872000,
+      "stake_pct_of_issued": 80.23,
+      "change_shares": 0.0,
+      "source": "longbridge"
+    }
+  ],
+  "key_check": {
+    "date": "2026-08-31",
+    "holding_shares": 540928000,
+    "stake_pct_of_issued": 67.61,
+    "change_shares": -90000000.0,
+    "source": "longbridge"
+  }
+}

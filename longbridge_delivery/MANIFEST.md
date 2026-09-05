@@ -1,65 +1,49 @@
 # CCASS Tool Round 3 Longbridge Manifest
 
-Generated: 2026-09-04
+Generated: 2026-09-05
 
 ## Authentication Route
 
-The selected primary route is OAuth 2.0 Device Authorization against Longbridge
-OpenAPI. The server dynamically registers and reuses a client, returns only the
-verification URL/user code/opaque session ID, and stores device state, access
-tokens, and refresh tokens encrypted with `LONGBRIDGE_TOKEN_KEY`.
-
-Agent Auth Code over MCP Streamable HTTP remains Route B. Longbridge's official
-documentation states that this one-use code is valid for 10 minutes; the revised
-external brief's five-minute statement conflicts with that primary source.
-Official SDK OAuth on a trusted workstation remains Route C and is not imported
-as a plaintext server credential.
-
-No live account authorization was supplied. Token lifetime, refresh availability,
-expiry HTTP response, and production account-region eligibility are therefore
-**unknown / unconfirmed**. Device-flow expiry and refresh rotation are covered
-by offline fixtures.
+The selected primary route is OAuth 2.0 Device Authorization against Longbridge OpenAPI. Production health reported `longbridge=authenticated`, OAuth device-flow authentication, refresh available, and commit `8cd246b5bdc8d2d420a9a962e9c155715d9108f0`.
 
 ## Percentage Denominator
 
-The 06182 fixture uses 540,928,000 shares at 67.616%, implying approximately
-800,000,000 issued shares. `stake_pct_of_ccass` is independently calculated
-from the sum of participant shares. Live denominator verification is pending.
+The live 06182 `broker_holding_detail` response contained 103 source rows and 102 normalized participant rows. B01438 had `shares.value=540,928,000` and `ratio.value=0.6761`, so the native ratio is 67.61% and implies 800,070,995 shares (approximately 800M issued shares). The normalized participant sum was 799,328,000 shares, giving independently recomputed `stake_pct_of_ccass=67.672845%`. The export does not copy `ratio.value` into the CCASS percentage field.
+
+The one source row with missing point-in-time shares is `B01161` (UBS Securities Hong Kong Limited). It is retained as `holding_shares=0` with warning `holding_missing_in_source`; its `shares.chg_1=-432,000` is retained in Changes.
+
+## Credential Storage
+
+The encrypted token blob is exported as `longbridge_token.enc` for upload as a Render Secret File. Set `LONGBRIDGE_TOKEN_FILE=/etc/secrets/longbridge_token.enc` and retain `LONGBRIDGE_TOKEN_KEY`; when configured, the file is authoritative and the loader does not silently fall back to the repository SQLite backup. No plaintext token is committed.
 
 ## Acceptance Status
 
-1. Device start/poll, refresh, and health expiry fields: **PASS (fixture)**;
-   live account acceptance remains blocked.
-2. 06182 live Holdings >=100 rows: **BLOCKED**, fresh code required.
-3. Dual denominator fields: **PASS (fixture)**, live check blocked.
-4. Derived concentration: **PASS (fixture)**, live check blocked.
-5. B01438 daily live history: **BLOCKED**, fresh code required.
-6. Encrypted/corrupt-token handling: **PASS (fixture)**.
-7. Four stock-symbol conversions: **PASS**.
-8. ISO date normalization: **PASS (fixture)**, live check blocked.
-9. Read-only whitelist: **PASS**.
-10. `caiji` snapshot run without rate limiting: **BLOCKED**, live account authorization required.
+1. Device start/poll, refresh, and health expiry fields: **PASS (live health; fixture for expiry paths)**.
+2. 06182 live Holdings >=100 rows: **PASS** (103 raw / 102 normalized; B01438 540,928,000).
+3. Dual denominator fields: **PASS** (67.61% issued-native; 67.672845% recomputed CCASS).
+4. Derived concentration: **PASS** (recomputed from all 103 normalized holdings: Top5 issued 89.671573%, Top5 CCASS 89.754925%, Top10 issued 93.518732%, Top10 CCASS 93.605660%, CCASS total 799,328,000, participants 103).
+5. B01438 daily live history: **PASS** (40 rows; 2026-08-31 change -90,000,000).
+6. Encrypted/corrupt-token handling: **PASS (fixture evidence)**; live corrupt-token probe not run.
+7. Four stock-symbol conversions: **PASS (fixture evidence)**; live 06182 conversion used `6182.HK`.
+8. ISO date normalization: **PASS**; live `2026.09.04` became `2026-09-04`, and daily dates were normalized likewise.
+9. Read-only whitelist: **PASS (live)**; `tools/list` returned 162 total tools and all 6 required read-only tools were present.
+10. `caiji` snapshot run without rate limiting: **NOT RUN / BLOCKED**; the live 28-stock call exceeded the local command execution window, so no result was claimed.
 
-Offline verification: `python -m unittest discover` ran 209 tests successfully.
+## Component Status
+
+- P1 SQLite accumulation: **DONE**. `longbridge_holdings_daily` is upserted by stock/date/participant during stock and broker-daily fetches.
+- P2 cross-check: **PARTIAL**. Longbridge holdings and denominator evidence are live; same-date Webb comparison was not captured, so no numeric cross-check is claimed.
+- `get_longbridge_broker_daily`: **DONE**. The MCP tool and protected raw route are available; live 06182/B01438 returned 40 rows.
+- P3 Streamlit: **PARTIAL**. A Plotly Top-10 plus grey Others stacked-area chart with Shares/% issued/% CCASS selectors and daily-change hover data is implemented. Live visual screenshot acceptance for the 06182 -90M/+90M transfer remains pending.
+
+## Offline Verification
+
+**215 passed, 5 warnings, 10 subtests passed in 27.78s.**
 
 ## File Hashes
 
-SHA-256 values for the current uncommitted implementation:
-
 | File | SHA-256 |
 |---|---|
-| `api.py` | `dd78e3125a989c1594eea253c0756700f58bf1ecf96d2a3eec11d6e5a51fa169` |
-| `app.py` | `9ca98a573ee9db20f7bcbad1903fbad0fb77240caa69f1c98644ebae03d89223` |
-| `utils/longbridge.py` | `327fec5e109c7588320ebf8eb793668a3664786a25ee505621e980d9f89a4810` |
-| `utils/snapshot_db.py` | `9701977e6dad044cd6df7e8e6a2b3b1a254a94e01b114a9c16272f9c84eb6d8c` |
-| `test_longbridge.py` | `8d8b30699f39a6750f568977299440921bb5e9ddf87e63417baec3d66b9aa570` |
-| `requirements.txt` | `d781987711ebf0e9c2dd735a530fafcb2af05f9742f4399e7d113ee1cd7f8d93` |
-| `README.md` | `f6ddf5ca85b4d2b4380bcaaeafed22140384ac0cc0cf160b7a2ef51249ff75c5` |
-| `API_README.md` | `79808a247f159fb59c4c9eccc3569548424dbe236ab8e402726ee810c6b98e1a` |
-| `HANDOVER.md` | `73064cd1ceca054dc66cecaf880b7e81435f971b35288de6ab86334735b01ad3` |
-| `LONG_BRIDGE_CHANGELOG.md` | `34fd202de2a9c207db2a75bcf670dae6503ec46b53e5f6ea0a1cd4b6846c4687` |
-| `06182_longbridge_20260904.json` | `c6b69582d3272504583a23f65a52e6774992112cf930be758c5eae9c634a3cfc` |
-| `06182_cross_check_20260904.json` | `a96944264755b527681c214994809b8c57930c7284074106ceda1dab374efb1d` |
-| `06182_B01438_daily.json` | `723aaa143ab7aec4d9df570355ccaf8dd32cd4003dfb6af663f433bd79ff39fb` |
-
-Recompute these hashes after any review edit or commit-time conflict resolution.
+| `06182_longbridge_20260904.json` | `f9068afb09213c116cdbf1671d132d75f91adc041ea06827a4cf442948a6291a` |
+| `06182_cross_check_20260904.json` | `eb78dc71ad81a2d681dbcf98453c2db304ccb504e61a9da493b3bb1ca5e3150f` |
+| `06182_B01438_daily.json` | `c2302a1a9e9336ba361c6a97355b4bd6b0c1fe758bd0c8c0542561b5aaadc48` |

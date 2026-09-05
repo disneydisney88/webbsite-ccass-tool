@@ -163,6 +163,9 @@ def ensure_db(path: Path = DB_PATH) -> None:
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(longbridge_holdings_daily)")}
+        if "change_shares" not in columns:
+            conn.execute("ALTER TABLE longbridge_holdings_daily ADD COLUMN change_shares REAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS longbridge_credentials (
@@ -196,6 +199,7 @@ def upsert_longbridge_holdings(
                 str(row.get("participant_name") or ""),
                 int(row.get("holding_shares") or 0),
                 row.get("stake_pct_of_issued"),
+                row.get("change_shares"),
                 fetched_at,
             )
         )
@@ -204,12 +208,13 @@ def upsert_longbridge_holdings(
             """
             INSERT INTO longbridge_holdings_daily
                 (code, data_date, ccass_id, participant_name, holding_shares,
-                 stake_pct_of_issued, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 stake_pct_of_issued, change_shares, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(code, data_date, ccass_id) DO UPDATE SET
                 participant_name=excluded.participant_name,
                 holding_shares=excluded.holding_shares,
                 stake_pct_of_issued=excluded.stake_pct_of_issued,
+                change_shares=excluded.change_shares,
                 fetched_at=excluded.fetched_at
             """,
             values,
@@ -237,12 +242,33 @@ def load_longbridge_holdings(
         rows = conn.execute(
             """
             SELECT code, data_date, ccass_id, participant_name, holding_shares,
-                   stake_pct_of_issued, fetched_at
+                   stake_pct_of_issued, change_shares, fetched_at
             FROM longbridge_holdings_daily
             WHERE code=? AND data_date=?
             ORDER BY holding_shares DESC, ccass_id
             """,
             (normalized, wanted_date),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_longbridge_holding_history(
+    code: str,
+    path: Path = DB_PATH,
+) -> list[dict[str, Any]]:
+    """Load persisted Longbridge participant snapshots for history charts."""
+    ensure_db(path)
+    with closing(sqlite3.connect(path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT code, data_date, ccass_id, participant_name, holding_shares,
+                   stake_pct_of_issued, change_shares, fetched_at
+            FROM longbridge_holdings_daily
+            WHERE code=?
+            ORDER BY data_date ASC, holding_shares DESC, ccass_id
+            """,
+            (str(code).zfill(5),),
         ).fetchall()
     return [dict(row) for row in rows]
 

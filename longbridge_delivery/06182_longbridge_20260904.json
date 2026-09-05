@@ -1,0 +1,1080 @@
+{
+  "ok": true,
+  "code": "06182",
+  "source": "longbridge",
+  "data_date": "2026-09-04",
+  "raw_row_count": 103,
+  "normalized_row_count": 103,
+  "holdings": [
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01438",
+      "participant_name": "金利丰证券",
+      "holding_shares": 540928000,
+      "stake_pct_of_issued": 67.61,
+      "stake_pct_of_ccass": 67.672845,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02094",
+      "participant_name": "宏智证券",
+      "holding_shares": 62504000,
+      "stake_pct_of_issued": 7.8100000000000005,
+      "stake_pct_of_ccass": 7.819568,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01955",
+      "participant_name": "å¯éè¯å¸å½éé¦æ¸¯",
+      "holding_shares": 43824250,
+      "stake_pct_of_issued": 5.47,
+      "stake_pct_of_ccass": 5.482637,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01751",
+      "participant_name": "Imagi Brokerage Limited",
+      "holding_shares": 41000000,
+      "stake_pct_of_issued": 5.12,
+      "stake_pct_of_ccass": 5.129309,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01080",
+      "participant_name": "鼎珮证券",
+      "holding_shares": 29180000,
+      "stake_pct_of_issued": 3.64,
+      "stake_pct_of_ccass": 3.650566,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00033",
+      "participant_name": "中国银行(香港)",
+      "holding_shares": 8448000,
+      "stake_pct_of_issued": 1.05,
+      "stake_pct_of_ccass": 1.056888,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00019",
+      "participant_name": "香港上海汇丰银行",
+      "holding_shares": 7304000,
+      "stake_pct_of_issued": 0.91,
+      "stake_pct_of_ccass": 0.913768,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00113",
+      "participant_name": "ABN AMRO Clearing Bank N.V.",
+      "holding_shares": 7184000,
+      "stake_pct_of_issued": 0.89,
+      "stake_pct_of_ccass": 0.898755,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01284",
+      "participant_name": "恒生证券",
+      "holding_shares": 4844000,
+      "stake_pct_of_issued": 0.6,
+      "stake_pct_of_ccass": 0.606009,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01274",
+      "participant_name": "摩根士丹利香港证券",
+      "holding_shares": 3000000,
+      "stake_pct_of_issued": 0.37,
+      "stake_pct_of_ccass": 0.375315,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01929",
+      "participant_name": "银河证券香港",
+      "holding_shares": 2872000,
+      "stake_pct_of_issued": 0.35000000000000003,
+      "stake_pct_of_ccass": 0.359302,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01668",
+      "participant_name": "耀才证券",
+      "holding_shares": 2792000,
+      "stake_pct_of_issued": 0.33999999999999997,
+      "stake_pct_of_ccass": 0.349293,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01345",
+      "participant_name": "辉立证券",
+      "holding_shares": 2584000,
+      "stake_pct_of_issued": 0.32,
+      "stake_pct_of_ccass": 0.323272,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02020",
+      "participant_name": "富汇证券",
+      "holding_shares": 2304000,
+      "stake_pct_of_issued": 0.27999999999999997,
+      "stake_pct_of_ccass": 0.288242,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00039",
+      "participant_name": "渣打银行(香港)",
+      "holding_shares": 2088000,
+      "stake_pct_of_issued": 0.26,
+      "stake_pct_of_ccass": 0.261219,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00042",
+      "participant_name": "永隆银行",
+      "holding_shares": 2016000,
+      "stake_pct_of_issued": 0.25,
+      "stake_pct_of_ccass": 0.252212,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01298",
+      "participant_name": "结好证券",
+      "holding_shares": 2016000,
+      "stake_pct_of_issued": 0.25,
+      "stake_pct_of_ccass": 0.252212,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01610",
+      "participant_name": "凯基证券亚洲",
+      "holding_shares": 1928000,
+      "stake_pct_of_issued": 0.24,
+      "stake_pct_of_ccass": 0.241203,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02142",
+      "participant_name": "老虎证券香港环球",
+      "holding_shares": 1896000,
+      "stake_pct_of_issued": 0.22999999999999998,
+      "stake_pct_of_ccass": 0.237199,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02195",
+      "participant_name": "长桥证券香港",
+      "holding_shares": 1896000,
+      "stake_pct_of_issued": 0.22999999999999998,
+      "stake_pct_of_ccass": 0.237199,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00037",
+      "participant_name": "上海商业银行",
+      "holding_shares": 1664000,
+      "stake_pct_of_issued": 0.2,
+      "stake_pct_of_ccass": 0.208175,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02159",
+      "participant_name": "盈立证券",
+      "holding_shares": 1584000,
+      "stake_pct_of_issued": 0.19,
+      "stake_pct_of_ccass": 0.198166,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01673",
+      "participant_name": "富昌证券",
+      "holding_shares": 1560000,
+      "stake_pct_of_issued": 0.19,
+      "stake_pct_of_ccass": 0.195164,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00088",
+      "participant_name": "招商银行",
+      "holding_shares": 1488000,
+      "stake_pct_of_issued": 0.18,
+      "stake_pct_of_ccass": 0.186156,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01885",
+      "participant_name": "哈富证券",
+      "holding_shares": 1480000,
+      "stake_pct_of_issued": 0.18,
+      "stake_pct_of_ccass": 0.185156,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01904",
+      "participant_name": "华盛资本证券",
+      "holding_shares": 1368000,
+      "stake_pct_of_issued": 0.16999999999999998,
+      "stake_pct_of_ccass": 0.171144,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01115",
+      "participant_name": "申万宏源证券香港",
+      "holding_shares": 1104000,
+      "stake_pct_of_issued": 0.13,
+      "stake_pct_of_ccass": 0.138116,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01338",
+      "participant_name": "英皇证券香港",
+      "holding_shares": 1056000,
+      "stake_pct_of_issued": 0.13,
+      "stake_pct_of_ccass": 0.132111,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01590",
+      "participant_name": "盈透证券",
+      "holding_shares": 1016000,
+      "stake_pct_of_issued": 0.12,
+      "stake_pct_of_ccass": 0.127107,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01148",
+      "participant_name": "招商证券香港",
+      "holding_shares": 1000000,
+      "stake_pct_of_issued": 0.12,
+      "stake_pct_of_ccass": 0.125105,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01423",
+      "participant_name": "信诚证券",
+      "holding_shares": 936000,
+      "stake_pct_of_issued": 0.11,
+      "stake_pct_of_ccass": 0.117098,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01413",
+      "participant_name": "äº¬åå±±ä¸å½éé¦æ¸¯",
+      "holding_shares": 912000,
+      "stake_pct_of_issued": 0.11,
+      "stake_pct_of_ccass": 0.114096,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01086",
+      "participant_name": "åå¤§è¯å¸æèµæå¡é¦æ¸¯",
+      "holding_shares": 880000,
+      "stake_pct_of_issued": 0.11,
+      "stake_pct_of_ccass": 0.110092,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01181",
+      "participant_name": "å¤æå½éè¯å¸",
+      "holding_shares": 872000,
+      "stake_pct_of_issued": 0.1,
+      "stake_pct_of_ccass": 0.109092,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01696",
+      "participant_name": "亨达证券",
+      "holding_shares": 800000,
+      "stake_pct_of_issued": 0.1,
+      "stake_pct_of_ccass": 0.100084,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01654",
+      "participant_name": "ä¸­å½å½ééèé¦æ¸¯è¯å¸",
+      "holding_shares": 744000,
+      "stake_pct_of_issued": 0.09,
+      "stake_pct_of_ccass": 0.093078,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00003",
+      "participant_name": "东亚银行",
+      "holding_shares": 632000,
+      "stake_pct_of_issued": 0.06999999999999999,
+      "stake_pct_of_ccass": 0.079066,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01727",
+      "participant_name": "工银亚洲证券",
+      "holding_shares": 608000,
+      "stake_pct_of_issued": 0.06999999999999999,
+      "stake_pct_of_ccass": 0.076064,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01228",
+      "participant_name": "中信证券经纪香港",
+      "holding_shares": 584000,
+      "stake_pct_of_issued": 0.06999999999999999,
+      "stake_pct_of_ccass": 0.073061,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01089",
+      "participant_name": "汇丰金融证券",
+      "holding_shares": 568000,
+      "stake_pct_of_issued": 0.06999999999999999,
+      "stake_pct_of_ccass": 0.07106,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01130",
+      "participant_name": "ä¸­é¶å½éè¯å¸",
+      "holding_shares": 544000,
+      "stake_pct_of_issued": 0.06,
+      "stake_pct_of_ccass": 0.068057,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01584",
+      "participant_name": "致富证券",
+      "holding_shares": 528000,
+      "stake_pct_of_issued": 0.06,
+      "stake_pct_of_ccass": 0.066055,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01322",
+      "participant_name": "华通证券",
+      "holding_shares": 504000,
+      "stake_pct_of_issued": 0.06,
+      "stake_pct_of_ccass": 0.063053,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01809",
+      "participant_name": "华信证券",
+      "holding_shares": 472000,
+      "stake_pct_of_issued": 0.05,
+      "stake_pct_of_ccass": 0.05905,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01938",
+      "participant_name": "å´è¯å½éè¯å¸",
+      "holding_shares": 424000,
+      "stake_pct_of_issued": 0.05,
+      "stake_pct_of_ccass": 0.053045,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02175",
+      "participant_name": "微牛证券",
+      "holding_shares": 392000,
+      "stake_pct_of_issued": 0.04,
+      "stake_pct_of_ccass": 0.049041,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01118",
+      "participant_name": "东亚证券",
+      "holding_shares": 312000,
+      "stake_pct_of_issued": 0.03,
+      "stake_pct_of_ccass": 0.039033,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01386",
+      "participant_name": "软库中华金融服务",
+      "holding_shares": 304000,
+      "stake_pct_of_issued": 0.03,
+      "stake_pct_of_ccass": 0.038032,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01356",
+      "participant_name": "汇业证券",
+      "holding_shares": 240000,
+      "stake_pct_of_issued": 0.03,
+      "stake_pct_of_ccass": 0.030025,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01552",
+      "participant_name": "嘉利证券投资",
+      "holding_shares": 200000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.025021,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00058",
+      "participant_name": "ä¸­ä¿¡é¶è¡å½é",
+      "holding_shares": 200000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.025021,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01825",
+      "participant_name": "å½åè¯å¸ç»çºª",
+      "holding_shares": 200000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.025021,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01814",
+      "participant_name": "立桥证券",
+      "holding_shares": 192000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.02402,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01308",
+      "participant_name": "渼丰资产管理",
+      "holding_shares": 192000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.02402,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01829",
+      "participant_name": "华泰香港",
+      "holding_shares": 184000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.023019,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01353",
+      "participant_name": "大华继显(香港)",
+      "holding_shares": 184000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.023019,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00010",
+      "participant_name": "花旗银行",
+      "holding_shares": 184000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.023019,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01497",
+      "participant_name": "永丰金证券(亚洲)",
+      "holding_shares": 160000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.020017,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01842",
+      "participant_name": "äº¤é¶å½éè¯å¸",
+      "holding_shares": 160000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.020017,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01510",
+      "participant_name": "东英证券",
+      "holding_shares": 160000,
+      "stake_pct_of_issued": 0.02,
+      "stake_pct_of_ccass": 0.020017,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00093",
+      "participant_name": "法国巴黎银行",
+      "holding_shares": 136000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.017014,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01565",
+      "participant_name": "国泰君安(香港)",
+      "holding_shares": 136000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.017014,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02229",
+      "participant_name": "熊猫证券",
+      "holding_shares": 128000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.016013,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02102",
+      "participant_name": "å°åè¯å¸å½é",
+      "holding_shares": 120000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.015013,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02096",
+      "participant_name": "高钲证券",
+      "holding_shares": 120000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.015013,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01401",
+      "participant_name": "万达基证券",
+      "holding_shares": 96000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.01201,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01265",
+      "participant_name": "华侨证券经纪",
+      "holding_shares": 96000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.01201,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01940",
+      "participant_name": "8 Securities Limited",
+      "holding_shares": 96000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.01201,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01183",
+      "participant_name": "åå´è¯å¸",
+      "holding_shares": 96000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.01201,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01897",
+      "participant_name": "中达证券投资",
+      "holding_shares": 88000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.011009,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02214",
+      "participant_name": "çå®è¯å¸å½éé¦æ¸¯",
+      "holding_shares": 80000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.010008,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01890",
+      "participant_name": "国信证券(香港)经纪",
+      "holding_shares": 80000,
+      "stake_pct_of_issued": 0.01,
+      "stake_pct_of_ccass": 0.010008,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00002",
+      "participant_name": "交通银行信托",
+      "holding_shares": 72000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.009008,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01224",
+      "participant_name": "Merrill Lynch Far East Limited",
+      "holding_shares": 72000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.009008,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01143",
+      "participant_name": "æµ·éå½éè¯å¸",
+      "holding_shares": 72000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.009008,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01858",
+      "participant_name": "åå¤§è¯å¸é¦æ¸¯",
+      "holding_shares": 72000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.009008,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02047",
+      "participant_name": "艾德证券期货",
+      "holding_shares": 72000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.009008,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01710",
+      "participant_name": "中顺证券期货",
+      "holding_shares": 64000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.008007,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01753",
+      "participant_name": "富强证券",
+      "holding_shares": 48000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.006005,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02032",
+      "participant_name": "方德证券",
+      "holding_shares": 40000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.005004,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01695",
+      "participant_name": "大新证券",
+      "holding_shares": 40000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.005004,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02111",
+      "participant_name": "中享证券",
+      "holding_shares": 32000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.004003,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01826",
+      "participant_name": "广发证券香港",
+      "holding_shares": 32000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.004003,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01623",
+      "participant_name": "大丰崑泰证券",
+      "holding_shares": 24000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.003003,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01789",
+      "participant_name": "浩丰证券投资",
+      "holding_shares": 24000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.003003,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02219",
+      "participant_name": "TradeGo Markets Limited",
+      "holding_shares": 24000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.003003,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02120",
+      "participant_name": "利弗莫尔证券",
+      "holding_shares": 24000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.003003,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00048",
+      "participant_name": "集友银行",
+      "holding_shares": 24000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.003003,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02075",
+      "participant_name": "创陞证券",
+      "holding_shares": 16000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.002002,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01915",
+      "participant_name": "åå®è¯å¸",
+      "holding_shares": 16000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.002002,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01939",
+      "participant_name": "ä¸å´è¯å¸å½é",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00041",
+      "participant_name": "华侨银行香港",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01843",
+      "participant_name": "电讯数码证券",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B02132",
+      "participant_name": "宝盛证券香港",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01351",
+      "participant_name": "永丰证券",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "C00028",
+      "participant_name": "南洋商业银行",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01627",
+      "participant_name": "å±±é«å½éè¯å¸",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01962",
+      "participant_name": "ä¸­ä¿¡å»ºæ(å½é)è¯å¸",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01581",
+      "participant_name": "汇富金融服务",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01666",
+      "participant_name": "宝新证券",
+      "holding_shares": 8000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.001001,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01240",
+      "participant_name": "秦志远证券",
+      "holding_shares": 4000,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.0005,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01769",
+      "participant_name": "一中证券",
+      "holding_shares": 3750,
+      "stake_pct_of_issued": 0.0,
+      "stake_pct_of_ccass": 0.000469,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    },
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01161",
+      "participant_name": "UBS Securities Hong Kong Limited",
+      "holding_shares": 0,
+      "stake_pct_of_issued": null,
+      "stake_pct_of_ccass": 0.0,
+      "source": "longbridge",
+      "row_meaning": "Longbridge native holding percentage uses issued shares when a reliable basis is available."
+    }
+  ],
+  "issued_shares": 800070995,
+  "denominator_check": {
+    "participant_id": "B01438",
+    "shares_value": 540928000,
+    "ratio_value": 0.6761,
+    "ratio_value_percent": 67.61,
+    "implied_issued_shares": 800070995.4148794,
+    "sum_normalized_holdings": 799328000,
+    "stake_pct_of_ccass": 67.672845,
+    "stake_pct_of_ccass_source": "recomputed from shares.value sum; ratio.value not copied"
+  },
+  "concentration": [
+    {
+      "data_date": "2026-09-04",
+      "top5_pct_of_ccass": 89.754925,
+      "top10_pct_of_ccass": 93.60566,
+      "top5_pct_of_issued": 89.671573,
+      "top10_pct_of_issued": 93.518732,
+      "ccass_total_shares": 799328000,
+      "ccass_total_pct_of_issued": null,
+      "participant_count": 103,
+      "source": "longbridge"
+    }
+  ],
+  "warnings": [
+    "holding_missing_in_source: one participant had no point-in-time shares.value; retained as zero.",
+    "Longbridge issued-share basis is inconsistent across holding rows; issued denominator withheld."
+  ],
+  "changes": [
+    {
+      "data_date": "2026-09-04",
+      "ccass_id": "B01161",
+      "participant_name": "UBS Securities Hong Kong Limited",
+      "change_shares": -432000,
+      "change_pct_of_issued": null,
+      "holding_after": 0,
+      "source": "longbridge",
+      "source_field": "shares.chg_1"
+    }
+  ]
+}

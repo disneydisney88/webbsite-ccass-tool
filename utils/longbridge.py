@@ -212,7 +212,15 @@ def save_token_payload(payload: dict[str, Any], path: Path = DB_PATH) -> None:
 
 def load_token_payload(path: Path = DB_PATH) -> dict[str, Any] | None:
     token_file = os.getenv("LONGBRIDGE_TOKEN_FILE", "").strip()
-    encrypted = Path(token_file).read_bytes() if token_file and Path(token_file).exists() else load_longbridge_credential(path=path)
+    # A configured Render Secret File is authoritative. Do not silently fall
+    # back to a checked-in/backup SQLite credential when it is missing.
+    if token_file:
+        token_path = Path(token_file)
+        if not token_path.exists():
+            return None
+        encrypted = token_path.read_bytes()
+    else:
+        encrypted = load_longbridge_credential(path=path)
     if not encrypted:
         return None
     try:
@@ -570,9 +578,11 @@ def normalize_holdings(code: str, raw: Any, fallback_date: str = "") -> Longbrid
         if not PARTICIPANT_ID_RE.fullmatch(ccass_id):
             continue
         shares_value = _number(_holding_value(record))
+        shares = int(round(shares_value)) if shares_value is not None else 0
         if shares_value is None:
-            continue
-        shares = int(round(shares_value))
+            normalized.warnings.append(
+                "holding_missing_in_source: one participant had no point-in-time shares.value; retained as zero."
+            )
         pct_issued = _percentage(record)
         data_date = (
             _date(_first(record, ("data_date", "date", "trade_date", "holding_date")))
@@ -750,7 +760,22 @@ def fetch_broker_daily(code: str, participant_id: str, days: int = 60, timeout: 
                 }
             )
     rows.sort(key=lambda row: row["date"], reverse=True)
-    return rows[: max(1, min(int(days), 60))]
+    selected = rows[: max(1, min(int(days), 60))]
+    # Persist each successful daily query for the Streamlit history chart.
+    for row in selected:
+        upsert_longbridge_holdings(
+            code,
+            row["date"],
+            [{
+                "ccass_id": participant,
+                "participant_name": participant,
+                "holding_shares": row["holding_shares"],
+                "stake_pct_of_issued": row.get("stake_pct_of_issued"),
+                "change_shares": row.get("change_shares"),
+            }],
+            path=path,
+        )
+    return selected
 
 
 def authenticate_agent_code(auth_code: str, timeout: float = 20.0, path: Path = DB_PATH) -> dict[str, Any]:

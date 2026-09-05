@@ -87,13 +87,25 @@ def _json_rpc_result(response: requests.Response) -> dict[str, Any]:
     content_type = response.headers.get("content-type", "")
     if "text/event-stream" in content_type:
         messages = []
-        for line in response.text.splitlines():
-            if line.startswith("data:"):
-                try:
-                    messages.append(json.loads(line[5:].strip()))
-                except json.JSONDecodeError:
-                    continue
-        payload = messages[-1] if messages else {}
+        for event in re.split(r"\r?\n\r?\n", response.text):
+            data_parts: list[str] = []
+            for line in event.splitlines():
+                if line.startswith("data:"):
+                    data_parts.append(line[5:].lstrip())
+                elif data_parts and not line.startswith(("event:", "id:", "retry:", ":")):
+                    # Longbridge currently wraps large JSON-RPC SSE payloads across
+                    # physical lines without repeating the data: prefix.
+                    data_parts.append(line)
+            if not data_parts:
+                continue
+            try:
+                messages.append(json.loads("".join(data_parts)))
+            except json.JSONDecodeError:
+                continue
+        payload = next(
+            (message for message in reversed(messages) if message.get("result") is not None or message.get("error") is not None),
+            {},
+        )
     else:
         payload = response.json()
     if payload.get("error"):
@@ -477,6 +489,36 @@ def _first(record: dict[str, Any], names: tuple[str, ...], default: Any = None) 
     return default
 
 
+def _repair_text(value: Any) -> str:
+    text = str(value or "")
+    if any(marker in text for marker in ("Ã", "Â", "å", "æ", "ç", "é")):
+        try:
+            repaired = text.encode("latin1").decode("utf-8")
+            if "�" not in repaired:
+                return repaired
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return text
+
+
+def _nested_metric(record: dict[str, Any], container: str, field: str) -> Any:
+    value = _first(record, (container,))
+    return value.get(field) if isinstance(value, dict) else None
+
+
+def _holding_value(record: dict[str, Any]) -> Any:
+    direct = _first(
+        record,
+        ("holding_shares", "holding_quantity", "shares", "holding", "quantity", "volume"),
+    )
+    return direct.get("value") if isinstance(direct, dict) else direct
+
+
+def _holding_change_value(record: dict[str, Any]) -> Any:
+    direct = _first(record, ("change_shares", "change", "change_quantity", "holding_change"))
+    return _nested_metric(record, "shares", "chg_1") if direct in (None, "") else direct
+
+
 def _number(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -487,7 +529,7 @@ def _number(value: Any) -> float | None:
 
 
 def _date(value: Any) -> str:
-    text = str(value or "").strip()[:10].replace("/", "-")
+    text = str(value or "").strip()[:10].replace("/", "-").replace(".", "-")
     return text if ISO_DATE_RE.fullmatch(text) else ""
 
 
@@ -495,19 +537,19 @@ def _percentage(record: dict[str, Any]) -> float | None:
     percent = _number(_first(record, ("stake_pct_of_issued", "holding_percent", "holding_pct", "percent")))
     if percent is not None:
         return percent
-    ratio = _number(_first(record, ("ratio", "holding_ratio")))
+    ratio_value = _first(record, ("ratio", "holding_ratio"))
+    if isinstance(ratio_value, dict):
+        ratio_value = ratio_value.get("value")
+    ratio = _number(ratio_value)
     return ratio * 100 if ratio is not None and abs(ratio) <= 1 else ratio
 
 
 def _record_list(payload: Any) -> list[dict[str, Any]]:
     candidates = []
     for item in _walk(payload):
-        participant = _first(item, ("ccass_id", "participant_id", "broker_id", "broker_code"))
-        shares = _first(
-            item,
-            ("holding_shares", "holding_quantity", "shares", "holding", "quantity", "volume"),
-        )
-        change = _first(item, ("change_shares", "change", "change_quantity", "holding_change"))
+        participant = _first(item, ("ccass_id", "participant_id", "broker_id", "broker_code", "parti_number"))
+        shares = _holding_value(item)
+        change = _holding_change_value(item)
         if participant not in (None, "") and (shares not in (None, "") or change not in (None, "")):
             candidates.append(item)
     return candidates
@@ -517,19 +559,26 @@ def normalize_holdings(code: str, raw: Any, fallback_date: str = "") -> Longbrid
     payload = _unwrap_tool_result(raw) if isinstance(raw, dict) else raw
     records = _record_list(payload)
     normalized = LongbridgeData(code=clean_stock_code(code))
+    payload_date = ""
+    if isinstance(payload, dict):
+        payload_date = _date(payload.get("updated_at") or payload.get("data_date") or payload.get("date"))
     basis_candidates = []
     for record in records:
-        ccass_id = str(_first(record, ("ccass_id", "participant_id", "broker_id", "broker_code"), "")).upper()
+        ccass_id = str(
+            _first(record, ("ccass_id", "participant_id", "broker_id", "broker_code", "parti_number"), "")
+        ).upper()
         if not PARTICIPANT_ID_RE.fullmatch(ccass_id):
             continue
-        shares_value = _number(
-            _first(record, ("holding_shares", "holding_quantity", "shares", "holding", "quantity", "volume"))
-        )
+        shares_value = _number(_holding_value(record))
         if shares_value is None:
             continue
         shares = int(round(shares_value))
         pct_issued = _percentage(record)
-        data_date = _date(_first(record, ("data_date", "date", "trade_date", "holding_date"))) or fallback_date
+        data_date = (
+            _date(_first(record, ("data_date", "date", "trade_date", "holding_date")))
+            or payload_date
+            or fallback_date
+        )
         if data_date and not normalized.data_date:
             normalized.data_date = data_date
         if pct_issued and pct_issued > 0:
@@ -538,7 +587,7 @@ def normalize_holdings(code: str, raw: Any, fallback_date: str = "") -> Longbrid
             {
                 "data_date": data_date,
                 "ccass_id": ccass_id,
-                "participant_name": str(_first(record, ("participant_name", "broker_name", "name"), "")),
+                "participant_name": _repair_text(_first(record, ("participant_name", "broker_name", "name"), "")),
                 "holding_shares": shares,
                 "stake_pct_of_issued": pct_issued,
                 "stake_pct_of_ccass": None,
@@ -618,20 +667,20 @@ def normalize_changes(raw: Any, data_date: str, issued_shares: int | None) -> li
     payload = _unwrap_tool_result(raw) if isinstance(raw, dict) else raw
     rows = []
     for record in _record_list(payload):
-        ccass_id = str(_first(record, ("ccass_id", "participant_id", "broker_id", "broker_code"), "")).upper()
-        change = _number(_first(record, ("change_shares", "change", "change_quantity", "holding_change")))
+        ccass_id = str(
+            _first(record, ("ccass_id", "participant_id", "broker_id", "broker_code", "parti_number"), "")
+        ).upper()
+        change = _number(_holding_change_value(record))
         if not PARTICIPANT_ID_RE.fullmatch(ccass_id) or change is None:
             continue
         rows.append(
             {
                 "data_date": _date(_first(record, ("data_date", "date", "trade_date"))) or data_date,
                 "ccass_id": ccass_id,
-                "participant_name": str(_first(record, ("participant_name", "broker_name", "name"), "")),
+                "participant_name": _repair_text(_first(record, ("participant_name", "broker_name", "name"), "")),
                 "change_shares": int(round(change)),
                 "change_pct_of_issued": round(change / issued_shares * 100, 6) if issued_shares else None,
-                "holding_after": _number(
-                    _first(record, ("holding_shares", "holding_quantity", "shares", "holding", "quantity"))
-                ),
+                "holding_after": _number(_holding_value(record)),
                 "source": "longbridge",
             }
         )
@@ -689,16 +738,14 @@ def fetch_broker_daily(code: str, participant_id: str, days: int = 60, timeout: 
     rows = []
     for item in _walk(raw):
         date_value = _date(_first(item, ("date", "data_date", "trade_date")))
-        shares = _number(
-            _first(item, ("holding_shares", "holding_quantity", "shares", "holding", "quantity"))
-        )
+        shares = _number(_holding_value(item))
         if date_value and shares is not None:
             rows.append(
                 {
                     "date": date_value,
                     "holding_shares": int(round(shares)),
                     "stake_pct_of_issued": _percentage(item),
-                    "change_shares": _number(_first(item, ("change_shares", "change", "change_quantity"))),
+                    "change_shares": _number(_holding_change_value(item)),
                     "source": "longbridge",
                 }
             )

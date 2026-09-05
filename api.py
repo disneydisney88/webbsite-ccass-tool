@@ -86,6 +86,7 @@ from utils.longbridge import (
     authenticate_agent_code,
     fetch_broker_daily,
     fetch_longbridge_stock,
+    list_longbridge_tools,
     longbridge_health,
     poll_device_authorization,
     start_device_authorization,
@@ -2912,6 +2913,19 @@ def poll_longbridge_device_login(request: LongbridgeDevicePollRequest) -> dict[s
         details = poll_device_authorization(request.session_id, timeout=20.0)
     except (LongbridgeAuthError, LongbridgeError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, **details}
+
+
+@app.get("/admin/longbridge/tools_list", dependencies=[Depends(verify_api_token)])
+def get_longbridge_tools() -> dict[str, Any]:
+    try:
+        details = list_longbridge_tools(timeout=20.0)
+    except (LongbridgeAuthError, LongbridgeError) as exc:
+        return {
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
     return {"ok": True, **details}
 
 

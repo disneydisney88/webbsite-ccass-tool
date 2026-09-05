@@ -402,6 +402,24 @@ def active_token_payload(timeout: float = 20.0, path: Path = DB_PATH) -> dict[st
     return refresh_token_payload(payload, timeout=timeout, path=path) if payload else None
 
 
+def list_longbridge_tools(timeout: float = 20.0, path: Path = DB_PATH) -> dict[str, Any]:
+    """Verify the stored credential with tools/list and expose read-only schemas."""
+    token_payload = active_token_payload(timeout=timeout, path=path)
+    if not token_payload or not token_payload.get("access_token"):
+        raise LongbridgeAuthError("Longbridge is not authenticated.")
+    client = LongbridgeMCPClient(token=str(token_payload["access_token"]), timeout=timeout)
+    tools = client.list_tools()
+    allowed = [tool for tool in tools if str(tool.get("name") or "") in READ_ONLY_TOOLS]
+    available_names = {str(tool.get("name") or "") for tool in allowed}
+    return {
+        "endpoint": MAIN_ENDPOINT,
+        "method": "tools/list",
+        "tool_count": len(tools),
+        "read_only_tools": allowed,
+        "missing_read_only_tools": sorted(READ_ONLY_TOOLS - available_names),
+    }
+
+
 def _unwrap_tool_result(result: dict[str, Any]) -> Any:
     structured = result.get("structuredContent")
     if structured is not None:

@@ -15,6 +15,7 @@ from utils.longbridge import (
     LongbridgeData,
     LongbridgeMCPClient,
     active_token_payload,
+    list_longbridge_tools,
     load_token_payload,
     normalize_holdings,
     normalize_changes,
@@ -32,6 +33,27 @@ class LongbridgeSymbolTest(unittest.TestCase):
         self.assertEqual(to_longbridge_symbol("06182"), "6182.HK")
         self.assertEqual(to_longbridge_symbol("08489"), "8489.HK")
         self.assertEqual(to_longbridge_symbol("09978"), "9978.HK")
+
+    def test_tools_list_uses_stored_token_and_filters_to_read_only_schema(self):
+        tool_rows = [
+            {"name": "broker_holding_detail", "inputSchema": {"type": "object"}},
+            {"name": "static_info", "inputSchema": {"type": "object"}},
+            {"name": "not_read_only", "inputSchema": {"type": "object"}},
+        ]
+        with patch(
+            "utils.longbridge.active_token_payload",
+            return_value={"access_token": "fixture-token"},
+        ), patch.object(LongbridgeMCPClient, "list_tools", return_value=tool_rows):
+            result = list_longbridge_tools()
+
+        self.assertEqual(result["endpoint"], "https://mcp.longbridge.com")
+        self.assertEqual(result["method"], "tools/list")
+        self.assertEqual(result["tool_count"], 3)
+        self.assertEqual(
+            [tool["name"] for tool in result["read_only_tools"]],
+            ["broker_holding_detail", "static_info"],
+        )
+        self.assertNotIn("not_read_only", str(result["read_only_tools"]))
 
 
 class LongbridgeSecurityTest(unittest.TestCase):

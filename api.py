@@ -181,6 +181,8 @@ class HealthResponse(BaseModel):
     longbridge_auth_method: str = "unknown"
     api_token_configured: bool = False
     api_token_length: int = 0
+    longbridge_token_key_configured: bool = False
+    render_service_id: str = ""
 
 
 class StockMetadata(BaseModel):
@@ -2872,6 +2874,8 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
         "longbridge_auth_method": str(lb_health.get("auth_method") or "unknown"),
         "api_token_configured": bool(api_token),
         "api_token_length": len(api_token),
+        "longbridge_token_key_configured": bool(os.getenv("LONGBRIDGE_TOKEN_KEY", "").strip()),
+        "render_service_id": os.getenv("RENDER_SERVICE_ID", ""),
     }
     if upstreams:
         payload["upstreams"] = probe_upstreams(timeout=5)
@@ -2890,9 +2894,15 @@ def authenticate_longbridge(request: LongbridgeAuthRequest) -> dict[str, Any]:
 @app.post("/admin/longbridge/device_start", dependencies=[Depends(verify_api_token)])
 def start_longbridge_device_login() -> dict[str, Any]:
     try:
-        details = start_device_authorization(timeout=20.0)
-    except (LongbridgeAuthError, LongbridgeError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        details = start_device_authorization(timeout=10.0)
+    except Exception as exc:
+        logger.exception("Longbridge device authorization start failed")
+        return {
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "error": str(exc) or "Longbridge device authorization failed without an error message.",
+            "retry_recommended": True,
+        }
     return {"ok": True, **details}
 
 

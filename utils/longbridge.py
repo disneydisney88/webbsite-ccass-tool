@@ -36,6 +36,7 @@ OAUTH_REGISTER_ENDPOINT = f"{OAUTH_BASE_URL}/register"
 OAUTH_DEVICE_ENDPOINT = f"{OAUTH_BASE_URL}/device/authorize"
 OAUTH_TOKEN_ENDPOINT = f"{OAUTH_BASE_URL}/token"
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+OAUTH_REQUEST_TIMEOUT_SECONDS = 10.0
 DEVICE_SESSION_PREFIX = "device:"
 REGISTRATION_CREDENTIAL_ID = "oauth_registration"
 READ_ONLY_TOOLS = frozenset(
@@ -246,6 +247,8 @@ def _oauth_registration(path: Path, timeout: float) -> dict[str, Any]:
         json_body={
             "client_name": "Webb-site CCASS Tool (Longbridge OAuth)",
             "redirect_uris": ["http://localhost:60355/callback"],
+            "token_endpoint_auth_method": "none",
+            "grant_types": [DEVICE_GRANT_TYPE, "refresh_token"],
         },
     )
     if not response.ok or not payload.get("client_id"):
@@ -261,7 +264,7 @@ def _oauth_registration(path: Path, timeout: float) -> dict[str, Any]:
     return registration
 
 
-def start_device_authorization(timeout: float = 20.0, path: Path = DB_PATH) -> dict[str, Any]:
+def start_device_authorization(timeout: float = OAUTH_REQUEST_TIMEOUT_SECONDS, path: Path = DB_PATH) -> dict[str, Any]:
     registration = _oauth_registration(path, timeout)
     response, payload = _post_json(
         OAUTH_DEVICE_ENDPOINT,

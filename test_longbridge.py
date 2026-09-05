@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import api
 from utils.longbridge import (
+    LongbridgeAuthError,
     LongbridgeData,
     LongbridgeMCPClient,
     active_token_payload,
@@ -80,12 +81,37 @@ class LongbridgeSecurityTest(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             "os.environ", {"LONGBRIDGE_TOKEN_KEY": "fixture-encryption-key"}, clear=False
-        ), patch("utils.longbridge.requests.post", side_effect=responses):
+        ), patch("utils.longbridge.requests.post", side_effect=responses) as request:
             result = start_device_authorization(path=Path(directory) / "fixture.db")
         self.assertEqual(result["status"], "authorization_pending")
         self.assertEqual(result["user_code"], "ABCD-EFGH")
         self.assertNotIn("device_code", result)
         self.assertNotIn("private-device-code", json.dumps(result))
+        registration_call = request.call_args_list[0]
+        self.assertEqual(registration_call.kwargs["timeout"], 10.0)
+        self.assertEqual(registration_call.kwargs["json"]["token_endpoint_auth_method"], "none")
+        self.assertIn("urn:ietf:params:oauth:grant-type:device_code", registration_call.kwargs["json"]["grant_types"])
+        self.assertEqual(request.call_args_list[1].kwargs["timeout"], 10.0)
+
+    def test_device_start_reuses_encrypted_registration(self):
+        responses = [
+            self.response(201, {"client_id": "fixture-client", "registration_access_token": "secret"}),
+            self.response(200, {"device_code": "first-code", "user_code": "FIRST", "verification_uri": "https://example.test/device", "expires_in": 300, "interval": 5}),
+            self.response(200, {"device_code": "second-code", "user_code": "SECOND", "verification_uri": "https://example.test/device", "expires_in": 300, "interval": 5}),
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ", {"LONGBRIDGE_TOKEN_KEY": "fixture-encryption-key"}, clear=False
+        ), patch("utils.longbridge.requests.post", side_effect=responses) as request:
+            path = Path(directory) / "fixture.db"
+            first = start_device_authorization(path=path)
+            second = start_device_authorization(path=path)
+
+        self.assertEqual(first["user_code"], "FIRST")
+        self.assertEqual(second["user_code"], "SECOND")
+        self.assertEqual(request.call_count, 3)
+        self.assertTrue(request.call_args_list[0].args[0].endswith("/oauth2/register"))
+        self.assertTrue(request.call_args_list[1].args[0].endswith("/oauth2/device/authorize"))
+        self.assertTrue(request.call_args_list[2].args[0].endswith("/oauth2/device/authorize"))
 
     def test_device_poll_pending_then_success_persists_refreshable_token(self):
         responses = [
@@ -146,6 +172,8 @@ class LongbridgeSecurityTest(unittest.TestCase):
         self.assertIn("longbridge_auth_method", health_fields)
         self.assertIn("api_token_configured", health_fields)
         self.assertIn("api_token_length", health_fields)
+        self.assertIn("longbridge_token_key_configured", health_fields)
+        self.assertIn("render_service_id", health_fields)
 
     def test_same_api_token_authenticates_mcp_and_device_start(self):
         token = "fixture-shared-api-token"
@@ -166,7 +194,7 @@ class LongbridgeSecurityTest(unittest.TestCase):
         with patch.dict(os.environ, {"API_TOKEN": token}, clear=False), patch(
             "api.start_device_authorization",
             return_value={"session_id": "fixture-session", "status": "authorization_pending"},
-        ), TestClient(api.app, base_url="http://localhost:8000") as client:
+        ) as start_mock, TestClient(api.app, base_url="http://localhost:8000") as client:
             admin_response = client.post("/admin/longbridge/device_start", headers=headers)
             mcp_response = client.post(
                 "/mcp/",
@@ -182,6 +210,8 @@ class LongbridgeSecurityTest(unittest.TestCase):
             wrong_headers = {"Authorization": "Bearer wrong-token"}
             rejected_admin_response = client.post("/admin/longbridge/device_start", headers=wrong_headers)
             rejected_mcp_response = client.post("/mcp/", headers=wrong_headers)
+            start_mock.side_effect = LongbridgeAuthError("fixture upstream failure")
+            failed_admin_response = client.post("/admin/longbridge/device_start", headers=headers)
 
         self.assertEqual(admin_response.status_code, 200)
         self.assertEqual(admin_response.json()["session_id"], "fixture-session")
@@ -190,6 +220,9 @@ class LongbridgeSecurityTest(unittest.TestCase):
         self.assertEqual(mcp_query_response.status_code, 200)
         self.assertEqual(rejected_admin_response.status_code, 401)
         self.assertEqual(rejected_mcp_response.status_code, 401)
+        self.assertEqual(failed_admin_response.status_code, 200)
+        self.assertFalse(failed_admin_response.json()["ok"])
+        self.assertIn("fixture upstream failure", failed_admin_response.json()["error"])
 
 
 class LongbridgeNormalizationTest(unittest.TestCase):

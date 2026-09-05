@@ -4,7 +4,7 @@ Generated: 2026-09-05
 
 ## Authentication Route
 
-The selected primary route is OAuth 2.0 Device Authorization against Longbridge OpenAPI. Production health reported `longbridge=authenticated`, OAuth device-flow authentication, refresh available, and commit `2e21446` (`2e21446` is the deployed repository commit).
+The selected primary route is OAuth 2.0 Device Authorization against Longbridge OpenAPI. Production health reported `longbridge=authenticated`, OAuth device-flow authentication, and refresh available. The latest production SHA observed during verification was `8cd246b`; GitHub HEAD is `e730f9a`, with the `2e21446` code deployment and `e730f9a` manifest-only deployment still pending Render confirmation.
 
 ## Percentage Denominator
 

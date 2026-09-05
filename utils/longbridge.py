@@ -420,6 +420,22 @@ def list_longbridge_tools(timeout: float = 20.0, path: Path = DB_PATH) -> dict[s
     }
 
 
+def call_longbridge_read_only_tool(
+    name: str,
+    arguments: dict[str, Any],
+    timeout: float = 20.0,
+    path: Path = DB_PATH,
+) -> dict[str, Any]:
+    """Call one explicitly whitelisted Longbridge research tool."""
+    if name not in READ_ONLY_TOOLS:
+        raise PermissionError("Longbridge tool is not in the read-only whitelist.")
+    token_payload = active_token_payload(timeout=timeout, path=path)
+    if not token_payload or not token_payload.get("access_token"):
+        raise LongbridgeAuthError("Longbridge is not authenticated.")
+    client = LongbridgeMCPClient(token=str(token_payload["access_token"]), timeout=timeout)
+    return client.call_tool(name, dict(arguments or {}))
+
+
 def _unwrap_tool_result(result: dict[str, Any]) -> Any:
     structured = result.get("structuredContent")
     if structured is not None:

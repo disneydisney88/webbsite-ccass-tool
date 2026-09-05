@@ -84,6 +84,7 @@ from utils.longbridge import (
     LongbridgeData,
     LongbridgeError,
     authenticate_agent_code,
+    call_longbridge_read_only_tool,
     fetch_broker_daily,
     fetch_longbridge_stock,
     list_longbridge_tools,
@@ -303,6 +304,11 @@ class LongbridgeAuthRequest(BaseModel):
 
 class LongbridgeDevicePollRequest(BaseModel):
     session_id: str = Field(min_length=16, max_length=256)
+
+
+class LongbridgeToolCallRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 def json_safe(value: Any) -> Any:
@@ -2927,6 +2933,17 @@ def get_longbridge_tools() -> dict[str, Any]:
             "error": str(exc),
         }
     return {"ok": True, **details}
+
+
+@app.post("/admin/longbridge/tool_call", dependencies=[Depends(verify_api_token)])
+def call_longbridge_tool(request: LongbridgeToolCallRequest) -> dict[str, Any]:
+    try:
+        result = call_longbridge_read_only_tool(request.name, request.arguments, timeout=30.0)
+    except PermissionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (LongbridgeAuthError, LongbridgeError) as exc:
+        return {"ok": False, "error_type": type(exc).__name__, "error": str(exc)}
+    return {"ok": True, "tool": request.name, "result": result}
 
 
 @app.post("/admin/longbridge/snapshot_watchlist", dependencies=[Depends(verify_api_token)])

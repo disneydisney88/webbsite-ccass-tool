@@ -15,6 +15,7 @@ from utils.longbridge import (
     LongbridgeData,
     LongbridgeMCPClient,
     active_token_payload,
+    call_longbridge_read_only_tool,
     list_longbridge_tools,
     load_token_payload,
     normalize_holdings,
@@ -54,6 +55,10 @@ class LongbridgeSymbolTest(unittest.TestCase):
             ["broker_holding_detail", "static_info"],
         )
         self.assertNotIn("not_read_only", str(result["read_only_tools"]))
+
+    def test_raw_tool_call_rejects_non_whitelisted_name(self):
+        with self.assertRaises(PermissionError):
+            call_longbridge_read_only_tool("not_read_only", {})
 
 
 class LongbridgeSecurityTest(unittest.TestCase):

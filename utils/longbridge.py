@@ -118,6 +118,7 @@ class LongbridgeMCPClient:
             self.session.headers["Authorization"] = f"Bearer {token}"
         self._request_id = 0
         self._initialized = False
+        self.last_transport: dict[str, Any] = {}
 
     def _post(self, method: str, params: dict[str, Any] | None = None, notification: bool = False) -> dict[str, Any]:
         self._request_id += 1
@@ -131,6 +132,11 @@ class LongbridgeMCPClient:
         except requests.RequestException as exc:
             raise LongbridgeError(f"Longbridge MCP request failed: {type(exc).__name__}: {exc}") from exc
         session_id = response.headers.get("Mcp-Session-Id")
+        self.last_transport = {
+            "status_code": response.status_code,
+            "content_type": response.headers.get("content-type", ""),
+            "body": response.text,
+        }
         if session_id:
             self.session.headers["Mcp-Session-Id"] = session_id
         if response.status_code in {401, 403}:
@@ -433,7 +439,8 @@ def call_longbridge_read_only_tool(
     if not token_payload or not token_payload.get("access_token"):
         raise LongbridgeAuthError("Longbridge is not authenticated.")
     client = LongbridgeMCPClient(token=str(token_payload["access_token"]), timeout=timeout)
-    return client.call_tool(name, dict(arguments or {}))
+    result = client.call_tool(name, dict(arguments or {}))
+    return {"parsed_result": result, "transport": client.last_transport}
 
 
 def _unwrap_tool_result(result: dict[str, Any]) -> Any:

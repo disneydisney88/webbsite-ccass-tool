@@ -480,7 +480,10 @@ def _record_list(payload: Any) -> list[dict[str, Any]]:
     candidates = []
     for item in _walk(payload):
         participant = _first(item, ("ccass_id", "participant_id", "broker_id", "broker_code"))
-        shares = _first(item, ("holding_shares", "shares", "holding", "quantity", "volume"))
+        shares = _first(
+            item,
+            ("holding_shares", "holding_quantity", "shares", "holding", "quantity", "volume"),
+        )
         change = _first(item, ("change_shares", "change", "change_quantity", "holding_change"))
         if participant not in (None, "") and (shares not in (None, "") or change not in (None, "")):
             candidates.append(item)
@@ -496,7 +499,9 @@ def normalize_holdings(code: str, raw: Any, fallback_date: str = "") -> Longbrid
         ccass_id = str(_first(record, ("ccass_id", "participant_id", "broker_id", "broker_code"), "")).upper()
         if not PARTICIPANT_ID_RE.fullmatch(ccass_id):
             continue
-        shares_value = _number(_first(record, ("holding_shares", "shares", "holding", "quantity", "volume")))
+        shares_value = _number(
+            _first(record, ("holding_shares", "holding_quantity", "shares", "holding", "quantity", "volume"))
+        )
         if shares_value is None:
             continue
         shares = int(round(shares_value))
@@ -601,7 +606,9 @@ def normalize_changes(raw: Any, data_date: str, issued_shares: int | None) -> li
                 "participant_name": str(_first(record, ("participant_name", "broker_name", "name"), "")),
                 "change_shares": int(round(change)),
                 "change_pct_of_issued": round(change / issued_shares * 100, 6) if issued_shares else None,
-                "holding_after": _number(_first(record, ("holding_shares", "shares", "holding", "quantity"))),
+                "holding_after": _number(
+                    _first(record, ("holding_shares", "holding_quantity", "shares", "holding", "quantity"))
+                ),
                 "source": "longbridge",
             }
         )
@@ -635,12 +642,14 @@ def fetch_longbridge_stock(code: str, timeout: float = 20.0, path: Path = DB_PAT
             if data.issued_shares and abs(row["change_shares"]) / data.issued_shares >= 0.0025
         ]
     else:
-        try:
-            recent = client.call_tool("broker_holding", {"symbol": symbol, "period": "rct_1"})
-            data.tool_results["broker_holding"] = recent
-            data.changes = normalize_changes(recent, data.data_date, data.issued_shares)
-        except LongbridgeError as exc:
-            data.warnings.append(f"Longbridge one-day Changes unavailable: {exc}")
+        data.changes = normalize_changes(raw, data.data_date, data.issued_shares)
+        if not data.changes:
+            try:
+                recent = client.call_tool("broker_holding", {"symbol": symbol, "period": "rct_1"})
+                data.tool_results["broker_holding"] = recent
+                data.changes = normalize_changes(recent, data.data_date, data.issued_shares)
+            except LongbridgeError as exc:
+                data.warnings.append(f"Longbridge one-day Changes unavailable: {exc}")
         data.warnings.append("Longbridge Big Changes unavailable until two distinct daily snapshots have been stored.")
     return data
 
@@ -657,7 +666,9 @@ def fetch_broker_daily(code: str, participant_id: str, days: int = 60, timeout: 
     rows = []
     for item in _walk(raw):
         date_value = _date(_first(item, ("date", "data_date", "trade_date")))
-        shares = _number(_first(item, ("holding_shares", "shares", "holding", "quantity")))
+        shares = _number(
+            _first(item, ("holding_shares", "holding_quantity", "shares", "holding", "quantity"))
+        )
         if date_value and shares is not None:
             rows.append(
                 {

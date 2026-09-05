@@ -262,6 +262,29 @@ class LongbridgeNormalizationTest(unittest.TestCase):
             }
         }
 
+    def test_live_schema_holding_quantity_is_normalized(self):
+        raw = {
+            "structuredContent": {
+                "items": [
+                    {
+                        "broker_id": "B01438",
+                        "broker_name": "KINGSTON SECURITIES",
+                        "holding_quantity": "540928000",
+                        "holding_ratio": "67.616",
+                        "holding_change": "-90000000",
+                        "date": "2026-09-03",
+                    }
+                ]
+            }
+        }
+        data = normalize_holdings("06182", raw)
+        changes = normalize_changes(raw, data.data_date, data.issued_shares)
+
+        self.assertEqual(data.holdings[0]["holding_shares"], 540928000)
+        self.assertEqual(data.holdings[0]["stake_pct_of_issued"], 67.616)
+        self.assertEqual(changes[0]["change_shares"], -90000000)
+        self.assertEqual(changes[0]["holding_after"], 540928000)
+
     def test_dual_denominator_holdings_and_concentration(self):
         data = normalize_holdings("06182", self.fixture())
         self.assertEqual(data.data_date, "2026-09-03")

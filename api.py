@@ -92,6 +92,7 @@ from utils.longbridge import (
     poll_device_authorization,
     start_device_authorization,
 )
+from utils.turso_db import turso_health
 
 
 def int_env(name: str, default: int) -> int:
@@ -185,6 +186,9 @@ class HealthResponse(BaseModel):
     api_token_length: int = 0
     longbridge_token_key_configured: bool = False
     render_service_id: str = ""
+    db_backend: str = "sqlite"
+    turso_ping_ms: float | None = None
+    turso_error: str | None = None
 
 
 class StockMetadata(BaseModel):
@@ -2884,6 +2888,7 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
         "longbridge_token_key_configured": bool(os.getenv("LONGBRIDGE_TOKEN_KEY", "").strip()),
         "render_service_id": os.getenv("RENDER_SERVICE_ID", ""),
     }
+    payload.update(turso_health())
     if upstreams:
         payload["upstreams"] = probe_upstreams(timeout=5)
     return payload

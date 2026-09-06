@@ -197,6 +197,7 @@ class HealthResponse(BaseModel):
     turso_ping_ms: float | None = None
     turso_error: str | None = None
     turso_migration: dict[str, Any] = Field(default_factory=dict)
+    watchlist_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class StockMetadata(BaseModel):
@@ -2903,6 +2904,10 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
     }
     payload.update(turso_health())
     payload["turso_migration"] = turso_migration_status()
+    payload["watchlist_counts"] = {
+        group: len(load_watchlist_entries(group=group))
+        for group in ("lshape79", "caiji", "research")
+    }
     if upstreams:
         payload["upstreams"] = probe_upstreams(timeout=5)
     return payload

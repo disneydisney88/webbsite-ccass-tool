@@ -76,7 +76,11 @@ from utils.snapshot_db import (
     load_stock_meta,
     load_watchlist_entries,
     migrate_longbridge_state_to_turso,
+    parse_watchlist_csv_text,
+    rebuild_research_watchlist,
+    replace_watchlist_group,
     restore_snapshot_db_from_backup,
+    sync_watchlists_to_turso,
     turso_migration_status,
     upsert_price_history,
     upsert_stock_map,
@@ -316,6 +320,11 @@ class LongbridgeDevicePollRequest(BaseModel):
 class LongbridgeToolCallRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class WatchlistImportRequest(BaseModel):
+    group: str = Field(pattern=r"^(lshape79|caiji|research)$")
+    csv_text: str = Field(min_length=1, max_length=2_000_000)
 
 
 def json_safe(value: Any) -> Any:
@@ -2944,6 +2953,49 @@ def get_longbridge_tools() -> dict[str, Any]:
     return {"ok": True, **details}
 
 
+@app.get("/admin/watchlist", dependencies=[Depends(verify_api_token)])
+def get_watchlist(
+    group: str | None = Query(None, pattern=r"^(lshape79|caiji|research)$"),
+) -> dict[str, Any]:
+    entries = load_watchlist_entries(group=group)
+    return {
+        "ok": True,
+        "group": group or "all",
+        "count": len(entries),
+        "codes": [entry.code for entry in entries],
+        "entries": [
+            {
+                "code": entry.code,
+                "name": entry.name,
+                "group": ";".join(entry.groups),
+                "tag": entry.tag,
+                "priority": entry.priority,
+                "added_date": entry.added_date,
+                "source": entry.source,
+            }
+            for entry in entries
+        ],
+    }
+
+
+@app.post("/admin/watchlist/import", dependencies=[Depends(verify_api_token)])
+def import_watchlist(request: WatchlistImportRequest) -> dict[str, Any]:
+    entries = parse_watchlist_csv_text(request.csv_text, request.group)
+    try:
+        result = replace_watchlist_group(request.group, entries, source="admin_import")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, **result, "codes": [entry.code for entry in entries]}
+
+
+@app.post("/admin/watchlist/rebuild_research", dependencies=[Depends(verify_api_token)])
+def rebuild_research() -> dict[str, Any]:
+    try:
+        return {"ok": True, **rebuild_research_watchlist()}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @app.post("/admin/longbridge/tool_call", dependencies=[Depends(verify_api_token)])
 def call_longbridge_tool(request: LongbridgeToolCallRequest) -> dict[str, Any]:
     try:
@@ -2957,7 +3009,7 @@ def call_longbridge_tool(request: LongbridgeToolCallRequest) -> dict[str, Any]:
 
 @app.post("/admin/longbridge/snapshot_watchlist", dependencies=[Depends(verify_api_token)])
 def snapshot_longbridge_watchlist(
-    group: str = Query("caiji", pattern=r"^(caiji|lshape)$"),
+    group: str = Query("caiji", pattern=r"^(caiji|lshape79|research)$"),
     sleep_seconds: float = Query(1.5, ge=1.5, le=10.0),
 ) -> dict[str, Any]:
     rows = []
@@ -2999,6 +3051,12 @@ async def start_mcp_session_manager() -> None:
         logger.info("Longbridge Turso migration: %s", migration)
     except Exception:
         logger.exception("Longbridge Turso migration failed; retaining legacy fallback")
+    try:
+        synced = sync_watchlists_to_turso()
+        if synced:
+            logger.info("Seeded Turso watchlists: %s", synced)
+    except Exception:
+        logger.exception("Turso watchlist seed failed; retaining CSV watchlist fallback")
     _mcp_session_context = mcp_server.session_manager.run()
     await _mcp_session_context.__aenter__()
 
@@ -3225,7 +3283,7 @@ def export_snapshots() -> Response:
 @app.get("/api/snapshot_all", dependencies=[Depends(verify_api_token)])
 def snapshot_all(
     timeout: int = Query(30, ge=10, le=60),
-    group: str | None = Query(None, pattern="^(caiji|lshape)$", description="Optional watchlist group filter."),
+    group: str | None = Query(None, pattern="^(caiji|lshape79|research)$", description="Optional watchlist group filter."),
 ) -> dict[str, Any]:
     rows = []
     entries = load_watchlist_entries(group=group)

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,7 @@ from .parse_sdw import SDWSnapshot
 DATA_DIR = Path(os.getenv("CCASS_DATA_DIR", "data"))
 DB_PATH = Path(os.getenv("CCASS_SNAPSHOT_DB", str(DATA_DIR / "ccass_snapshots.db")))
 WATCHLIST_PATH = Path(os.getenv("CCASS_WATCHLIST", str(DATA_DIR / "watchlist.csv")))
+WATCHLIST_LSHAPE_PATH = Path(os.getenv("CCASS_LSHAPE_WATCHLIST", str(DATA_DIR / "watchlist_lshape79.csv")))
 BACKUP_LATEST_PATH = Path(os.getenv("CCASS_SNAPSHOT_BACKUP_LATEST", str(DATA_DIR / "backups" / "ccass_snapshots_latest.db")))
 _DB_RESTORED_FROM_BACKUP = False
 _DB_RESTORE_SOURCE = ""
@@ -66,6 +69,10 @@ class WatchlistEntry:
     code: str
     name: str = ""
     groups: tuple[str, ...] = ()
+    tag: str = ""
+    priority: int | None = None
+    added_date: str = ""
+    source: str = ""
 
 
 def restore_snapshot_db_from_backup(path: Path = DB_PATH, backup_path: Path = BACKUP_LATEST_PATH) -> bool:
@@ -1047,7 +1054,7 @@ def export_db_bytes(path: Path = DB_PATH) -> bytes:
     return path.read_bytes()
 
 
-def load_watchlist_entries(path: Path = WATCHLIST_PATH, group: str | None = None) -> list[WatchlistEntry]:
+def _load_watchlist_file(path: Path, group: str | None = None) -> list[WatchlistEntry]:
     if not path.exists():
         return []
     if path.suffix.lower() == ".json":
@@ -1062,6 +1069,10 @@ def load_watchlist_entries(path: Path = WATCHLIST_PATH, group: str | None = None
                     code=str(item.get("code", "")).zfill(5),
                     name=str(item.get("name", "") or ""),
                     groups=parse_groups(str(item.get("group", "") or item.get("groups", ""))),
+                    tag=str(item.get("tag", "") or ""),
+                    priority=int(item["priority"]) if str(item.get("priority", "")).strip().isdigit() else None,
+                    added_date=str(item.get("added_date", "") or ""),
+                    source=str(item.get("source", "") or ""),
                 )
             else:
                 entry = WatchlistEntry(code=str(item).zfill(5))
@@ -1070,16 +1081,25 @@ def load_watchlist_entries(path: Path = WATCHLIST_PATH, group: str | None = None
         return entries
 
     entries: list[WatchlistEntry] = []
-    with path.open(newline="", encoding="utf-8") as handle:
+    with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames and "code" in [field.strip().lower() for field in reader.fieldnames]:
             for row in reader:
                 normalized = {str(key).strip().lower(): value for key, value in row.items()}
                 code = str(normalized.get("code", "") or "").strip().zfill(5)
+                is_lshape = path.name.lower() == "watchlist_lshape79.csv"
+                groups = parse_groups(str(normalized.get("group", "") or ""))
+                if is_lshape and "lshape79" not in groups:
+                    groups = (*groups, "lshape79")
+                priority_value = str(normalized.get("priority", "") or "").strip()
                 entry = WatchlistEntry(
                     code=code,
                     name=str(normalized.get("name", "") or "").strip(),
-                    groups=parse_groups(str(normalized.get("group", "") or "")),
+                    groups=groups,
+                    tag=str(normalized.get("tag", "") or normalized.get("lshape_class", "") or "").strip(),
+                    priority=int(priority_value) if priority_value.isdigit() else None,
+                    added_date=str(normalized.get("added_date", "") or "").strip(),
+                    source=str(normalized.get("source", "") or "").strip(),
                 )
                 if code.strip("0") and entry_matches_group(entry, group):
                     entries.append(entry)
@@ -1090,6 +1110,217 @@ def load_watchlist_entries(path: Path = WATCHLIST_PATH, group: str | None = None
                     entry = WatchlistEntry(code=row[0].strip().zfill(5))
                     if entry_matches_group(entry, group):
                         entries.append(entry)
+    deduped: dict[str, WatchlistEntry] = {}
+    for entry in entries:
+        deduped.setdefault(entry.code, entry)
+    return list(deduped.values())
+
+
+def load_watchlist_entries(path: Path = WATCHLIST_PATH, group: str | None = None) -> list[WatchlistEntry]:
+    if path == WATCHLIST_PATH and _turso_watchlist_enabled(path):
+        rows = _turso_rows_to_dicts(
+            """
+            SELECT group_name, code, name, tag, priority, added_date, source
+            FROM watchlist
+            WHERE (? IS NULL OR group_name=?)
+            ORDER BY group_name, priority IS NULL, priority, code
+            """,
+            (group, group),
+        )
+        entries = [
+            WatchlistEntry(
+                code=str(row.get("code") or "").zfill(5),
+                name=str(row.get("name") or ""),
+                groups=(str(row.get("group_name") or "").lower(),),
+                tag=str(row.get("tag") or ""),
+                priority=int(row["priority"]) if row.get("priority") is not None else None,
+                added_date=str(row.get("added_date") or ""),
+                source=str(row.get("source") or ""),
+            )
+            for row in rows
+        ]
+        deduped: dict[str, WatchlistEntry] = {}
+        for entry in entries:
+            prior = deduped.get(entry.code)
+            if prior is None:
+                deduped[entry.code] = entry
+            else:
+                deduped[entry.code] = WatchlistEntry(
+                    code=entry.code,
+                    name=prior.name or entry.name,
+                    groups=tuple(dict.fromkeys((*prior.groups, *entry.groups))),
+                    tag=prior.tag or entry.tag,
+                    priority=prior.priority if prior.priority is not None else entry.priority,
+                    added_date=prior.added_date or entry.added_date,
+                    source=prior.source or entry.source,
+                )
+        return list(deduped.values())
+    paths = [path]
+    if path == WATCHLIST_PATH and WATCHLIST_LSHAPE_PATH.exists() and WATCHLIST_LSHAPE_PATH != path:
+        paths.append(WATCHLIST_LSHAPE_PATH)
+    entries: list[WatchlistEntry] = []
+    for source_path in paths:
+        entries.extend(_load_watchlist_file(source_path, group=group))
+    deduped: dict[str, WatchlistEntry] = {}
+    for entry in entries:
+        prior = deduped.get(entry.code)
+        if prior is None:
+            deduped[entry.code] = entry
+        elif entry.groups and not set(entry.groups).issubset(prior.groups):
+            deduped[entry.code] = WatchlistEntry(
+                code=entry.code,
+                name=prior.name or entry.name,
+                groups=tuple(dict.fromkeys((*prior.groups, *entry.groups))),
+                tag=prior.tag or entry.tag,
+                priority=prior.priority if prior.priority is not None else entry.priority,
+                added_date=prior.added_date or entry.added_date,
+                source=prior.source or entry.source,
+            )
+    return list(deduped.values())
+
+
+def _turso_watchlist_enabled(path: Path) -> bool:
+    if Path(path) != WATCHLIST_PATH:
+        return False
+    from .turso_db import turso_is_configured
+
+    return turso_is_configured()
+
+
+def replace_watchlist_group(
+    group: str,
+    entries: list[WatchlistEntry],
+    source: str = "manual",
+) -> dict[str, int]:
+    """Replace one Turso watchlist group and return its new row count."""
+
+    if not _turso_watchlist_enabled(WATCHLIST_PATH):
+        raise RuntimeError("Turso watchlist backend is not configured")
+    from .turso_db import ensure_turso_schema, turso_execute, turso_execute_many
+
+    group_name = group.strip().lower()
+    if not group_name:
+        raise ValueError("watchlist group is required")
+    ensure_turso_schema()
+    turso_execute("DELETE FROM watchlist WHERE group_name=?", (group_name,))
+    selected = [entry for entry in entries if group_name in entry.groups]
+    values = [
+        (
+            group_name,
+            entry.code,
+            entry.name,
+            entry.tag,
+            entry.priority,
+            entry.added_date or None,
+            entry.source or source,
+        )
+        for entry in selected
+    ]
+    turso_execute_many(
+        """
+        INSERT INTO watchlist (group_name, code, name, tag, priority, added_date, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(group_name, code) DO UPDATE SET
+            name=excluded.name, tag=excluded.tag, priority=excluded.priority,
+            added_date=excluded.added_date, source=excluded.source
+        """,
+        values,
+    )
+    return {"group": group_name, "count": len(values)}
+
+
+def sync_watchlists_to_turso() -> dict[str, int]:
+    """Seed configured Turso watchlists from the repo CSV inputs."""
+
+    if not _turso_watchlist_enabled(WATCHLIST_PATH):
+        return {}
+    from .turso_db import turso_query
+
+    groups: dict[str, list[WatchlistEntry]] = {}
+    for entry in _load_watchlist_file(WATCHLIST_PATH):
+        for group in entry.groups:
+            if group == "lshape":
+                continue
+            groups.setdefault(group, []).append(entry)
+    if WATCHLIST_LSHAPE_PATH.exists():
+        for entry in _load_watchlist_file(WATCHLIST_LSHAPE_PATH):
+            groups.setdefault("lshape79", []).append(entry)
+    synced: dict[str, int] = {}
+    for group, entries in groups.items():
+        existing = turso_query("SELECT COUNT(*) AS count FROM watchlist WHERE group_name=?", (group,))
+        if existing and int(existing[0].get("count") or 0) > 0:
+            continue
+        synced[group] = replace_watchlist_group(group, entries, source="repo_csv")["count"]
+    return synced
+
+
+def rebuild_research_watchlist(event_dir: Path | None = None) -> dict[str, Any]:
+    """Build the research group from recent event CSVs when supplied."""
+
+    directory = event_dir or Path(os.getenv("EVENT_CSV_DIR", "data/events"))
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=366)
+    found: dict[str, WatchlistEntry] = {}
+    inspected = 0
+    if directory.exists():
+        for path in sorted(directory.glob("*.csv")):
+            inspected += 1
+            try:
+                with path.open(newline="", encoding="utf-8-sig") as handle:
+                    for raw in csv.DictReader(handle):
+                        normalized = {str(key).strip().lower(): str(value or "") for key, value in raw.items()}
+                        dates: list[datetime.date] = []
+                        for key, value in normalized.items():
+                            if "date" not in key and "day" not in key and "time" not in key:
+                                continue
+                            for match in re.findall(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", value):
+                                try:
+                                    dates.append(datetime.strptime(match.replace("/", "-").replace(".", "-"), "%Y-%m-%d").date())
+                                except ValueError:
+                                    continue
+                        if dates and not any(cutoff <= date <= datetime.now(timezone.utc).date() for date in dates):
+                            continue
+                        code_value = next(
+                            (value for key, value in normalized.items() if "code" in key or "stock" in key or "security" in key),
+                            "",
+                        )
+                        match = re.search(r"(?<!\d)(\d{4,5})(?!\d)", code_value)
+                        if not match:
+                            continue
+                        code = match.group(1).zfill(5)
+                        found.setdefault(
+                            code,
+                            WatchlistEntry(code=code, groups=("research",), tag=path.stem, source=path.name),
+                        )
+            except (OSError, UnicodeError, csv.Error):
+                continue
+    entries = list(found.values())
+    if _turso_watchlist_enabled(WATCHLIST_PATH):
+        replace_watchlist_group("research", entries, source="event_csv")
+    return {"group": "research", "count": len(entries), "files_inspected": inspected, "source_dir": str(directory)}
+
+
+def parse_watchlist_csv_text(content: str, group: str) -> list[WatchlistEntry]:
+    """Parse an admin import without writing the submitted CSV to disk."""
+
+    entries: list[WatchlistEntry] = []
+    reader = csv.DictReader(io.StringIO(content.lstrip("\ufeff")))
+    for row in reader:
+        normalized = {str(key).strip().lower(): value for key, value in row.items()}
+        code = str(normalized.get("code", "") or "").strip().zfill(5)
+        if not code.strip("0"):
+            continue
+        priority_value = str(normalized.get("priority", "") or "").strip()
+        entries.append(
+            WatchlistEntry(
+                code=code,
+                name=str(normalized.get("name", "") or "").strip(),
+                groups=(group.strip().lower(),),
+                tag=str(normalized.get("tag", "") or normalized.get("lshape_class", "") or "").strip(),
+                priority=int(priority_value) if priority_value.isdigit() else None,
+                added_date=str(normalized.get("added_date", "") or "").strip(),
+                source=str(normalized.get("source", "") or "admin_import").strip(),
+            )
+        )
     deduped: dict[str, WatchlistEntry] = {}
     for entry in entries:
         deduped.setdefault(entry.code, entry)

@@ -80,6 +80,7 @@ from utils.snapshot_db import (
     rebuild_research_watchlist,
     replace_watchlist_group,
     restore_snapshot_db_from_backup,
+    seed_research_watchlist_if_empty,
     sync_watchlists_to_turso,
     turso_migration_status,
     upsert_price_history,
@@ -3053,6 +3054,9 @@ async def start_mcp_session_manager() -> None:
         logger.exception("Longbridge Turso migration failed; retaining legacy fallback")
     try:
         synced = sync_watchlists_to_turso()
+        research = seed_research_watchlist_if_empty()
+        if research.get("count"):
+            synced["research"] = int(research["count"])
         if synced:
             logger.info("Seeded Turso watchlists: %s", synced)
     except Exception:

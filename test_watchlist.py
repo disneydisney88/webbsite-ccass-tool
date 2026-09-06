@@ -51,3 +51,10 @@ def test_turso_watchlist_loader_reads_group_rows() -> None:
     assert entries[0].code == "01792"
     assert entries[0].groups == ("lshape79",)
     assert entries[0].priority == 1
+
+
+def test_research_builder_deduplicates_the_four_event_inputs() -> None:
+    result = snapshot_db.rebuild_research_watchlist(Path(__file__).parent / "data" / "events")
+
+    assert result["files_inspected"] == 4
+    assert result["count"] >= 250

@@ -1272,15 +1272,21 @@ def rebuild_research_watchlist(event_dir: Path | None = None) -> dict[str, Any]:
                         for key, value in normalized.items():
                             if "date" not in key and "day" not in key and "time" not in key:
                                 continue
-                            for match in re.findall(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}", value):
+                            for match in re.findall(r"(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}/\d{1,2}/\d{2})", value):
                                 try:
-                                    dates.append(datetime.strptime(match.replace("/", "-").replace(".", "-"), "%Y-%m-%d").date())
+                                    normalized_date = match.replace("/", "-").replace(".", "-")
+                                    date_format = "%d-%m-%y" if len(normalized_date.split("-")[0]) <= 2 and len(normalized_date.split("-")[-1]) == 2 else "%Y-%m-%d"
+                                    dates.append(datetime.strptime(normalized_date, date_format).date())
                                 except ValueError:
                                     continue
                         if dates and not any(cutoff <= date <= datetime.now(timezone.utc).date() for date in dates):
                             continue
                         code_value = next(
-                            (value for key, value in normalized.items() if "code" in key or "stock" in key or "security" in key),
+                            (
+                                value
+                                for key, value in normalized.items()
+                                if "code" in key or "stock" in key or "security" in key or "代號" in key or "股票" in key
+                            ),
                             "",
                         )
                         match = re.search(r"(?<!\d)(\d{4,5})(?!\d)", code_value)
@@ -1297,6 +1303,19 @@ def rebuild_research_watchlist(event_dir: Path | None = None) -> dict[str, Any]:
     if _turso_watchlist_enabled(WATCHLIST_PATH):
         replace_watchlist_group("research", entries, source="event_csv")
     return {"group": "research", "count": len(entries), "files_inspected": inspected, "source_dir": str(directory)}
+
+
+def seed_research_watchlist_if_empty() -> dict[str, Any]:
+    if not _turso_watchlist_enabled(WATCHLIST_PATH):
+        return {"group": "research", "count": 0, "status": "not_configured"}
+    from .turso_db import turso_query
+
+    rows = turso_query("SELECT COUNT(*) AS count FROM watchlist WHERE group_name='research'")
+    if rows and int(rows[0].get("count") or 0) > 0:
+        return {"group": "research", "count": int(rows[0]["count"]), "status": "preserved"}
+    result = rebuild_research_watchlist()
+    result["status"] = "seeded"
+    return result
 
 
 def parse_watchlist_csv_text(content: str, group: str) -> list[WatchlistEntry]:

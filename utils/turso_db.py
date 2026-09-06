@@ -31,12 +31,25 @@ def turso_is_configured() -> bool:
     return bool(os.getenv(TURSO_DATABASE_URL_ENV, "").strip() and os.getenv(TURSO_AUTH_TOKEN_ENV, "").strip())
 
 
+def turso_http_url(raw_url: str) -> str:
+    """Use Turso's HTTPS SQL transport when given a libsql URL.
+
+    Some Turso deployments return HTTP 400 during the legacy Hrana WebSocket
+    handshake.  The libsql-client supports HTTPS for the same database host.
+    """
+
+    value = (raw_url or "").strip()
+    if value.lower().startswith("libsql://"):
+        return "https://" + value[len("libsql://") :]
+    return value
+
+
 def _create_client():
     try:
         import libsql_client
     except ImportError as exc:  # pragma: no cover - deployment dependency
         raise RuntimeError("libsql-client is not installed") from exc
-    url = os.getenv(TURSO_DATABASE_URL_ENV, "").strip()
+    url = turso_http_url(os.getenv(TURSO_DATABASE_URL_ENV, ""))
     token = os.getenv(TURSO_AUTH_TOKEN_ENV, "").strip()
     if not url or not token:
         raise RuntimeError("TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required")

@@ -11,6 +11,11 @@ def test_turso_is_disabled_without_both_credentials() -> None:
         assert turso_db.turso_health() == {"db_backend": "sqlite", "turso_ping_ms": None}
 
 
+def test_libsql_url_uses_https_transport() -> None:
+    assert turso_db.turso_http_url("libsql://example.turso.io") == "https://example.turso.io"
+    assert turso_db.turso_http_url("https://example.turso.io") == "https://example.turso.io"
+
+
 def test_turso_health_provisions_and_pings_without_exposing_credentials() -> None:
     calls: list[str] = []
 

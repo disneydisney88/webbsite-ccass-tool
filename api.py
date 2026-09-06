@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import copy
 import json
 import logging
@@ -8,6 +9,7 @@ import os
 import re
 import secrets
 import time
+from io import StringIO
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Empty, Queue
@@ -16,7 +18,7 @@ from typing import Annotated, Any
 
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
@@ -100,6 +102,18 @@ from utils.longbridge import (
     start_device_authorization,
 )
 from utils.turso_db import turso_health
+from utils.research_pipeline import (
+    add_hypothesis,
+    build_brief,
+    build_timeline,
+    build_transfer_candidates,
+    build_broker_panel,
+    get_hypotheses,
+    get_job,
+    hkt_today,
+    run_daily_job,
+    start_job,
+)
 
 
 def int_env(name: str, default: int) -> int:
@@ -131,6 +145,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 _stock_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _mcp_session_context: Any = None
 _APP_STARTED_MONOTONIC = time.monotonic()
+_worker_last_run: dict[str, Any] = {}
 
 
 def stock_tool_budget(source_preference: str) -> int:
@@ -198,6 +213,7 @@ class HealthResponse(BaseModel):
     turso_error: str | None = None
     turso_migration: dict[str, Any] = Field(default_factory=dict)
     watchlist_counts: dict[str, int] = Field(default_factory=dict)
+    worker_last_run: dict[str, Any] = Field(default_factory=dict)
 
 
 class StockMetadata(BaseModel):
@@ -327,6 +343,23 @@ class LongbridgeToolCallRequest(BaseModel):
 class WatchlistImportRequest(BaseModel):
     group: str = Field(pattern=r"^(lshape79|caiji|research)$")
     csv_text: str = Field(min_length=1, max_length=2_000_000)
+
+
+class DailyRunRequest(BaseModel):
+    run_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    sleep_seconds: float = Field(default=1.5, ge=1.5, le=10.0)
+
+
+class HypothesisRequest(BaseModel):
+    id: str | None = Field(default=None, max_length=128)
+    code: str = Field(pattern=r"^\d{1,5}$")
+    created: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    expected_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    ccass_id: str = Field(pattern=r"^[A-Ca-c]\d{5}$")
+    field: str = Field(default="holding_shares", max_length=64)
+    op: str = Field(default="<=", pattern=r"^(<=|<|>=|>|=)$")
+    value: str
+    note: str = Field(default="", max_length=2000)
 
 
 def json_safe(value: Any) -> Any:
@@ -2901,6 +2934,7 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
         "api_token_length": len(api_token),
         "longbridge_token_key_configured": bool(os.getenv("LONGBRIDGE_TOKEN_KEY", "").strip()),
         "render_service_id": os.getenv("RENDER_SERVICE_ID", ""),
+        "worker_last_run": dict(_worker_last_run),
     }
     payload.update(turso_health())
     payload["turso_migration"] = turso_migration_status()
@@ -3044,6 +3078,123 @@ def snapshot_longbridge_watchlist(
         "failed": sum(1 for row in rows if not row.get("ok")),
         "results": rows,
     }
+
+
+def _start_daily_worker(job_id: str, sleep_seconds: float) -> None:
+    global _worker_last_run
+    try:
+        result = run_daily_job(job_id, sleep_seconds=sleep_seconds)
+        _worker_last_run = {
+            "job_id": job_id,
+            "status": result.get("status", "unknown"),
+            "finished_at": result.get("finished_at", ""),
+            "succeeded": (result.get("detail") or {}).get("succeeded", 0),
+            "failed": (result.get("detail") or {}).get("failed", 0),
+        }
+    except Exception as exc:  # keep a worker failure visible through the job API
+        logger.exception("Daily worker failed: %s", job_id)
+        _set_worker_failure = {"job_id": job_id, "status": "failed", "error": str(exc)}
+        _worker_last_run = _set_worker_failure
+
+
+@app.post("/admin/run_daily", dependencies=[Depends(verify_api_token)])
+def run_daily_endpoint(request: DailyRunRequest) -> Response:
+    run_date = request.run_date or hkt_today()
+    job_id = f"daily:{run_date}"
+    job, created = start_job(job_id, job_type="daily")
+    if created:
+        Thread(target=_start_daily_worker, args=(job_id, request.sleep_seconds), daemon=True).start()
+    return JSONResponse(
+        status_code=202,
+        content={"ok": True, "accepted": True, "created": created, "job_id": job_id, "job": job},
+    )
+
+
+@app.get("/admin/jobs/{job_id}", dependencies=[Depends(verify_api_token)])
+def get_daily_job(job_id: str) -> dict[str, Any]:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return {"ok": True, "job": job}
+
+
+@app.post("/admin/hypotheses", dependencies=[Depends(verify_api_token)])
+def create_hypothesis(request: HypothesisRequest) -> dict[str, Any]:
+    return {"ok": True, "hypothesis": add_hypothesis(request.model_dump())}
+
+
+@app.get("/hypotheses", dependencies=[Depends(verify_api_token)])
+def list_hypotheses(status_filter: str | None = Query(None, alias="status", pattern=r"^(pending|hit|miss)$")) -> dict[str, Any]:
+    return {"ok": True, "status": status_filter or "all", "hypotheses": get_hypotheses(status=status_filter)}
+
+
+@app.get("/timeline", dependencies=[Depends(verify_api_token)])
+def timeline_endpoint(
+    code: str = Query(..., pattern=r"^\d{1,5}$"),
+    from_date: str = Query("", alias="from", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+    to_date: str = Query("", alias="to", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+) -> dict[str, Any]:
+    normalized = clean_stock_code(code)
+    rows = build_timeline(normalized, from_date, to_date)
+    return {"ok": True, "code": normalized, "from": from_date, "to": to_date, "count": len(rows), "timeline": rows}
+
+
+def _csv_stream(rows: list[dict[str, Any]]) -> Any:
+    if not rows:
+        yield ""
+        return
+    fields = list(rows[0].keys())
+    for row in rows:
+        output = StringIO()
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        if row is rows[0]:
+            writer.writeheader()
+        writer.writerow(row)
+        yield output.getvalue()
+
+
+@app.get("/panel/broker_daily", dependencies=[Depends(verify_api_token)])
+def broker_daily_panel(
+    group: str = Query(..., pattern=r"^(lshape79|caiji|research)$"),
+    from_date: str = Query("", alias="from", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+    to_date: str = Query("", alias="to", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+    format: str = Query("json", pattern=r"^(json|csv)$"),
+) -> Response:
+    rows = build_broker_panel(group, from_date, to_date)
+    if format == "csv":
+        return StreamingResponse(_csv_stream(rows), media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": f'attachment; filename="{group}_broker_daily.csv"'})
+    return {"ok": True, "group": group, "count": len(rows), "records": rows}
+
+
+@app.get("/panel/transfers", dependencies=[Depends(verify_api_token)])
+def transfers_panel(
+    group: str = Query(..., pattern=r"^(lshape79|caiji|research)$"),
+    from_date: str = Query("", alias="from", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+    to_date: str = Query("", alias="to", pattern=r"^$|^\d{4}-\d{2}-\d{2}$"),
+) -> dict[str, Any]:
+    rows = build_transfer_candidates(group, from_date, to_date)
+    return {"ok": True, "group": group, "count": len(rows), "transfers": rows}
+
+
+@app.get("/brief/latest", dependencies=[Depends(verify_api_token)])
+def latest_brief() -> dict[str, Any]:
+    from utils.research_pipeline import load_brief
+
+    payload = load_brief()
+    if payload is None:
+        raise HTTPException(status_code=404, detail="No brief has been generated yet.")
+    return {"ok": True, **payload}
+
+
+@app.get("/brief/{brief_date}", dependencies=[Depends(verify_api_token)])
+def dated_brief(brief_date: str) -> dict[str, Any]:
+    from utils.research_pipeline import load_brief
+
+    payload = load_brief(brief_date)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Brief not found.")
+    return {"ok": True, **payload}
 
 
 @app.on_event("startup")

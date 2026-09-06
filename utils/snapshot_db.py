@@ -282,6 +282,15 @@ def upsert_longbridge_holdings(
         return len(values)
     ensure_db(path)
     with closing(sqlite3.connect(path)) as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS holdings_daily (
+                code TEXT NOT NULL, data_date TEXT NOT NULL, ccass_id TEXT NOT NULL,
+                participant_name TEXT NOT NULL, holding_shares INTEGER NOT NULL,
+                stake_pct_of_issued REAL, stake_pct_of_ccass REAL, change_shares REAL,
+                source TEXT NOT NULL, fetched_at TEXT NOT NULL,
+                PRIMARY KEY (code, data_date, ccass_id)
+            )"""
+        )
         conn.executemany(
             """
             INSERT INTO longbridge_holdings_daily
@@ -296,6 +305,22 @@ def upsert_longbridge_holdings(
                 fetched_at=excluded.fetched_at
             """,
             values,
+        )
+        conn.executemany(
+            """INSERT INTO holdings_daily
+                (code,data_date,ccass_id,participant_name,holding_shares,
+                 stake_pct_of_issued,stake_pct_of_ccass,change_shares,source,fetched_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(code,data_date,ccass_id) DO UPDATE SET
+                 participant_name=excluded.participant_name,
+                 holding_shares=excluded.holding_shares,
+                 stake_pct_of_issued=excluded.stake_pct_of_issued,
+                 change_shares=excluded.change_shares,
+                 source=excluded.source,fetched_at=excluded.fetched_at""",
+            [
+                (row[0], row[1], row[2], row[3], row[4], row[5], None, row[6], "longbridge", row[7])
+                for row in values
+            ],
         )
         conn.commit()
     return len(values)

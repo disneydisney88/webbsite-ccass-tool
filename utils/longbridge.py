@@ -27,6 +27,7 @@ from .snapshot_db import (
     save_longbridge_secret,
     upsert_longbridge_holdings,
 )
+from .turso_db import turso_is_configured
 
 
 MAIN_ENDPOINT = "https://mcp.longbridge.com"
@@ -198,6 +199,9 @@ def save_token_payload(payload: dict[str, Any], path: Path = DB_PATH) -> None:
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     token_file = os.getenv("LONGBRIDGE_TOKEN_FILE", "").strip()
     encrypted = _fernet().encrypt(raw)
+    if turso_is_configured():
+        save_longbridge_credential(encrypted, path=path)
+        return
     if token_file:
         target = Path(token_file)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -212,14 +216,22 @@ def save_token_payload(payload: dict[str, Any], path: Path = DB_PATH) -> None:
 
 def load_token_payload(path: Path = DB_PATH) -> dict[str, Any] | None:
     token_file = os.getenv("LONGBRIDGE_TOKEN_FILE", "").strip()
-    # A configured Render Secret File is authoritative. Do not silently fall
-    # back to a checked-in/backup SQLite credential when it is missing.
-    if token_file:
+    # Turso is authoritative after migration. The file branch is retained only
+    # as a transition fallback for a deployment where migration failed.
+    encrypted = None
+    if turso_is_configured():
+        try:
+            encrypted = load_longbridge_credential(path=path)
+        except Exception:
+            # Keep health and device login usable while a Turso deployment is
+            # recovering; the legacy source is removed after live migration.
+            encrypted = None
+    if encrypted is None and token_file:
         token_path = Path(token_file)
         if not token_path.exists():
             return None
         encrypted = token_path.read_bytes()
-    else:
+    elif encrypted is None:
         encrypted = load_longbridge_credential(path=path)
     if not encrypted:
         return None

@@ -75,7 +75,9 @@ from utils.snapshot_db import (
     load_snapshot,
     load_stock_meta,
     load_watchlist_entries,
+    migrate_longbridge_state_to_turso,
     restore_snapshot_db_from_backup,
+    turso_migration_status,
     upsert_price_history,
     upsert_stock_map,
 )
@@ -189,6 +191,7 @@ class HealthResponse(BaseModel):
     db_backend: str = "sqlite"
     turso_ping_ms: float | None = None
     turso_error: str | None = None
+    turso_migration: dict[str, Any] = Field(default_factory=dict)
 
 
 class StockMetadata(BaseModel):
@@ -2889,6 +2892,7 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
         "render_service_id": os.getenv("RENDER_SERVICE_ID", ""),
     }
     payload.update(turso_health())
+    payload["turso_migration"] = turso_migration_status()
     if upstreams:
         payload["upstreams"] = probe_upstreams(timeout=5)
     return payload
@@ -2990,6 +2994,13 @@ async def start_mcp_session_manager() -> None:
     logger.info("API auth config: API_TOKEN=%s", mask_secret(os.getenv("API_TOKEN", "")))
     if restore_snapshot_db_from_backup():
         logger.info("Restored snapshot DB from backup (%s)", db_restore_status().get("db_restore_source", "unknown source"))
+    try:
+        migration = migrate_longbridge_state_to_turso(
+            token_file=os.getenv("LONGBRIDGE_TOKEN_FILE", "").strip()
+        )
+        logger.info("Longbridge Turso migration: %s", migration)
+    except Exception:
+        logger.exception("Longbridge Turso migration failed; retaining legacy fallback")
     _mcp_session_context = mcp_server.session_manager.run()
     await _mcp_session_context.__aenter__()
 

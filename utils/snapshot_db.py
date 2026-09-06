@@ -23,6 +23,31 @@ WATCHLIST_PATH = Path(os.getenv("CCASS_WATCHLIST", str(DATA_DIR / "watchlist.csv
 BACKUP_LATEST_PATH = Path(os.getenv("CCASS_SNAPSHOT_BACKUP_LATEST", str(DATA_DIR / "backups" / "ccass_snapshots_latest.db")))
 _DB_RESTORED_FROM_BACKUP = False
 _DB_RESTORE_SOURCE = ""
+_TURSO_MIGRATION_STATUS: dict[str, Any] = {
+    "status": "not_run",
+    "longbridge_rows": 0,
+    "credential_migrated": False,
+}
+
+
+def _turso_enabled(path: Path) -> bool:
+    """Use Turso only for the configured application database.
+
+    Explicit temporary paths remain SQLite-backed so fixture tests and local
+    recovery tools cannot accidentally write to production.
+    """
+
+    if Path(path) != DB_PATH:
+        return False
+    from .turso_db import turso_is_configured
+
+    return turso_is_configured()
+
+
+def _turso_rows_to_dicts(statement: str, args: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    from .turso_db import turso_query
+
+    return turso_query(statement, args)
 
 
 @dataclass
@@ -62,6 +87,10 @@ def restore_snapshot_db_from_backup(path: Path = DB_PATH, backup_path: Path = BA
 
 def db_restore_status() -> dict[str, Any]:
     return {"db_restored_from_backup": _DB_RESTORED_FROM_BACKUP, "db_restore_source": _DB_RESTORE_SOURCE}
+
+
+def turso_migration_status() -> dict[str, Any]:
+    return dict(_TURSO_MIGRATION_STATUS)
 
 
 def parse_groups(value: str) -> tuple[str, ...]:
@@ -184,7 +213,6 @@ def upsert_longbridge_holdings(
     rows: list[dict[str, Any]],
     path: Path = DB_PATH,
 ) -> int:
-    ensure_db(path)
     fetched_at = now_iso()
     values = []
     for row in rows:
@@ -203,6 +231,49 @@ def upsert_longbridge_holdings(
                 fetched_at,
             )
         )
+    if _turso_enabled(path):
+        from .turso_db import ensure_turso_schema, turso_execute_many
+
+        ensure_turso_schema()
+        legacy_sql = """
+            INSERT INTO longbridge_holdings_daily
+                (code, data_date, ccass_id, participant_name, holding_shares,
+                 stake_pct_of_issued, change_shares, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code, data_date, ccass_id) DO UPDATE SET
+                participant_name=excluded.participant_name,
+                holding_shares=excluded.holding_shares,
+                stake_pct_of_issued=excluded.stake_pct_of_issued,
+                change_shares=excluded.change_shares,
+                fetched_at=excluded.fetched_at
+        """
+        turso_execute_many(legacy_sql, values)
+        unified_values = [
+            (
+                row[0], row[1], row[2], row[3], row[4], row[5],
+                None, row[6], "longbridge", row[7],
+            )
+            for row in values
+        ]
+        turso_execute_many(
+            """
+            INSERT INTO holdings_daily
+                (code, data_date, ccass_id, participant_name, holding_shares,
+                 stake_pct_of_issued, stake_pct_of_ccass, change_shares, source, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(code, data_date, ccass_id) DO UPDATE SET
+                participant_name=excluded.participant_name,
+                holding_shares=excluded.holding_shares,
+                stake_pct_of_issued=excluded.stake_pct_of_issued,
+                stake_pct_of_ccass=excluded.stake_pct_of_ccass,
+                change_shares=excluded.change_shares,
+                source=excluded.source,
+                fetched_at=excluded.fetched_at
+            """,
+            unified_values,
+        )
+        return len(values)
+    ensure_db(path)
     with closing(sqlite3.connect(path)) as conn:
         conn.executemany(
             """
@@ -228,8 +299,31 @@ def load_longbridge_holdings(
     data_date: str = "",
     path: Path = DB_PATH,
 ) -> list[dict[str, Any]]:
-    ensure_db(path)
     normalized = str(code).zfill(5)
+    if _turso_enabled(path):
+        rows = _turso_rows_to_dicts(
+            """
+            SELECT code, data_date, ccass_id, participant_name, holding_shares,
+                   stake_pct_of_issued, change_shares, fetched_at
+            FROM longbridge_holdings_daily
+            WHERE code=? AND data_date=?
+            ORDER BY holding_shares DESC, ccass_id
+            """,
+            (normalized, data_date),
+        ) if data_date else _turso_rows_to_dicts(
+            """
+            SELECT code, data_date, ccass_id, participant_name, holding_shares,
+                   stake_pct_of_issued, change_shares, fetched_at
+            FROM longbridge_holdings_daily
+            WHERE code=? AND data_date=(
+                SELECT MAX(data_date) FROM longbridge_holdings_daily WHERE code=?
+            )
+            ORDER BY holding_shares DESC, ccass_id
+            """,
+            (normalized, normalized),
+        )
+        return rows
+    ensure_db(path)
     with closing(sqlite3.connect(path)) as conn:
         conn.row_factory = sqlite3.Row
         wanted_date = data_date
@@ -257,6 +351,18 @@ def load_longbridge_holding_history(
     path: Path = DB_PATH,
 ) -> list[dict[str, Any]]:
     """Load persisted Longbridge participant snapshots for history charts."""
+    normalized = str(code).zfill(5)
+    if _turso_enabled(path):
+        return _turso_rows_to_dicts(
+            """
+            SELECT code, data_date, ccass_id, participant_name, holding_shares,
+                   stake_pct_of_issued, change_shares, fetched_at
+            FROM longbridge_holdings_daily
+            WHERE code=?
+            ORDER BY data_date ASC, holding_shares DESC, ccass_id
+            """,
+            (normalized,),
+        )
     ensure_db(path)
     with closing(sqlite3.connect(path)) as conn:
         conn.row_factory = sqlite3.Row
@@ -268,7 +374,7 @@ def load_longbridge_holding_history(
             WHERE code=?
             ORDER BY data_date ASC, holding_shares DESC, ccass_id
             """,
-            (str(code).zfill(5),),
+            (normalized,),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -278,6 +384,16 @@ def load_longbridge_snapshot_dates(
     limit: int = 2,
     path: Path = DB_PATH,
 ) -> list[str]:
+    normalized = str(code).zfill(5)
+    if _turso_enabled(path):
+        rows = _turso_rows_to_dicts(
+            """
+            SELECT DISTINCT data_date FROM longbridge_holdings_daily
+            WHERE code=? ORDER BY data_date DESC LIMIT ?
+            """,
+            (normalized, max(1, int(limit))),
+        )
+        return [str(row["data_date"]) for row in rows]
     ensure_db(path)
     with closing(sqlite3.connect(path)) as conn:
         rows = conn.execute(
@@ -295,6 +411,21 @@ def save_longbridge_secret(
     encrypted_payload: bytes,
     path: Path = DB_PATH,
 ) -> None:
+    if _turso_enabled(path):
+        from .turso_db import ensure_turso_schema, turso_execute
+
+        ensure_turso_schema()
+        turso_execute(
+            """
+            INSERT INTO longbridge_credentials (credential_id, encrypted_payload, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(credential_id) DO UPDATE SET
+                encrypted_payload=excluded.encrypted_payload,
+                updated_at=excluded.updated_at
+            """,
+            (credential_id, encrypted_payload, now_iso()),
+        )
+        return
     ensure_db(path)
     with closing(sqlite3.connect(path)) as conn:
         conn.execute(
@@ -311,6 +442,15 @@ def save_longbridge_secret(
 
 
 def load_longbridge_secret(credential_id: str, path: Path = DB_PATH) -> bytes | None:
+    if _turso_enabled(path):
+        rows = _turso_rows_to_dicts(
+            "SELECT encrypted_payload FROM longbridge_credentials WHERE credential_id=?",
+            (credential_id,),
+        )
+        if not rows:
+            return None
+        payload = rows[0].get("encrypted_payload")
+        return bytes(payload) if payload is not None else None
     ensure_db(path)
     with closing(sqlite3.connect(path)) as conn:
         row = conn.execute(
@@ -321,6 +461,12 @@ def load_longbridge_secret(credential_id: str, path: Path = DB_PATH) -> bytes | 
 
 
 def delete_longbridge_secret(credential_id: str, path: Path = DB_PATH) -> None:
+    if _turso_enabled(path):
+        from .turso_db import ensure_turso_schema, turso_execute
+
+        ensure_turso_schema()
+        turso_execute("DELETE FROM longbridge_credentials WHERE credential_id=?", (credential_id,))
+        return
     ensure_db(path)
     with closing(sqlite3.connect(path)) as conn:
         conn.execute("DELETE FROM longbridge_credentials WHERE credential_id=?", (credential_id,))
@@ -333,6 +479,125 @@ def save_longbridge_credential(encrypted_payload: bytes, path: Path = DB_PATH) -
 
 def load_longbridge_credential(path: Path = DB_PATH) -> bytes | None:
     return load_longbridge_secret("primary", path=path)
+
+
+def _sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def migrate_longbridge_state_to_turso(
+    path: Path = DB_PATH,
+    token_file: str = "",
+) -> dict[str, Any]:
+    """Idempotently copy legacy Longbridge state into Turso.
+
+    The migration deliberately copies, rather than deletes, the SQLite rows.
+    That makes a failed deployment recoverable while Turso row counts and the
+    encrypted credential are verified in production.
+    """
+
+    global _TURSO_MIGRATION_STATUS
+    if not _turso_enabled(path):
+        _TURSO_MIGRATION_STATUS = {
+            "status": "not_configured",
+            "longbridge_rows": 0,
+            "credential_migrated": False,
+        }
+        return dict(_TURSO_MIGRATION_STATUS)
+
+    from .turso_db import ensure_turso_schema, turso_execute, turso_execute_many, turso_query
+
+    ensure_turso_schema()
+    source_rows: list[tuple[Any, ...]] = []
+    sqlite_credential: bytes | None = None
+    if Path(path).exists():
+        with closing(sqlite3.connect(path)) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(longbridge_holdings_daily)")}
+            if columns:
+                change_column = "change_shares" if "change_shares" in columns else "NULL AS change_shares"
+                source_rows = [
+                    tuple(row)
+                    for row in conn.execute(
+                        f"""
+                        SELECT code, data_date, ccass_id, participant_name, holding_shares,
+                               stake_pct_of_issued, {change_column}, fetched_at
+                        FROM longbridge_holdings_daily
+                        """
+                    ).fetchall()
+                ]
+            credential_row = conn.execute(
+                "SELECT encrypted_payload FROM longbridge_credentials WHERE credential_id='primary'"
+            ).fetchone() if _sqlite_table_exists(conn, "longbridge_credentials") else None
+            if credential_row:
+                sqlite_credential = bytes(credential_row[0])
+
+    legacy_sql = """
+        INSERT INTO longbridge_holdings_daily
+            (code, data_date, ccass_id, participant_name, holding_shares,
+             stake_pct_of_issued, change_shares, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(code, data_date, ccass_id) DO UPDATE SET
+            participant_name=excluded.participant_name,
+            holding_shares=excluded.holding_shares,
+            stake_pct_of_issued=excluded.stake_pct_of_issued,
+            change_shares=excluded.change_shares,
+            fetched_at=excluded.fetched_at
+    """
+    turso_execute_many(legacy_sql, source_rows)
+    unified_rows = [
+        (row[0], row[1], row[2], row[3], row[4], row[5], None, row[6], "longbridge", row[7])
+        for row in source_rows
+    ]
+    turso_execute_many(
+        """
+        INSERT INTO holdings_daily
+            (code, data_date, ccass_id, participant_name, holding_shares,
+             stake_pct_of_issued, stake_pct_of_ccass, change_shares, source, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(code, data_date, ccass_id) DO UPDATE SET
+            participant_name=excluded.participant_name,
+            holding_shares=excluded.holding_shares,
+            stake_pct_of_issued=excluded.stake_pct_of_issued,
+            stake_pct_of_ccass=excluded.stake_pct_of_ccass,
+            change_shares=excluded.change_shares,
+            source=excluded.source,
+            fetched_at=excluded.fetched_at
+        """,
+        unified_rows,
+    )
+
+    credential_exists = bool(
+        turso_query(
+            "SELECT credential_id FROM longbridge_credentials WHERE credential_id='primary'"
+        )
+    )
+    credential_migrated = False
+    if not credential_exists:
+        candidate = sqlite_credential
+        if candidate is None and token_file:
+            candidate_path = Path(token_file)
+            if candidate_path.exists():
+                candidate = candidate_path.read_bytes()
+        if candidate:
+            turso_execute(
+                """
+                INSERT INTO longbridge_credentials (credential_id, encrypted_payload, updated_at)
+                VALUES ('primary', ?, ?)
+                """,
+                (candidate, now_iso()),
+            )
+            credential_migrated = True
+
+    _TURSO_MIGRATION_STATUS = {
+        "status": "complete",
+        "longbridge_rows": len(source_rows),
+        "credential_migrated": credential_migrated or credential_exists,
+    }
+    return dict(_TURSO_MIGRATION_STATUS)
 
 
 def snapshot_exists(code: str, date: str, path: Path = DB_PATH) -> bool:

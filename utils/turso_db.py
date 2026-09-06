@@ -56,6 +56,42 @@ def _create_client():
     return libsql_client.create_client_sync(url, auth_token=token)
 
 
+def turso_execute(statement: str, args: list[Any] | tuple[Any, ...] | None = None) -> Any:
+    """Execute one statement through Turso's synchronous HTTPS client."""
+
+    with _create_client() as client:
+        return client.execute(statement, args or [])
+
+
+def turso_execute_many(
+    statement: str,
+    rows: list[list[Any] | tuple[Any, ...]],
+) -> int:
+    """Execute a bounded batch on one client connection.
+
+    ``libsql-client``'s batch API varies across its archived releases, so use
+    one connection and repeated parameterized statements for a stable path.
+    """
+
+    if not rows:
+        return 0
+    with _create_client() as client:
+        for args in rows:
+            client.execute(statement, args)
+    return len(rows)
+
+
+def turso_query(
+    statement: str,
+    args: list[Any] | tuple[Any, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Return a SELECT result as ordinary dictionaries."""
+
+    result = turso_execute(statement, args)
+    columns = list(getattr(result, "columns", ()) or ())
+    return [dict(zip(columns, tuple(row))) for row in getattr(result, "rows", ())]
+
+
 def ensure_turso_schema() -> None:
     with _create_client() as client:
         for statement in TURSO_SCHEMA:

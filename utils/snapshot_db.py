@@ -491,7 +491,6 @@ def _sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 def migrate_longbridge_state_to_turso(
     path: Path = DB_PATH,
-    token_file: str = "",
 ) -> dict[str, Any]:
     """Idempotently copy legacy Longbridge state into Turso.
 
@@ -578,10 +577,6 @@ def migrate_longbridge_state_to_turso(
     credential_migrated = False
     if not credential_exists:
         candidate = sqlite_credential
-        if candidate is None and token_file:
-            candidate_path = Path(token_file)
-            if candidate_path.exists():
-                candidate = candidate_path.read_bytes()
         if candidate:
             turso_execute(
                 """

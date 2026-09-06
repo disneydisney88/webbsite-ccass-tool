@@ -2995,9 +2995,7 @@ async def start_mcp_session_manager() -> None:
     if restore_snapshot_db_from_backup():
         logger.info("Restored snapshot DB from backup (%s)", db_restore_status().get("db_restore_source", "unknown source"))
     try:
-        migration = migrate_longbridge_state_to_turso(
-            token_file=os.getenv("LONGBRIDGE_TOKEN_FILE", "").strip()
-        )
+        migration = migrate_longbridge_state_to_turso()
         logger.info("Longbridge Turso migration: %s", migration)
     except Exception:
         logger.exception("Longbridge Turso migration failed; retaining legacy fallback")

@@ -292,9 +292,12 @@ broker holdings. It never performs an upstream call at process startup.
    remaining seconds, and refresh-token availability. Expired OAuth credentials
    are refreshed before a Longbridge data call when a refresh token exists.
 
-Credentials are encrypted before being written to SQLite. Set
-`LONGBRIDGE_TOKEN_FILE` only when a persistent secret-file mount is available;
-the encrypted file is created with mode 0600 where the operating system permits.
+Credentials are encrypted before being written to the configured database.
+When `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` are present, Turso is the
+authoritative credential store and Longbridge holdings are written to Turso's
+`longbridge_holdings_daily` compatibility table and the shared `holdings_daily`
+table. The startup migration is idempotent and reports its status from
+`/health`; no `LONGBRIDGE_TOKEN_FILE` Secret File is read by the application.
 
 `source_preference` modes:
 

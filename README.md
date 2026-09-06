@@ -166,15 +166,19 @@ GET /api/snapshot_all?group=lshape&key=<token>
 
 Edit `data/watchlist.csv` to change the monitored stock codes. The file has `code,name,group`; group is `caiji`, `lshape`, or a semicolon-separated value such as `caiji;lshape`.
 
-## Daily Backup Loop
+## Daily Worker Scheduling
 
-GitHub Actions runs `Daily CCASS Snapshot Backup` at 00:10 UTC / 08:10 Hong Kong time on weekdays, using the existing `daily_snapshot.yml` workflow. It:
+GitHub Actions runs `Daily CCASS Research Worker` at 00:10 UTC / 08:10 Hong Kong time on weekdays, using `daily_snapshot.yml`. It queues `POST /admin/run_daily` with the default groups `lshape79` and `caiji`; it does not use the legacy `snapshot_all` endpoint. The worker is idempotent by HKT date, reports `total`, `succeeded`, `skipped`, `failed`, `current_code`, and `elapsed_s` in `job_log` while it runs, and can be requested to stop with `POST /admin/job/{job_id}/cancel`.
 
-1. Wakes the Render API with `/health`.
-2. Calls `/api/snapshot_all?group=caiji` and `/api/snapshot_all?group=lshape`.
-3. Fetches Yahoo Finance daily close/volume for each watchlist stock and stores it in SQLite `price_history`.
-4. Downloads `/api/snapshots/export`.
-5. Commits `data/backups/ccass_snapshots_latest.db`; on Sundays it also keeps a dated weekly DB and retains the latest 8 weekly files.
+`run_daily` checks the XHKG calendar before creating a job. On a Hong Kong holiday or weekend it returns `status=skipped_holiday` and `next_trading_day` without starting a worker. A separate `research_snapshot.yml` workflow runs Saturdays at 02:00 UTC with `groups=["research"]`; research stocks are processed in batches of 100 with a 60-second pause between batches.
+
+The legacy endpoint remains available for explicit, read-only snapshot inspection:
+
+1. `GET /api/snapshot_all?key=<token>`
+2. `GET /api/snapshot_all?group=caiji&key=<token>`
+3. `GET /api/snapshot_all?group=lshape&key=<token>`
+
+It still fetches Yahoo Finance daily close/volume where configured and reports its own results; it is not the scheduled Longbridge worker.
 
 The backup commit message includes `[skip render]`, which Render supports for skipping auto-deploys, so the nightly DB backup does not create a deploy loop.
 

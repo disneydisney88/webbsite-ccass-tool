@@ -1,24 +1,23 @@
-name: Daily CCASS Research Worker
+name: Weekly Research Snapshot Worker
 
 on:
   schedule:
-    - cron: "10 0 * * 1-5"
+    - cron: "0 2 * * 6"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: daily-ccass-worker
+  group: weekly-research-worker
   cancel-in-progress: false
 
 jobs:
-  daily:
+  research:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 180
     env:
       API_BASE_URL: https://webbsite-ccass-api.onrender.com
-      SNAPSHOT_MAX_AGE_DAYS: 7
 
     steps:
       - name: Verify API token secret
@@ -35,24 +34,24 @@ jobs:
           done
           exit 1
 
-      - name: Queue idempotent daily worker
+      - name: Queue weekly research worker
         run: |
           curl --fail --silent --show-error --max-time 60 -X POST \
             -H "Authorization: Bearer ${{ secrets.CCASS_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"groups":["lshape79","caiji"]}' \
+            -d '{"groups":["research"],"sleep_seconds":1.5}' \
             "$API_BASE_URL/admin/run_daily" > daily_job.json
           python - <<'PY'
           import json
           data = json.load(open("daily_job.json", encoding="utf-8"))
-          print(f"Queued {data['job_id']}; created={data.get('created')}")
+          print(f"Queued {data['job_id']}; created={data.get('created')}; groups={data.get('groups')}")
           open("job_id", "w", encoding="utf-8").write(data["job_id"])
           PY
 
       - name: Wait for worker and publish summary
         run: |
           job_id="$(cat job_id)"
-          for attempt in $(seq 1 180); do
+          for attempt in $(seq 1 540); do
             curl --fail --silent --show-error --max-time 60 \
               -H "Authorization: Bearer ${{ secrets.CCASS_API_TOKEN }}" \
               "$API_BASE_URL/admin/jobs/$job_id" > job.json
@@ -61,7 +60,7 @@ jobs:
           data=json.load(open("job.json", encoding="utf-8"))
           job=data.get("job", {})
           detail=job.get("detail", {}) or {}
-          print(json.dumps({"status": job.get("status"), "total": detail.get("total", 0), "succeeded": detail.get("succeeded", 0), "skipped": detail.get("skipped", 0), "failed": detail.get("failed", 0)}, ensure_ascii=False))
+          print(json.dumps({"status": job.get("status"), "total": detail.get("total", 0), "succeeded": detail.get("succeeded", 0), "skipped": detail.get("skipped", 0), "failed": detail.get("failed", 0), "current_code": detail.get("current_code", ""), "elapsed_s": detail.get("elapsed_s", 0)}, ensure_ascii=False))
           open("job_status", "w", encoding="utf-8").write(str(job.get("status", "")))
           PY
             status="$(cat job_status)"
@@ -70,27 +69,19 @@ jobs:
           done
           python - <<'PY'
           import json, os
-          from datetime import date, datetime
-          from zoneinfo import ZoneInfo
           data=json.load(open("job.json", encoding="utf-8"))
           job=data.get("job", {})
           detail=job.get("detail", {}) or {}
-          rows=detail.get("results", []) or []
-          succeeded=sum(1 for row in rows if row.get("ok") and not row.get("skipped"))
-          skipped=sum(1 for row in rows if row.get("skipped"))
-          failed=len(rows)-succeeded-skipped
-          dates=[str(row.get("data_date"))[:10] for row in rows if row.get("data_date")]
-          latest=max(dates) if dates else ""
-          today_hkt=datetime.now(ZoneInfo("Asia/Hong_Kong")).date()
-          age=(today_hkt-date.fromisoformat(latest)).days if latest else None
-          summary=f"### Daily worker\n- succeeded: {succeeded}\n- skipped: {skipped}\n- failed: {failed}\n- latest data date: {latest or 'unknown'}\n"
-          if age is None or age > int(os.environ.get("SNAPSHOT_MAX_AGE_DAYS", "7")):
-              summary += f"- warning: snapshot data is stale or unavailable (age={age})\n"
-              print("::warning::Latest CCASS snapshot is stale; Longbridge data is stale or unavailable")
-          if succeeded == 0:
-              print("::warning::No daily snapshot succeeded; this run is not a pure success")
+          summary=(
+              "### Weekly research worker\n"
+              f"- groups: {', '.join(detail.get('groups', []))}\n"
+              f"- succeeded: {detail.get('succeeded', 0)}\n"
+              f"- skipped: {detail.get('skipped', 0)}\n"
+              f"- failed: {detail.get('failed', 0)}\n"
+              f"- elapsed_s: {detail.get('elapsed_s', 0)}\n"
+          )
           with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as handle:
               handle.write(summary)
-          if job.get("status") != "succeeded" or failed:
-              raise SystemExit("daily worker failed")
+          if job.get("status") != "succeeded" or detail.get("failed", 0):
+              raise SystemExit("weekly research worker failed")
           PY

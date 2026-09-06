@@ -1,3 +1,5 @@
+import json
+
 import api
 
 
@@ -5,6 +7,7 @@ def test_round4_routes_are_registered_and_protected():
     paths = {route.path for route in api.app.routes}
     assert "/admin/run_daily" in paths
     assert "/admin/jobs/{job_id}" in paths
+    assert "/admin/job/{job_id}/cancel" in paths
     assert "/timeline" in paths
     assert "/panel/broker_daily" in paths
     assert "/panel/transfers" in paths
@@ -28,4 +31,16 @@ def test_health_model_exposes_round4_operational_fields():
 def test_daily_worker_contract_is_not_mcp_wall_clock_work():
     request = api.DailyRunRequest()
     assert request.sleep_seconds >= 1.5
+    assert request.groups == ["lshape79", "caiji"]
     assert api.stock_tool_budget("hybrid_light") == 30
+
+
+def test_run_daily_holiday_skips_before_job_creation(monkeypatch):
+    monkeypatch.setattr(api, "trading_sessions_between", lambda start, end: ([], ""))
+    monkeypatch.setattr(api, "next_trading_date", lambda value: ("2026-09-08", ""))
+    response = api.run_daily_endpoint(api.DailyRunRequest(run_date="2026-09-07"))
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["status"] == "skipped_holiday"
+    assert payload["next_trading_day"] == "2026-09-08"
+    assert payload["accepted"] is False

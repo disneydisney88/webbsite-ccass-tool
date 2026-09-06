@@ -10,7 +10,7 @@ import re
 import secrets
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from io import StringIO
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,7 +27,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
 from pydantic import BaseModel, ConfigDict, Field
 
-from utils.date_semantics import ANALYSIS_DATE_NOTICE, align_event_date, next_trading_date
+from utils.date_semantics import ANALYSIS_DATE_NOTICE, align_event_date, next_trading_date, trading_sessions_between
 from utils.exporters import parsed_to_json_ready
 from utils.fetcher import (
     FetchResult,
@@ -112,9 +112,12 @@ from utils.research_pipeline import (
     build_timeline,
     build_transfer_candidates,
     build_broker_panel,
+    cancel_job,
+    daily_entry_count,
     get_hypotheses,
     get_job,
     hkt_today,
+    job_cancel_requested,
     run_daily_job,
     start_job,
 )
@@ -131,6 +134,7 @@ API_TITLE = "Webb-site CCASS Research API"
 API_SERVICE = "webbsite-ccass-api"
 API_VERSION = "1.13.0"
 GIT_SHA = os.getenv("RENDER_GIT_COMMIT", "unknown")
+HKT = ZoneInfo("Asia/Hong_Kong")
 CACHE_TTL_SECONDS = max(0, int_env("API_CACHE_TTL_SECONDS", 86400))
 STOCK_TOOL_BUDGETS = {"local_db": 15, "hybrid_light": 30, "longbridge": 30, "auto": 45}
 DEFAULT_API_BASE_URL = "https://webbsite-ccass-api.onrender.com"
@@ -154,6 +158,12 @@ _worker_last_run: dict[str, Any] = {}
 
 def stock_tool_budget(source_preference: str) -> int:
     return STOCK_TOOL_BUDGETS.get(source_preference, STOCK_TOOL_BUDGETS["hybrid_light"])
+
+
+def server_time_values() -> tuple[datetime, datetime]:
+    """Return UTC and Hong Kong clocks independent of the host timezone."""
+    current_utc = datetime.now(timezone.utc)
+    return current_utc, current_utc.astimezone(HKT)
 
 app = FastAPI(
     title=API_TITLE,
@@ -358,6 +368,7 @@ class WatchlistImportRequest(BaseModel):
 class DailyRunRequest(BaseModel):
     run_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     sleep_seconds: float = Field(default=1.5, ge=1.5, le=10.0)
+    groups: list[str] = Field(default_factory=lambda: ["lshape79", "caiji"], min_length=1)
 
 
 class HypothesisRequest(BaseModel):
@@ -2933,8 +2944,7 @@ def root() -> dict[str, Any]:
 def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and F10 upstreams.")) -> dict[str, Any]:
     lb_health = longbridge_health()
     api_token = os.getenv("API_TOKEN", "")
-    current_utc = datetime.now(timezone.utc)
-    current_hkt = current_utc.astimezone(ZoneInfo("Asia/Hong_Kong"))
+    current_utc, current_hkt = server_time_values()
     next_trading_day_hkt, _calendar_warning = next_trading_date(current_hkt.date())
     payload: dict[str, Any] = {
         "ok": True,
@@ -3103,16 +3113,23 @@ def snapshot_longbridge_watchlist(
     }
 
 
-def _start_daily_worker(job_id: str, sleep_seconds: float) -> None:
+def _start_daily_worker(job_id: str, sleep_seconds: float, groups: tuple[str, ...]) -> None:
     global _worker_last_run
     try:
-        result = run_daily_job(job_id, sleep_seconds=sleep_seconds)
+        result = run_daily_job(
+            job_id,
+            sleep_seconds=sleep_seconds,
+            groups=groups,
+            cancel_requested=lambda: job_cancel_requested(job_id),
+        )
         _worker_last_run = {
             "job_id": job_id,
             "status": result.get("status", "unknown"),
             "finished_at": result.get("finished_at", ""),
             "succeeded": (result.get("detail") or {}).get("succeeded", 0),
             "failed": (result.get("detail") or {}).get("failed", 0),
+            "skipped": (result.get("detail") or {}).get("skipped", 0),
+            "elapsed_s": (result.get("detail") or {}).get("elapsed_s", 0),
         }
     except Exception as exc:  # keep a worker failure visible through the job API
         logger.exception("Daily worker failed: %s", job_id)
@@ -3123,13 +3140,55 @@ def _start_daily_worker(job_id: str, sleep_seconds: float) -> None:
 @app.post("/admin/run_daily", dependencies=[Depends(verify_api_token)])
 def run_daily_endpoint(request: DailyRunRequest) -> Response:
     run_date = request.run_date or hkt_today()
-    job_id = f"daily:{run_date}"
-    job, created = start_job(job_id, job_type="daily")
+    groups = tuple(dict.fromkeys(group.strip().lower() for group in request.groups if group.strip()))
+    allowed_groups = {"lshape79", "caiji", "research"}
+    if not groups or not set(groups).issubset(allowed_groups):
+        raise HTTPException(status_code=422, detail="groups must contain only lshape79, caiji, or research.")
+    sessions, calendar_warning = trading_sessions_between(run_date, run_date)
+    if not sessions:
+        if calendar_warning and "no XHKG trading sessions" not in calendar_warning.lower():
+            raise HTTPException(status_code=503, detail=calendar_warning)
+        next_date, next_warning = next_trading_date(run_date)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "accepted": False,
+                "created": False,
+                "status": "skipped_holiday",
+                "run_date": run_date,
+                "next_trading_day": next_date,
+                "warning": next_warning or calendar_warning,
+            },
+        )
+    group_suffix = "-".join(groups)
+    job_id = f"daily:{run_date}" if groups == ("lshape79", "caiji") else f"daily:{run_date}:{group_suffix}"
+    job, created = start_job(
+        job_id,
+        job_type="daily",
+        initial_detail={
+            "groups": list(groups),
+            "total": daily_entry_count(groups),
+            "succeeded": 0,
+            "skipped": 0,
+            "failed": 0,
+            "current_code": "",
+            "elapsed_s": 0.0,
+            "results": [],
+        },
+    )
     if created:
-        Thread(target=_start_daily_worker, args=(job_id, request.sleep_seconds), daemon=True).start()
+        Thread(target=_start_daily_worker, args=(job_id, request.sleep_seconds, groups), daemon=True).start()
     return JSONResponse(
         status_code=202,
-        content={"ok": True, "accepted": True, "created": created, "job_id": job_id, "job": job},
+        content={
+            "ok": True,
+            "accepted": True,
+            "created": created,
+            "job_id": job_id,
+            "groups": list(groups),
+            "job": job,
+        },
     )
 
 
@@ -3139,6 +3198,14 @@ def get_daily_job(job_id: str) -> dict[str, Any]:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     return {"ok": True, "job": job}
+
+
+@app.post("/admin/job/{job_id}/cancel", dependencies=[Depends(verify_api_token)])
+def cancel_daily_job(job_id: str) -> dict[str, Any]:
+    job = cancel_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return {"ok": True, "job": job, "cancel_requested": job.get("status") in {"cancelling", "cancelled"}}
 
 
 @app.post("/admin/hypotheses", dependencies=[Depends(verify_api_token)])

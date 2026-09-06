@@ -101,3 +101,73 @@ def test_brief_emits_first_seen_signal_and_coverage_dates(tmp_path, monkeypatch)
         "change_shares": 60_000_000, "pct": 7.5,
         "holding_after": 60_000_000, "first_seen": "2026-09-01",
     }]
+
+
+def test_daily_job_filters_groups_and_persists_progress(tmp_path, monkeypatch):
+    db = tmp_path / "groups.db"
+    monkeypatch.setattr("utils.research_pipeline.DB_PATH", db)
+    monkeypatch.setattr("utils.snapshot_db.DB_PATH", db)
+    ensure_db(db)
+
+    class Entry:
+        def __init__(self, code, groups):
+            self.code = code
+            self.groups = groups
+            self.priority = 1
+
+    entries = {
+        "lshape79": [Entry("00001", ("lshape79",))],
+        "caiji": [Entry("00002", ("caiji",))],
+        "research": [Entry("00003", ("research",))],
+    }
+    monkeypatch.setattr(
+        "utils.research_pipeline.load_watchlist_entries",
+        lambda group=None: list(entries.get(group, [])),
+    )
+
+    def fake_fetch(code, timeout, path):
+        return LongbridgeData(code=code, data_date="2026-09-07", holdings=[{"ccass_id": "B00001"}])
+
+    start_job("daily:2026-09-07", path=db)
+    result = run_daily_job(
+        "daily:2026-09-07", sleep_seconds=0, fetcher=fake_fetch,
+        groups=("lshape79", "caiji"), path=db,
+    )
+    detail = result["detail"]
+    assert [row["code"] for row in detail["results"]] == ["00001", "00002"]
+    assert detail["total"] == 2
+    assert detail["succeeded"] == 2
+    assert detail["current_code"] == ""
+    assert detail["elapsed_s"] >= 0
+
+
+def test_daily_job_can_be_cancelled_between_stocks(tmp_path, monkeypatch):
+    db = tmp_path / "cancel.db"
+    monkeypatch.setattr("utils.research_pipeline.DB_PATH", db)
+    monkeypatch.setattr("utils.snapshot_db.DB_PATH", db)
+    ensure_db(db)
+
+    class Entry:
+        def __init__(self, code):
+            self.code = code
+            self.groups = ("lshape79",)
+            self.priority = 1
+
+    monkeypatch.setattr(
+        "utils.research_pipeline.load_watchlist_entries",
+        lambda group=None: [Entry("00001"), Entry("00002")],
+    )
+    calls = []
+
+    def fake_fetch(code, timeout, path):
+        calls.append(code)
+        return LongbridgeData(code=code, data_date="2026-09-07", holdings=[])
+
+    start_job("daily:cancel", path=db)
+    result = run_daily_job(
+        "daily:cancel", sleep_seconds=0, fetcher=fake_fetch,
+        groups=("lshape79",), cancel_requested=lambda: bool(calls), path=db,
+    )
+    assert result["status"] == "cancelled"
+    assert calls == ["00001"]
+    assert result["detail"]["current_code"] == ""

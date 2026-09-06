@@ -7,6 +7,27 @@ Branch: `main`
 
 ## Important Status
 
+## 2026-09-06 Worker Control Update
+
+- `run_daily` now defaults to the `lshape79` and `caiji` groups. The `research`
+  group is isolated to the weekly Saturday workflow and is processed in batches
+  of 100 with a 60-second inter-batch pause.
+- The `/admin/run_daily` entry point checks the XHKG calendar before creating a
+  job. Non-trading dates return `skipped_holiday` plus `next_trading_day` and do
+  not create a `job_log` row.
+- `job_log` is initialized with the expected total and is updated after each
+  stock with `succeeded`, `failed`, `skipped`, `current_code`, and `elapsed_s`.
+  `POST /admin/job/{job_id}/cancel` requests cooperative cancellation.
+- GitHub Actions runs 41 and 42 were manually cancelled on 2026-09-06 before
+  this repair. Run 41's queue step completed in about 4 seconds, then its wait
+  step polled `status=running,total=0` for about 29 minutes. The current Render
+  dashboard session could not open the referenced service logs and reported the
+  service ID as unavailable, so no Render traceback evidence was obtained.
+- The timezone audit found no naive `datetime.now()` or no-argument
+  `astimezone()` in application code. `/health` uses the explicit
+  `ZoneInfo("Asia/Hong_Kong")` conversion, covered under `TZ=UTC` and
+  `TZ=Europe/London` subprocess tests.
+
 The MCP source-preference change is intentionally limited to single-stock
 queries. The default remains `local_db`; `auto` is opt-in for the hybrid Webb
 mirror/browser path. The Render bridge items (P1-1, P1-2, and P1-3 from the

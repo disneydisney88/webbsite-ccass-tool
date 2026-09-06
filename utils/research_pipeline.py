@@ -27,6 +27,9 @@ from .turso_db import ensure_turso_schema, turso_execute, turso_query, turso_is_
 
 
 GROUP_ORDER = ("lshape79", "caiji", "research")
+DEFAULT_DAILY_GROUPS = ("lshape79", "caiji")
+RESEARCH_BATCH_SIZE = 100
+RESEARCH_BATCH_PAUSE_SECONDS = 60.0
 
 
 def _ensure_local_round4(conn: sqlite3.Connection) -> None:
@@ -120,25 +123,31 @@ def get_job(job_id: str, path: Path = DB_PATH) -> dict[str, Any] | None:
     return row
 
 
-def start_job(job_id: str, job_type: str = "daily", path: Path = DB_PATH) -> tuple[dict[str, Any], bool]:
+def start_job(
+    job_id: str,
+    job_type: str = "daily",
+    path: Path = DB_PATH,
+    initial_detail: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], bool]:
     existing = get_job(job_id, path)
     if existing and existing.get("status") in {"queued", "running", "succeeded"}:
         return existing, False
     started = now_iso()
+    detail_json = json.dumps(initial_detail or {}, ensure_ascii=False)
     _execute(
         """INSERT INTO job_log(job_id, job_type, status, started_at, finished_at, detail_json)
-           VALUES (?, ?, 'queued', ?, NULL, '{}')
+           VALUES (?, ?, 'queued', ?, NULL, ?)
            ON CONFLICT(job_id) DO UPDATE SET job_type=excluded.job_type,
            status='queued', started_at=excluded.started_at, finished_at=NULL,
-           detail_json='{}'""",
-        (job_id, job_type, started),
+           detail_json=excluded.detail_json""",
+        (job_id, job_type, started, detail_json),
         path,
     )
     return get_job(job_id, path) or {"job_id": job_id, "status": "queued"}, True
 
 
 def _set_job(job_id: str, status: str, detail: dict[str, Any], path: Path = DB_PATH) -> None:
-    finished = now_iso() if status in {"succeeded", "failed"} else None
+    finished = now_iso() if status in {"succeeded", "failed", "cancelled"} else None
     _execute(
         "UPDATE job_log SET status=?, finished_at=?, detail_json=? WHERE job_id=?",
         (status, finished, json.dumps(detail, ensure_ascii=False), job_id),
@@ -146,10 +155,11 @@ def _set_job(job_id: str, status: str, detail: dict[str, Any], path: Path = DB_P
     )
 
 
-def _daily_entries() -> list[Any]:
+def _daily_entries(groups: tuple[str, ...] | list[str] | None = None) -> list[Any]:
     entries: list[Any] = []
     seen: set[str] = set()
-    for group in GROUP_ORDER:
+    selected_groups = tuple(groups or DEFAULT_DAILY_GROUPS)
+    for group in selected_groups:
         group_entries = load_watchlist_entries(group=group)
         group_entries.sort(key=lambda item: (item.priority if item.priority is not None else 99, item.code))
         for entry in group_entries:
@@ -159,20 +169,59 @@ def _daily_entries() -> list[Any]:
     return entries
 
 
+def daily_entry_count(groups: tuple[str, ...] | list[str] | None = None) -> int:
+    return len(_daily_entries(groups))
+
+
 def run_daily_job(
     job_id: str,
     sleep_seconds: float = 1.5,
     fetcher: Callable[..., Any] = fetch_longbridge_stock,
     path: Path = DB_PATH,
+    groups: tuple[str, ...] | list[str] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Fetch the three watchlist groups sequentially and record every outcome."""
+    """Fetch selected watchlist groups and persist progress after every stock."""
 
-    _set_job(job_id, "running", {"started": now_iso()}, path)
+    selected_groups = tuple(groups or DEFAULT_DAILY_GROUPS)
+    entries = _daily_entries(selected_groups)
+    started_at = now_iso()
+    started_monotonic = time.monotonic()
     rows: list[dict[str, Any]] = []
-    entries = _daily_entries()
+    detail: dict[str, Any] = {
+        "groups": list(selected_groups),
+        "total": len(entries),
+        "succeeded": 0,
+        "skipped": 0,
+        "failed": 0,
+        "current_code": "",
+        "elapsed_s": 0.0,
+        "started": started_at,
+        "results": rows,
+    }
+
+    def update(status: str = "running", current_code: str = "") -> None:
+        detail["current_code"] = current_code
+        detail["succeeded"] = sum(1 for row in rows if row.get("ok") and not row.get("skipped"))
+        detail["skipped"] = sum(1 for row in rows if row.get("skipped"))
+        detail["failed"] = sum(1 for row in rows if not row.get("ok") and not row.get("skipped"))
+        detail["elapsed_s"] = round(time.monotonic() - started_monotonic, 3)
+        _set_job(job_id, status, detail, path)
+
+    if cancel_requested and cancel_requested():
+        update("cancelled")
+        return get_job(job_id, path) or {"job_id": job_id, **detail}
+    update()
+
     for index, entry in enumerate(entries):
+        if cancel_requested and cancel_requested():
+            update("cancelled")
+            return get_job(job_id, path) or {"job_id": job_id, **detail}
         if index:
+            if "research" in selected_groups and index % RESEARCH_BATCH_SIZE == 0:
+                time.sleep(RESEARCH_BATCH_PAUSE_SECONDS)
             time.sleep(max(0.0, sleep_seconds))
+        update(current_code=entry.code)
         try:
             data = fetcher(entry.code, timeout=30.0, path=path)
             rows.append({
@@ -186,17 +235,22 @@ def run_daily_job(
         except LongbridgeAuthError as exc:
             rows.append({"code": entry.code, "group": ";".join(entry.groups), "ok": False,
                          "error_type": "LONGBRIDGE_AUTH_EXPIRED", "error": str(exc)})
+            update()
             break
         except (LongbridgeError, Exception) as exc:  # individual stock failure is non-fatal
             rows.append({"code": entry.code, "group": ";".join(entry.groups), "ok": False,
                          "error_type": type(exc).__name__, "error": str(exc)})
+        update()
     detail = {
-        "total": len(rows),
-        "succeeded": sum(1 for row in rows if row.get("ok")),
-        "failed": sum(1 for row in rows if not row.get("ok")),
+        **detail,
+        "total": len(entries),
+        "succeeded": sum(1 for row in rows if row.get("ok") and not row.get("skipped")),
+        "skipped": sum(1 for row in rows if row.get("skipped")),
+        "failed": sum(1 for row in rows if not row.get("ok") and not row.get("skipped")),
         "rate_limit_429": sum(1 for row in rows if row.get("error_type") == "HTTP_429"),
-        "results": rows,
     }
+    detail["current_code"] = ""
+    detail["elapsed_s"] = round(time.monotonic() - started_monotonic, 3)
     successful_dates = [str(row.get("data_date")) for row in rows if row.get("ok") and row.get("data_date")]
     try:
         brief_date = max(successful_dates) if successful_dates else hkt_today()
@@ -209,6 +263,28 @@ def run_daily_job(
         detail["brief_error"] = f"{type(exc).__name__}: {exc}"
     _set_job(job_id, "succeeded" if detail["failed"] == 0 else "failed", detail, path)
     return get_job(job_id, path) or {"job_id": job_id, **detail}
+
+
+def cancel_job(job_id: str, path: Path = DB_PATH) -> dict[str, Any] | None:
+    """Mark a queued/running job for cooperative cancellation."""
+    job = get_job(job_id, path)
+    if job is None:
+        return None
+    if job.get("status") in {"succeeded", "failed", "cancelled"}:
+        return job
+    detail = dict(job.get("detail") or {})
+    detail["cancel_requested"] = True
+    _set_job(job_id, "cancelling", detail, path)
+    return get_job(job_id, path)
+
+
+def job_cancel_requested(job_id: str, path: Path = DB_PATH) -> bool:
+    job = get_job(job_id, path)
+    if not job:
+        return False
+    return job.get("status") in {"cancelling", "cancelled"} or bool(
+        (job.get("detail") or {}).get("cancel_requested")
+    )
 
 
 def _holdings_rows(code: str, from_date: str = "", to_date: str = "", path: Path = DB_PATH) -> list[dict[str, Any]]:

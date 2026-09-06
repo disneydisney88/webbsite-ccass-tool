@@ -9,6 +9,8 @@ from typing import Any
 import pandas as pd
 import requests
 
+from .fetcher import hkt_today
+
 
 BASE_URL = "https://www1.hkexnews.hk"
 USER_AGENT = (
@@ -105,7 +107,7 @@ def normalize_announcements(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 def fetch_announcements(stock_code: str, period_years: int = 1, timeout: int = 30, row_range: int = 100) -> HKEXAnnouncementResult:
     code = clean_stock_code(stock_code)
-    today = date.today()
+    today = date.fromisoformat(hkt_today())
     from_day = today - timedelta(days=365 * max(int(period_years), 1))
     result = HKEXAnnouncementResult(
         stock_code=code,

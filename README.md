@@ -168,7 +168,7 @@ Edit `data/watchlist.csv` to change the monitored stock codes. The file has `cod
 
 ## Daily Backup Loop
 
-GitHub Actions runs `Daily CCASS Snapshot Backup` every day at 13:30 UTC / 21:30 Hong Kong time, after HKEX SDW data is normally available. It:
+GitHub Actions runs `Daily CCASS Snapshot Backup` at 00:10 UTC / 08:10 Hong Kong time on weekdays, using the existing `daily_snapshot.yml` workflow. It:
 
 1. Wakes the Render API with `/health`.
 2. Calls `/api/snapshot_all?group=caiji` and `/api/snapshot_all?group=lshape`.
@@ -327,6 +327,16 @@ Longbridge migration is idempotent and its state is reported by `/health`.
 SQLite remains the local fallback for development and offline fixtures; it is
 not treated as a production backup once the Turso backend is active.
 
+All business dates use `Asia/Hong_Kong`. Daily job ids and default `brief_date`
+values therefore use the HKT calendar date, and persisted timestamps are
+timezone-aware UTC (`Z`) or HKT values. `/health` exposes
+`server_time_utc`, `server_time_hkt`, and `next_trading_day_hkt`. The current
+repository does not have an authenticated Longbridge `trading_days` tool in
+its read-only whitelist, so `next_trading_day_hkt` currently uses the existing
+XHKG calendar adapter (`pandas_market_calendars` with the bundled fallback);
+this is an explicit implementation limitation, not a claim of Longbridge
+calendar provenance.
+
 The authenticated `POST /admin/run_daily` endpoint queues one HKT daily job
 and returns HTTP 202 immediately. The worker is idempotent by
 `daily:YYYY-MM-DD`, fetches the three watchlist groups in priority order, and
@@ -345,8 +355,14 @@ brief, timeline, transfer candidates, and broker holding stack.
 `screen_stocks` remains local-only. The daily worker's full-market quote scan
 is not claimed until a permitted Longbridge quote/security-list source is
 available; the current read-only whitelist deliberately does not invent that
-source. Google Drive upload is also a stub until a service account is
-configured.
+source. Brief JSON and Markdown delivery is implemented through a Google
+Drive service account when `GDRIVE_SA_FILE` points to the mounted credential
+file and `GDRIVE_FOLDER_ID` names the destination folder. Each brief run
+upserts `brief_YYYYMMDD.json`, `brief_YYYYMMDD.md`, and
+`holdings_daily_YYYYMMDD.csv`; retries do not create duplicates. Turso remains authoritative;
+missing credentials or Drive failures are recorded in the brief's
+`drive_upload` status and do not fail the research job. Never commit the
+service-account file.
 
 The brief now emits S1 participant moves, S2 first-seen holdings, S3
 concentration moves, S4 turnover anomalies, and S5 event-date matches. Its

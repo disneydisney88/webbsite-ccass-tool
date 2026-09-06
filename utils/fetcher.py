@@ -14,6 +14,7 @@ from io import StringIO
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 # 0xmd is temporarily blocked by Cloudflare. Keep it configurable, but use the
 # compatible mirror until it becomes available again.
@@ -34,6 +35,7 @@ DETERMINISTIC_FAILURE_STATUS_CODES = {402, 403}
 WEBB_DATABASE_CHALLENGE_COOKIE_NAME = "ayuus"
 WEBB_DATABASE_CHALLENGE_COOKIE_MAGIC = "94run15wglA7NegzhIu4D"
 WEBB_DATABASE_CHALLENGE_COOKIE_TTL_SECONDS = 600
+HKT = ZoneInfo("Asia/Hong_Kong")
 
 
 def chromium_unavailable_error(exc: BaseException | str) -> bool:
@@ -151,7 +153,12 @@ class IssueLookup:
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def hkt_today() -> str:
+    """Return the current Hong Kong business-date basis as ISO date."""
+    return datetime.now(HKT).date().isoformat()
 
 
 def mirror_base_url() -> str:

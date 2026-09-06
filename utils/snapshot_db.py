@@ -9,13 +9,13 @@ import shutil
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from .fetcher import FetchResult, html_to_text, now_iso
+from .fetcher import FetchResult, hkt_today, html_to_text, now_iso
 from .parse_sdw import SDWSnapshot
 
 
@@ -85,7 +85,7 @@ def restore_snapshot_db_from_backup(path: Path = DB_PATH, backup_path: Path = BA
     shutil.copy2(backup_path, path)
     _DB_RESTORED_FROM_BACKUP = True
     try:
-        dated = datetime.fromtimestamp(backup_path.stat().st_mtime, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
+        dated = datetime.fromtimestamp(backup_path.stat().st_mtime, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     except OSError:
         dated = "unknown"
     _DB_RESTORE_SOURCE = f"{backup_path} dated {dated}"
@@ -636,7 +636,7 @@ def snapshot_exists(code: str, date: str, path: Path = DB_PATH) -> bool:
 
 def upsert_snapshot(snapshot: SDWSnapshot, source: str = "sdw", path: Path = DB_PATH) -> None:
     ensure_db(path)
-    fetched_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    fetched_at = now_iso()
     rows = snapshot.rows or []
     with closing(sqlite3.connect(path)) as conn:
         conn.executemany(
@@ -702,7 +702,7 @@ def history_depth_days(code: str, path: Path = DB_PATH) -> int:
 
 def stock_fetched_today(code: str, path: Path = DB_PATH) -> bool:
     ensure_db(path)
-    today = datetime.now(timezone.utc).astimezone().date().isoformat()
+    today = hkt_today()
     with closing(sqlite3.connect(path)) as conn:
         row = conn.execute(
             "SELECT 1 FROM snapshots WHERE code=? AND substr(fetched_at, 1, 10)=? LIMIT 1",
@@ -737,7 +737,7 @@ def load_stock_meta(code: str, path: Path = DB_PATH) -> dict[str, Any]:
 
 def upsert_stock_map(code: str, issue_id: str, name: str = "", path: Path = DB_PATH) -> None:
     ensure_db(path)
-    updated_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    updated_at = now_iso()
     with closing(sqlite3.connect(path)) as conn:
         conn.execute(
             """
@@ -824,7 +824,7 @@ def upsert_price_history(code: str, table: pd.DataFrame, source: str = "yahoo", 
     ensure_db(path)
     if table is None or table.empty:
         return 0
-    fetched_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    fetched_at = now_iso()
 
     def number(value: Any) -> float | None:
         try:
@@ -1283,7 +1283,8 @@ def rebuild_research_watchlist(event_dir: Path | None = None) -> dict[str, Any]:
     """Build the research group from recent event CSVs when supplied."""
 
     directory = event_dir or Path(os.getenv("EVENT_CSV_DIR", "data/events"))
-    cutoff = datetime.now(timezone.utc).date() - timedelta(days=366)
+    today = date.fromisoformat(hkt_today())
+    cutoff = today - timedelta(days=366)
     found: dict[str, WatchlistEntry] = {}
     inspected = 0
     if directory.exists():
@@ -1304,7 +1305,7 @@ def rebuild_research_watchlist(event_dir: Path | None = None) -> dict[str, Any]:
                                     dates.append(datetime.strptime(normalized_date, date_format).date())
                                 except ValueError:
                                     continue
-                        if dates and not any(cutoff <= date <= datetime.now(timezone.utc).date() for date in dates):
+                        if dates and not any(cutoff <= item_date <= today for item_date in dates):
                             continue
                         code_value = next(
                             (

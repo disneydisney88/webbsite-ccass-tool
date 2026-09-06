@@ -20,6 +20,9 @@ def test_health_model_exposes_round4_operational_fields():
     assert "db_path" in fields
     assert "disk_free_mb" in fields
     assert "worker_last_run" in fields
+    assert "server_time_utc" in fields
+    assert "server_time_hkt" in fields
+    assert "next_trading_day_hkt" in fields
 
 
 def test_daily_worker_contract_is_not_mcp_wall_clock_work():

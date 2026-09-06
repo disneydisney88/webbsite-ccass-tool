@@ -10,12 +10,14 @@ import re
 import secrets
 import shutil
 import time
+from datetime import datetime, timezone
 from io import StringIO
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Empty, Queue
 from threading import Thread
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
@@ -25,7 +27,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import TransportSecuritySettings
 from pydantic import BaseModel, ConfigDict, Field
 
-from utils.date_semantics import ANALYSIS_DATE_NOTICE, align_event_date
+from utils.date_semantics import ANALYSIS_DATE_NOTICE, align_event_date, next_trading_date
 from utils.exporters import parsed_to_json_ready
 from utils.fetcher import (
     FetchResult,
@@ -103,6 +105,7 @@ from utils.longbridge import (
     start_device_authorization,
 )
 from utils.turso_db import turso_health
+from utils.google_drive import drive_config_status
 from utils.research_pipeline import (
     add_hypothesis,
     build_brief,
@@ -198,6 +201,9 @@ class HealthResponse(BaseModel):
     service: str
     version: str
     commit: str = "unknown"
+    server_time_utc: str = ""
+    server_time_hkt: str = ""
+    next_trading_day_hkt: str = ""
     uptime_seconds: int
     upstreams: dict[str, Any] | None = None
     longbridge: str = "not_authenticated"
@@ -217,6 +223,7 @@ class HealthResponse(BaseModel):
     worker_last_run: dict[str, Any] = Field(default_factory=dict)
     db_path: str = ""
     disk_free_mb: float | None = None
+    gdrive: dict[str, Any] = Field(default_factory=dict)
 
 
 class StockMetadata(BaseModel):
@@ -2926,11 +2933,17 @@ def root() -> dict[str, Any]:
 def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and F10 upstreams.")) -> dict[str, Any]:
     lb_health = longbridge_health()
     api_token = os.getenv("API_TOKEN", "")
+    current_utc = datetime.now(timezone.utc)
+    current_hkt = current_utc.astimezone(ZoneInfo("Asia/Hong_Kong"))
+    next_trading_day_hkt, _calendar_warning = next_trading_date(current_hkt.date())
     payload: dict[str, Any] = {
         "ok": True,
         "service": API_SERVICE,
         "version": API_VERSION,
         "commit": GIT_SHA,
+        "server_time_utc": current_utc.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "server_time_hkt": current_hkt.isoformat(timespec="seconds"),
+        "next_trading_day_hkt": next_trading_day_hkt,
         "uptime_seconds": int(max(0.0, time.monotonic() - _APP_STARTED_MONOTONIC)),
         "longbridge": lb_health.get("status", "not_authenticated"),
         "longbridge_token_expires_at": lb_health.get("token_expires_at"),
@@ -2946,6 +2959,7 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
         "disk_free_mb": round(shutil.disk_usage(DB_PATH.parent).free / (1024 * 1024), 1),
     }
     payload.update(turso_health())
+    payload["gdrive"] = drive_config_status()
     payload["turso_migration"] = turso_migration_status()
     payload["watchlist_counts"] = {
         group: len(load_watchlist_entries(group=group))

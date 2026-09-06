@@ -254,10 +254,26 @@ The repair described above is local-only until merged into the GitHub-linked rep
   `trade_date_covered`.
 - The existing Longbridge read-only whitelist does not expose a market-wide
   `security_list`/`quote` call, so the full-market quote scan remains
-  explicitly unclaimed rather than fabricated. Google Drive service-account
-  upload remains a stub because no service account is configured.
+  explicitly unclaimed rather than fabricated. Google Drive brief delivery is
+  implemented with `GDRIVE_SA_FILE` and `GDRIVE_FOLDER_ID`; it upserts dated
+  JSON, Markdown, and daily holdings CSV files and records non-fatal failures
+  in `drive_upload`. `/health` exposes non-secret Drive configuration status.
+  The credential file must remain outside the repository.
 - The supplied Round 4 precondition said Render Starter/persistent disk, but
   the project decision is Render Free with Turso. Health now reports
   `db_backend`, `turso_ping_ms`, `db_path`, `disk_free_mb`, authentication,
   watchlist counts, and process-local `worker_last_run`; Turso is the durable
   store for Round 4 data.
+- Timezone audit (2026-09-06): business-date defaults, mirror-probe dates,
+  event fallbacks, snapshot freshness checks, daily idempotency keys, and
+  default `brief_date` now use `Asia/Hong_Kong`. Persisted timestamps use
+  explicit UTC `Z` or an explicit offset. `/health` exposes
+  `server_time_utc`, `server_time_hkt`, and `next_trading_day_hkt`.
+  Longbridge `trading_days` is not currently available in the read-only tool
+  whitelist, so the health next-day value is derived by the existing XHKG
+  calendar adapter and must not be described as Longbridge-sourced until that
+  tool is explicitly integrated.
+- The daily worker schedule is the existing GitHub Actions
+  `daily_snapshot.yml` workflow at `10 0 * * 1-5` (00:10 UTC / 08:10
+  HKT). It queues `POST /admin/run_daily` with `CCASS_API_TOKEN` from
+  GitHub Actions Secrets; no cron-job.org scheduler is used.

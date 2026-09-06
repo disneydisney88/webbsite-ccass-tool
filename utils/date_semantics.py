@@ -273,6 +273,26 @@ def shift_trading_date(value: Any, offset: int) -> tuple[str, str]:
     return sessions[target_index].isoformat(), warning
 
 
+def next_trading_date(value: Any) -> tuple[str, str]:
+    """Return the next XHKG session after an ISO date.
+
+    The current repository has an XHKG calendar adapter, not an authenticated
+    Longbridge ``trading_days`` client. Callers should expose that limitation
+    rather than presenting a calendar-derived date as a Longbridge response.
+    """
+    source_iso = normalize_date(value)
+    if not source_iso:
+        return "", "Source date is missing or invalid; next trading date is unavailable."
+    source = date.fromisoformat(source_iso)
+    sessions, warning = _sessions_between(
+        source.isoformat(), (source + timedelta(days=21)).isoformat()
+    )
+    for session in sessions:
+        if session > source:
+            return session.isoformat(), warning
+    return "", warning or f"No XHKG trading session was found after {source_iso}."
+
+
 def derive_dates(value: Any, basis: str) -> DateDerivation:
     source_iso = normalize_date(value)
     normalized_basis = str(basis or "unknown").strip().lower()

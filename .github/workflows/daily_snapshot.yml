@@ -2,7 +2,7 @@ name: Daily CCASS Research Worker
 
 on:
   schedule:
-    - cron: "10 0 * * *"
+    - cron: "10 0 * * 1-5"
   workflow_dispatch:
 
 permissions:
@@ -69,7 +69,8 @@ jobs:
           done
           python - <<'PY'
           import json, os
-          from datetime import date
+          from datetime import date, datetime
+          from zoneinfo import ZoneInfo
           data=json.load(open("job.json", encoding="utf-8"))
           job=data.get("job", {})
           detail=job.get("detail", {}) or {}
@@ -79,7 +80,8 @@ jobs:
           failed=len(rows)-succeeded-skipped
           dates=[str(row.get("data_date"))[:10] for row in rows if row.get("data_date")]
           latest=max(dates) if dates else ""
-          age=(date.today()-date.fromisoformat(latest)).days if latest else None
+          today_hkt=datetime.now(ZoneInfo("Asia/Hong_Kong")).date()
+          age=(today_hkt-date.fromisoformat(latest)).days if latest else None
           summary=f"### Daily worker\n- succeeded: {succeeded}\n- skipped: {skipped}\n- failed: {failed}\n- latest data date: {latest or 'unknown'}\n"
           if age is None or age > int(os.environ.get("SNAPSHOT_MAX_AGE_DAYS", "7")):
               summary += f"- warning: snapshot data is stale or unavailable (age={age})\n"

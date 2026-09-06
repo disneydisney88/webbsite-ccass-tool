@@ -24,6 +24,7 @@ from .fetcher import (
     mirror_base_url,
     orgdata_url,
     resolve_issue_id_from_stock,
+    hkt_today,
 )
 from .snapshot_db import (
     DB_PATH,
@@ -156,7 +157,7 @@ def _probe_cache_today() -> dict[str, object] | None:
         data = json.loads(PROBE_CACHE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return data if data.get("date") == date.today().isoformat() and data.get("mirror_base_url") == mirror_base_url() else None
+    return data if data.get("date") == hkt_today() and data.get("mirror_base_url") == mirror_base_url() else None
 
 
 def _write_probe_cache(status: str, browser_sections: list[str] | None = None) -> None:
@@ -164,7 +165,7 @@ def _write_probe_cache(status: str, browser_sections: list[str] | None = None) -
     PROBE_CACHE_PATH.write_text(
         json.dumps(
             {
-                "date": date.today().isoformat(),
+                "date": hkt_today(),
                 "status": status,
                 "mirror_base_url": mirror_base_url(),
                 "browser_sections": browser_sections or [],
@@ -201,7 +202,7 @@ def _browser_fallback_enabled() -> bool:
 
 def _daily_mirror_probe(stock_code: str, issue_id: str, timeout: int, headless: bool = True) -> dict[str, object]:
     """Probe the two mirror pages once per day and persist the browser requirement."""
-    probe_date = date.today().isoformat()
+    probe_date = hkt_today()
     base_url = mirror_base_url()
     cached = load_mirror_probe(probe_date, base_url, path=DB_PATH)
     if cached is not None:

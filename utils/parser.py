@@ -17,7 +17,7 @@ from .date_semantics import (
     trading_sessions_between,
     unavailable_data_as_of,
 )
-from .fetcher import FetchResult, clean_stock_code
+from .fetcher import FetchResult, clean_stock_code, hkt_today
 
 
 SECTIONS = ["Company / orgdata", "Holdings", "Changes", "Big Changes", "Concentration", "Price History"]
@@ -1403,7 +1403,7 @@ def validate_date_sanity(parsed: ParsedCCASS) -> None:
     lower = parse_date_value(parsed.listing_date)
     upper = parse_date_value(parsed.fetched_time)
     lower_date = lower.date() if lower is not None else None
-    upper_date = upper.date() if upper is not None else date.today()
+    upper_date = upper.date() if upper is not None else date.fromisoformat(hkt_today())
     frames = {
         "Holdings": parsed.holdings_table,
         "Changes": parsed.changes_table,

@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from .date_semantics import shift_trading_date
 from .fetcher import clean_stock_code, now_iso
 from .longbridge import LongbridgeAuthError, LongbridgeError, fetch_longbridge_stock
+from .google_drive import upload_brief_artifacts
 from .snapshot_db import DB_PATH, ensure_db, load_watchlist_entries
 from .turso_db import ensure_turso_schema, turso_execute, turso_query, turso_is_configured
 
@@ -378,8 +379,10 @@ def build_brief(
     s3: list[dict[str, Any]] = []
     s4_watchlist: list[dict[str, Any]] = []
     s4_market: list[dict[str, Any]] = []
+    daily_holdings_rows: list[dict[str, Any]] = []
     for code in sorted(timeline_codes):
         rows = _holdings_rows(code, to_date=brief_date, path=path)
+        daily_holdings_rows.extend(row for row in rows if str(row.get("data_date") or "") == brief_date)
         issued = _issued_shares(code, path)
         seen_ids: set[str] = set()
         for row in rows:
@@ -449,6 +452,9 @@ def build_brief(
                                       if str(item["expected_date"]) <= (date.fromisoformat(brief_date) + timedelta(days=3)).isoformat()],
         "data_quality": data_quality,
     }
+    # Drive is a delivery copy; Turso remains authoritative when Drive is
+    # unavailable or the service account lacks access to the target folder.
+    payload["drive_upload"] = upload_brief_artifacts(payload, brief_date, daily_holdings_rows)
     _execute(
         """INSERT INTO briefs(brief_date,data_date,trade_date_covered,payload_json,created_at)
            VALUES(?,?,?,?,?)

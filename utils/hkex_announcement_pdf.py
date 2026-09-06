@@ -20,6 +20,7 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 import requests
 
 from utils.errors import structured_error
+from utils.fetcher import hkt_today
 
 
 ALLOWED_HOSTS = frozenset({"www1.hkexnews.hk", "www.hkexnews.hk", "hkexnews.hk"})
@@ -96,7 +97,7 @@ def _data_as_of(url: str) -> tuple[str, str]:
             parsed_date = None
         if parsed_date:
             return parsed_date.isoformat(), "Inferred from the HKEX URL path."
-    return date.today().isoformat(), "The URL did not contain an HKEX publication date; using the fetch date."
+    return hkt_today(), "The URL did not contain an HKEX publication date; using the HKT fetch date."
 
 
 def _cache_dir() -> Path:

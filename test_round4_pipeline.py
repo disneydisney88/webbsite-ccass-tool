@@ -171,3 +171,38 @@ def test_daily_job_can_be_cancelled_between_stocks(tmp_path, monkeypatch):
     assert result["status"] == "cancelled"
     assert calls == ["00001"]
     assert result["detail"]["current_code"] == ""
+
+
+def test_daily_job_records_per_stock_elapsed_and_brief_stages(tmp_path, monkeypatch):
+    db = tmp_path / "telemetry.db"
+    monkeypatch.setattr("utils.research_pipeline.DB_PATH", db)
+    monkeypatch.setattr("utils.snapshot_db.DB_PATH", db)
+    ensure_db(db)
+
+    class Entry:
+        def __init__(self, code):
+            self.code = code
+            self.groups = ("caiji",)
+            self.priority = 1
+
+    entries = [Entry("00001"), Entry("00002")]
+    monkeypatch.setattr("utils.research_pipeline.load_watchlist_entries", lambda group=None: entries if group == "caiji" else [])
+
+    def fake_fetch(code, timeout, path):
+        upsert_longbridge_holdings(code, "2026-09-04", [{
+            "ccass_id": "B00001", "participant_name": "Test broker", "holding_shares": 100,
+            "stake_pct_of_issued": 1.0,
+        }], path=path)
+        return LongbridgeData(code=code, data_date="2026-09-04", holdings=[{"ccass_id": "B00001"}])
+
+    start_job("daily:telemetry", path=db)
+    result = run_daily_job(
+        "daily:telemetry", sleep_seconds=0, fetcher=fake_fetch,
+        groups=("caiji",), path=db, test_mode=True,
+    )
+    detail = result["detail"]
+    assert detail["test"] is True
+    assert len(detail["results"]) == 2
+    assert all("elapsed_s" in row and row["elapsed_s"] >= 0 for row in detail["results"])
+    assert {"S1_load", "S1", "S2", "S3", "S4", "S5", "hypotheses", "transfers", "drive_upload"}.issubset(detail["stages"])
+    assert detail["stages"]["drive_upload"]["status"] == "skipped_test"

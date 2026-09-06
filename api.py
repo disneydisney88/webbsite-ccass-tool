@@ -114,10 +114,12 @@ from utils.research_pipeline import (
     build_broker_panel,
     cancel_job,
     daily_entry_count,
+    delete_job,
     get_hypotheses,
     get_job,
     hkt_today,
     job_cancel_requested,
+    latest_longbridge_data_date,
     run_daily_job,
     start_job,
 )
@@ -370,6 +372,7 @@ class DailyRunRequest(BaseModel):
     run_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     sleep_seconds: float = Field(default=1.5, ge=1.5, le=10.0)
     groups: list[str] = Field(default_factory=lambda: ["lshape79", "caiji"], min_length=1)
+    force: bool = Field(default=False, description="Run a test job even when the canonical key already exists; no brief or Drive upload.")
 
 
 class HypothesisRequest(BaseModel):
@@ -3114,7 +3117,7 @@ def snapshot_longbridge_watchlist(
     }
 
 
-def _start_daily_worker(job_id: str, sleep_seconds: float, groups: tuple[str, ...]) -> None:
+def _start_daily_worker(job_id: str, sleep_seconds: float, groups: tuple[str, ...], test_mode: bool = False) -> None:
     global _worker_last_run
     try:
         result = run_daily_job(
@@ -3122,6 +3125,7 @@ def _start_daily_worker(job_id: str, sleep_seconds: float, groups: tuple[str, ..
             sleep_seconds=sleep_seconds,
             groups=groups,
             cancel_requested=lambda: job_cancel_requested(job_id),
+            test_mode=test_mode,
         )
         _worker_last_run = {
             "job_id": job_id,
@@ -3163,10 +3167,12 @@ def run_daily_endpoint(request: DailyRunRequest) -> Response:
             },
         )
     group_suffix = "-".join(groups)
-    job_id = f"daily:{run_date}" if groups == ("lshape79", "caiji") else f"daily:{run_date}:{group_suffix}"
+    longbridge_data_date = latest_longbridge_data_date(groups) or "pending"
+    job_id = f"daily:{run_date}:{group_suffix}:{longbridge_data_date}"
     job, created = start_job(
         job_id,
         job_type="daily",
+        force=request.force,
         initial_detail={
             "groups": list(groups),
             "total": daily_entry_count(groups),
@@ -3175,11 +3181,16 @@ def run_daily_endpoint(request: DailyRunRequest) -> Response:
             "failed": 0,
             "current_code": "",
             "elapsed_s": 0.0,
+            "test": bool(request.force),
+            "job_key_data_date": longbridge_data_date,
+            "stage": "queued",
+            "stage_elapsed_s": 0.0,
+            "stages": {},
             "results": [],
         },
     )
     if created:
-        Thread(target=_start_daily_worker, args=(job_id, request.sleep_seconds, groups), daemon=True).start()
+        Thread(target=_start_daily_worker, args=(job_id, request.sleep_seconds, groups, request.force), daemon=True).start()
     return JSONResponse(
         status_code=202,
         content={
@@ -3188,6 +3199,7 @@ def run_daily_endpoint(request: DailyRunRequest) -> Response:
             "created": created,
             "job_id": job_id,
             "groups": list(groups),
+            "test": bool(request.force),
             "job": job,
         },
     )
@@ -3207,6 +3219,16 @@ def cancel_daily_job(job_id: str) -> dict[str, Any]:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     return {"ok": True, "job": job, "cancel_requested": job.get("status") in {"cancelling", "cancelled"}}
+
+
+@app.delete("/admin/jobs/{job_id}", dependencies=[Depends(verify_api_token)])
+def delete_daily_job(job_id: str) -> dict[str, Any]:
+    deleted = delete_job(job_id)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if deleted is False:
+        raise HTTPException(status_code=409, detail="Job is still active; cancel it and wait for a terminal status first.")
+    return {"ok": True, "deleted": True, "job_id": job_id}
 
 
 @app.post("/admin/hypotheses", dependencies=[Depends(verify_api_token)])

@@ -128,10 +128,13 @@ def start_job(
     job_type: str = "daily",
     path: Path = DB_PATH,
     initial_detail: dict[str, Any] | None = None,
+    force: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     existing = get_job(job_id, path)
     if existing and existing.get("status") in {"queued", "running", "succeeded"}:
-        return existing, False
+        if not force or existing.get("status") in {"queued", "running"}:
+            return existing, False
+        _execute("DELETE FROM job_log WHERE job_id=?", (job_id,), path)
     started = now_iso()
     detail_json = json.dumps(initial_detail or {}, ensure_ascii=False)
     _execute(
@@ -173,6 +176,24 @@ def daily_entry_count(groups: tuple[str, ...] | list[str] | None = None) -> int:
     return len(_daily_entries(groups))
 
 
+def latest_longbridge_data_date(
+    groups: tuple[str, ...] | list[str] | None = None,
+    path: Path = DB_PATH,
+) -> str:
+    """Return the latest stored Longbridge data date for selected groups."""
+    codes = sorted({entry.code for entry in _daily_entries(groups)})
+    if not codes:
+        return ""
+    placeholders = ",".join("?" for _ in codes)
+    rows = _query(
+        f"SELECT MAX(data_date) AS data_date FROM longbridge_holdings_daily "
+        f"WHERE code IN ({placeholders})",
+        tuple(codes),
+        path,
+    )
+    return str(rows[0].get("data_date") or "") if rows else ""
+
+
 def run_daily_job(
     job_id: str,
     sleep_seconds: float = 1.5,
@@ -180,6 +201,7 @@ def run_daily_job(
     path: Path = DB_PATH,
     groups: tuple[str, ...] | list[str] | None = None,
     cancel_requested: Callable[[], bool] | None = None,
+    test_mode: bool = False,
 ) -> dict[str, Any]:
     """Fetch selected watchlist groups and persist progress after every stock."""
 
@@ -197,6 +219,10 @@ def run_daily_job(
         "current_code": "",
         "elapsed_s": 0.0,
         "started": started_at,
+        "test": bool(test_mode),
+        "stage": "fetch",
+        "stage_elapsed_s": 0.0,
+        "stages": {},
         "results": rows,
     }
 
@@ -207,6 +233,15 @@ def run_daily_job(
         detail["failed"] = sum(1 for row in rows if not row.get("ok") and not row.get("skipped"))
         detail["elapsed_s"] = round(time.monotonic() - started_monotonic, 3)
         _set_job(job_id, status, detail, path)
+
+    def record_stage(stage: str, stage_elapsed_s: float, status: str = "succeeded") -> None:
+        detail["stage"] = stage
+        detail["stage_elapsed_s"] = round(stage_elapsed_s, 3)
+        detail.setdefault("stages", {})[stage] = {
+            "status": status,
+            "stage_elapsed_s": round(stage_elapsed_s, 3),
+        }
+        update()
 
     if cancel_requested and cancel_requested():
         update("cancelled")
@@ -221,25 +256,30 @@ def run_daily_job(
             if "research" in selected_groups and index % RESEARCH_BATCH_SIZE == 0:
                 time.sleep(RESEARCH_BATCH_PAUSE_SECONDS)
             time.sleep(max(0.0, sleep_seconds))
+        stock_started = time.monotonic()
         update(current_code=entry.code)
         try:
             data = fetcher(entry.code, timeout=30.0, path=path)
-            rows.append({
+            row = {
                 "code": entry.code,
                 "group": ";".join(entry.groups),
                 "ok": True,
                 "data_date": data.data_date,
                 "participant_count": len(data.holdings),
                 "warnings": list(data.warnings),
-            })
+            }
+            row["elapsed_s"] = round(time.monotonic() - stock_started, 3)
+            rows.append(row)
         except LongbridgeAuthError as exc:
             rows.append({"code": entry.code, "group": ";".join(entry.groups), "ok": False,
-                         "error_type": "LONGBRIDGE_AUTH_EXPIRED", "error": str(exc)})
+                         "error_type": "LONGBRIDGE_AUTH_EXPIRED", "error": str(exc),
+                         "elapsed_s": round(time.monotonic() - stock_started, 3)})
             update()
             break
         except (LongbridgeError, Exception) as exc:  # individual stock failure is non-fatal
             rows.append({"code": entry.code, "group": ";".join(entry.groups), "ok": False,
-                         "error_type": type(exc).__name__, "error": str(exc)})
+                         "error_type": type(exc).__name__, "error": str(exc),
+                         "elapsed_s": round(time.monotonic() - stock_started, 3)})
         update()
     detail = {
         **detail,
@@ -251,6 +291,10 @@ def run_daily_job(
     }
     detail["current_code"] = ""
     detail["elapsed_s"] = round(time.monotonic() - started_monotonic, 3)
+    detail["longbridge_data_date"] = max(
+        (str(row.get("data_date")) for row in rows if row.get("ok") and row.get("data_date")),
+        default="",
+    )
     successful_dates = [str(row.get("data_date")) for row in rows if row.get("ok") and row.get("data_date")]
     try:
         brief_date = max(successful_dates) if successful_dates else hkt_today()
@@ -258,9 +302,14 @@ def run_daily_job(
             brief_date,
             path,
             fetch_stats={"fetched_ok": detail["succeeded"], "fetched_fail": detail["failed"]},
+            stage_callback=record_stage,
+            persist=not test_mode,
+            upload=not test_mode,
         )
     except Exception as exc:
         detail["brief_error"] = f"{type(exc).__name__}: {exc}"
+    detail["stage"] = "complete"
+    detail["stage_elapsed_s"] = detail["elapsed_s"]
     _set_job(job_id, "succeeded" if detail["failed"] == 0 else "failed", detail, path)
     return get_job(job_id, path) or {"job_id": job_id, **detail}
 
@@ -276,6 +325,17 @@ def cancel_job(job_id: str, path: Path = DB_PATH) -> dict[str, Any] | None:
     detail["cancel_requested"] = True
     _set_job(job_id, "cancelling", detail, path)
     return get_job(job_id, path)
+
+
+def delete_job(job_id: str, path: Path = DB_PATH) -> bool | None:
+    """Delete a terminal job record after any cooperative cancellation has settled."""
+    job = get_job(job_id, path)
+    if job is None:
+        return None
+    if job.get("status") not in {"succeeded", "failed", "cancelled"}:
+        return False
+    _execute("DELETE FROM job_log WHERE job_id=?", (job_id,), path)
+    return True
 
 
 def job_cancel_requested(job_id: str, path: Path = DB_PATH) -> bool:
@@ -305,8 +365,7 @@ def _holdings_rows(code: str, from_date: str = "", to_date: str = "", path: Path
     )
 
 
-def build_timeline(code: str, from_date: str = "", to_date: str = "", path: Path = DB_PATH) -> list[dict[str, Any]]:
-    rows = _holdings_rows(code, from_date, to_date, path)
+def _timeline_from_rows(code: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         by_date[str(row["data_date"])].append(row)
@@ -331,6 +390,10 @@ def build_timeline(code: str, from_date: str = "", to_date: str = "", path: Path
             "source": sources[0] if len(sources) == 1 else "both" if sources else "",
         })
     return timeline
+
+
+def build_timeline(code: str, from_date: str = "", to_date: str = "", path: Path = DB_PATH) -> list[dict[str, Any]]:
+    return _timeline_from_rows(code, _holdings_rows(code, from_date, to_date, path))
 
 
 def _sum_pct(rows: list[dict[str, Any]], field: str) -> float | None:
@@ -448,18 +511,61 @@ def build_brief(
     brief_date: str,
     path: Path = DB_PATH,
     fetch_stats: dict[str, int] | None = None,
+    stage_callback: Callable[[str, float, str], None] | None = None,
+    persist: bool = True,
+    upload: bool = True,
 ) -> dict[str, Any]:
-    timeline_codes = {entry.code for group in GROUP_ORDER for entry in load_watchlist_entries(group=group)}
+    started_monotonic = time.monotonic()
+
+    def emit(stage: str, started: float, status: str = "succeeded") -> None:
+        if stage_callback:
+            stage_callback(stage, time.monotonic() - started, status)
+
+    entries_by_group = {group: load_watchlist_entries(group=group) for group in GROUP_ORDER}
+    timeline_codes = {entry.code for entries in entries_by_group.values() for entry in entries}
+    codes = sorted(timeline_codes)
     s1: list[dict[str, Any]] = []
     s2: list[dict[str, Any]] = []
     s3: list[dict[str, Any]] = []
     s4_watchlist: list[dict[str, Any]] = []
     s4_market: list[dict[str, Any]] = []
     daily_holdings_rows: list[dict[str, Any]] = []
-    for code in sorted(timeline_codes):
-        rows = _holdings_rows(code, to_date=brief_date, path=path)
-        daily_holdings_rows.extend(row for row in rows if str(row.get("data_date") or "") == brief_date)
-        issued = _issued_shares(code, path)
+
+    # Load all holdings and issued-share metadata once. The previous per-code
+    # queries made a brief over a large watchlist spend most of its time on
+    # Turso round trips.
+    stage_started = time.monotonic()
+    rows_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    issued_by_code: dict[str, int | None] = {}
+    if codes:
+        placeholders = ",".join("?" for _ in codes)
+        all_rows = _query(
+            "SELECT code,data_date,ccass_id,participant_name,holding_shares,stake_pct_of_issued,"
+            "stake_pct_of_ccass,change_shares,source,fetched_at FROM holdings_daily "
+            f"WHERE code IN ({placeholders}) AND data_date<=? "
+            "ORDER BY code,data_date,holding_shares DESC,ccass_id",
+            tuple(codes) + (brief_date,), path,
+        )
+        meta_rows = _query(
+            f"SELECT code,issued_shares FROM stock_meta WHERE code IN ({placeholders})",
+            tuple(codes), path,
+        )
+        for row in all_rows:
+            rows_by_code[str(row.get("code") or "")].append(row)
+        for row in meta_rows:
+            try:
+                issued_by_code[str(row.get("code") or "")] = int(float(str(row.get("issued_shares") or "").replace(",", "")))
+            except (TypeError, ValueError):
+                issued_by_code[str(row.get("code") or "")] = None
+        daily_holdings_rows.extend(
+            row for row in all_rows if str(row.get("data_date") or "") == brief_date
+        )
+    emit("S1_load", stage_started)
+
+    stage_started = time.monotonic()
+    for code in codes:
+        rows = rows_by_code.get(code, [])
+        issued = issued_by_code.get(code)
         seen_ids: set[str] = set()
         for row in rows:
             pct = row.get("stake_pct_of_issued")
@@ -478,38 +584,66 @@ def build_brief(
                         "first_seen": row["data_date"],
                     })
             seen_ids.add(ccass_id)
-            if issued and abs(float(change or 0)) and pct not in (None, ""):
-                if abs(float(change)) / issued >= 0.01:
+    emit("S2", stage_started)
+
+    stage_started = time.monotonic()
+    for code in codes:
+        rows = rows_by_code.get(code, [])
+        issued = issued_by_code.get(code)
+        for row in rows:
+            change = _as_float(row.get("change_shares"))
+            pct = row.get("stake_pct_of_issued")
+            if issued and change and pct not in (None, ""):
+                if abs(change) / issued >= 0.01:
                     s1.append({"code": code, "ccass_id": row["ccass_id"], "name": row["participant_name"],
-                               "change_shares": change, "pct": round(abs(float(change)) / issued * 100, 6),
+                               "change_shares": change, "pct": round(abs(change) / issued * 100, 6),
                                "holding_after": row["holding_shares"]})
-        current_timeline = build_timeline(code, to_date=brief_date, path=path)
+    emit("S1", stage_started)
+
+    stage_started = time.monotonic()
+    for code in codes:
+        current_timeline = _timeline_from_rows(code, rows_by_code.get(code, []))
         for before, after in zip(current_timeline, current_timeline[1:]):
             before_top5 = before.get("top5_pct_ccass")
             after_top5 = after.get("top5_pct_ccass")
             if before_top5 is not None and after_top5 is not None and abs(after_top5 - before_top5) >= 2:
                 s3.append({"code": code, "date": after["date"], "top5_before": before_top5, "top5_after": after_top5})
+    emit("S3", stage_started)
+
     # Quote rows are populated by a permitted market-data collector. Keep the
     # computation separate from holdings so missing quote coverage is visible.
+    stage_started = time.monotonic()
     quote_rows = _query(
-        "SELECT code,trade_date,turnover,market_cap FROM quote_daily WHERE trade_date<=? ORDER BY trade_date DESC",
+        "SELECT code,trade_date,turnover,market_cap FROM quote_daily WHERE trade_date<=? ORDER BY code,trade_date DESC",
         (brief_date,), path,
     )
+    quote_rows_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for quote in quote_rows:
-        turnover = _as_float(quote.get("turnover"))
-        if turnover is None or turnover < 3_500_000:
-            continue
-        history = _query(
-            "SELECT turnover FROM quote_daily WHERE code=? AND trade_date<? AND turnover IS NOT NULL ORDER BY trade_date DESC LIMIT 20",
-            (quote["code"], quote["trade_date"]), path,
-        )
-        median = _median([_as_float(row.get("turnover")) for row in history])
-        if median and turnover / median >= 3:
-            item = {"code": quote["code"], "trade_date": quote["trade_date"], "turnover": turnover,
-                    "ratio": round(turnover / median, 6), "turnover_to_mcap": _ratio(turnover, _as_float(quote.get("market_cap")))}
-            (s4_watchlist if quote["code"] in timeline_codes else s4_market).append(item)
+        quote_rows_by_code[str(quote.get("code") or "")].append(quote)
+    for code, code_quotes in quote_rows_by_code.items():
+        for index, quote in enumerate(code_quotes):
+            turnover = _as_float(quote.get("turnover"))
+            if turnover is None or turnover < 3_500_000:
+                continue
+            median = _median([_as_float(row.get("turnover")) for row in code_quotes[index + 1:index + 21]])
+            if median and turnover / median >= 3:
+                item = {"code": code, "trade_date": quote["trade_date"], "turnover": turnover,
+                        "ratio": round(turnover / median, 6),
+                        "turnover_to_mcap": _ratio(turnover, _as_float(quote.get("market_cap")))}
+                (s4_watchlist if code in timeline_codes else s4_market).append(item)
+    emit("S4", stage_started)
+
+    stage_started = time.monotonic()
     s5 = _event_signals(brief_date, timeline_codes)
+    emit("S5", stage_started)
+
+    stage_started = time.monotonic()
     hypotheses = resolve_hypotheses(brief_date, path)
+    emit("hypotheses", stage_started)
+
+    # Transfer candidates remain an on-demand panel calculation; recording the
+    # stage keeps the job detail explicit without re-running its heavy query.
+    emit("transfers", time.monotonic(), "not_materialized_in_brief")
     trade_date_covered, trade_date_warning = shift_trading_date(brief_date, -2)
     data_quality = []
     if trade_date_warning:
@@ -519,7 +653,7 @@ def build_brief(
         "data_date": brief_date,
         "trade_date_covered": trade_date_covered,
         "coverage": {
-            **{group: len(load_watchlist_entries(group=group)) for group in GROUP_ORDER},
+            **{group: len(entries_by_group[group]) for group in GROUP_ORDER},
             **(fetch_stats or {}),
         },
         "signals": {"S1": s1, "S2": s2, "S3": s3, "S4_watchlist": s4_watchlist, "S4_market": s4_market, "S5": s5},
@@ -530,13 +664,20 @@ def build_brief(
     }
     # Drive is a delivery copy; Turso remains authoritative when Drive is
     # unavailable or the service account lacks access to the target folder.
-    payload["drive_upload"] = upload_brief_artifacts(payload, brief_date, daily_holdings_rows)
-    _execute(
-        """INSERT INTO briefs(brief_date,data_date,trade_date_covered,payload_json,created_at)
-           VALUES(?,?,?,?,?)
-           ON CONFLICT(brief_date) DO UPDATE SET payload_json=excluded.payload_json,
-           created_at=excluded.created_at""",
-             (brief_date, brief_date, "", json.dumps(payload, ensure_ascii=False), now_iso()), path)
+    stage_started = time.monotonic()
+    if upload:
+        payload["drive_upload"] = upload_brief_artifacts(payload, brief_date, daily_holdings_rows)
+        emit("drive_upload", stage_started)
+    else:
+        payload["drive_upload"] = {"status": "skipped_test", "files": []}
+        emit("drive_upload", stage_started, "skipped_test")
+    if persist:
+        _execute(
+            """INSERT INTO briefs(brief_date,data_date,trade_date_covered,payload_json,created_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(brief_date) DO UPDATE SET payload_json=excluded.payload_json,
+               created_at=excluded.created_at""",
+                 (brief_date, brief_date, "", json.dumps(payload, ensure_ascii=False), now_iso()), path)
     return payload
 
 

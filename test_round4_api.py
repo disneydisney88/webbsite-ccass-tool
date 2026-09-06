@@ -5,9 +5,11 @@ import api
 
 def test_round4_routes_are_registered_and_protected():
     paths = {route.path for route in api.app.routes}
+    delete_routes = {(route.path, method) for route in api.app.routes for method in getattr(route, "methods", set())}
     assert "/admin/run_daily" in paths
     assert "/admin/jobs/{job_id}" in paths
     assert "/admin/job/{job_id}/cancel" in paths
+    assert ("/admin/jobs/{job_id}", "DELETE") in delete_routes
     assert "/timeline" in paths
     assert "/panel/broker_daily" in paths
     assert "/panel/transfers" in paths
@@ -33,6 +35,8 @@ def test_daily_worker_contract_is_not_mcp_wall_clock_work():
     request = api.DailyRunRequest()
     assert request.sleep_seconds >= 1.5
     assert request.groups == ["lshape79", "caiji"]
+    assert request.force is False
+    assert api.DailyRunRequest(force=True).force is True
     assert api.stock_tool_budget("hybrid_light") == 30
 
 

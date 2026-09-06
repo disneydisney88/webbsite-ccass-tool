@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from threading import Lock
 from time import perf_counter
 from typing import Any
 
@@ -25,6 +26,10 @@ TURSO_SCHEMA: tuple[str, ...] = (
     "CREATE TABLE IF NOT EXISTS hypotheses (id TEXT PRIMARY KEY, code TEXT NOT NULL, created TEXT NOT NULL, expected_date TEXT NOT NULL, ccass_id TEXT NOT NULL, field TEXT NOT NULL, op TEXT NOT NULL, value TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, resolved_date TEXT, actual TEXT)",
     "CREATE TABLE IF NOT EXISTS briefs (brief_date TEXT PRIMARY KEY, data_date TEXT NOT NULL, trade_date_covered TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL)",
 )
+
+_TURSO_LAST_BATCH_MS: float | None = None
+_TURSO_SCHEMA_READY_FOR: str | None = None
+_TURSO_SCHEMA_LOCK = Lock()
 
 
 def turso_is_configured() -> bool:
@@ -67,18 +72,38 @@ def turso_execute_many(
     statement: str,
     rows: list[list[Any] | tuple[Any, ...]],
 ) -> int:
-    """Execute a bounded batch on one client connection.
+    """Execute one atomic batch for a parameterized statement."""
 
-    ``libsql-client``'s batch API varies across its archived releases, so use
-    one connection and repeated parameterized statements for a stable path.
+    return turso_execute_batch([(statement, args) for args in rows])
+
+
+def turso_execute_batch(
+    statements: list[tuple[str, list[Any] | tuple[Any, ...] | None]],
+) -> int:
+    """Execute statements in one Turso batch transaction.
+
+    ``ClientSync.batch`` sends one HTTP request and the libSQL batch protocol
+    wraps the statements in BEGIN/COMMIT with rollback on failure. Keeping the
+    batch at the caller's stock boundary avoids one network round trip per
+    participant row.
     """
 
-    if not rows:
+    global _TURSO_LAST_BATCH_MS
+    if not statements:
         return 0
+    started = perf_counter()
     with _create_client() as client:
-        for args in rows:
-            client.execute(statement, args)
-    return len(rows)
+        batch = getattr(client, "batch", None)
+        if callable(batch):
+            batch([(statement, args) for statement, args in statements])
+        else:  # Compatibility for minimal test doubles and old clients.
+            for statement, args in statements:
+                if args:
+                    client.execute(statement, args)
+                else:
+                    client.execute(statement)
+    _TURSO_LAST_BATCH_MS = round((perf_counter() - started) * 1000, 1)
+    return len(statements)
 
 
 def turso_query(
@@ -93,19 +118,38 @@ def turso_query(
 
 
 def ensure_turso_schema() -> None:
-    with _create_client() as client:
-        for statement in TURSO_SCHEMA:
-            client.execute(statement)
+    global _TURSO_SCHEMA_READY_FOR
+    schema_key = turso_http_url(os.getenv(TURSO_DATABASE_URL_ENV, "")).strip()
+    if _TURSO_SCHEMA_READY_FOR == schema_key:
+        return
+    with _TURSO_SCHEMA_LOCK:
+        if _TURSO_SCHEMA_READY_FOR == schema_key:
+            return
+        turso_execute_batch([(statement, ()) for statement in TURSO_SCHEMA])
+        _TURSO_SCHEMA_READY_FOR = schema_key
 
 
 def turso_health() -> dict[str, Any]:
     if not turso_is_configured():
-        return {"db_backend": "sqlite", "turso_ping_ms": None}
+        return {
+            "db_backend": "sqlite",
+            "turso_ping_ms": None,
+            "turso_last_batch_ms": _TURSO_LAST_BATCH_MS,
+        }
     started = perf_counter()
     try:
         ensure_turso_schema()
         with _create_client() as client:
             client.execute("SELECT 1")
     except Exception as exc:  # health must remain available on backend failure
-        return {"db_backend": "turso", "turso_ping_ms": None, "turso_error": f"{type(exc).__name__}: {exc}"}
-    return {"db_backend": "turso", "turso_ping_ms": round((perf_counter() - started) * 1000, 1)}
+        return {
+            "db_backend": "turso",
+            "turso_ping_ms": None,
+            "turso_last_batch_ms": _TURSO_LAST_BATCH_MS,
+            "turso_error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "db_backend": "turso",
+        "turso_ping_ms": round((perf_counter() - started) * 1000, 1),
+        "turso_last_batch_ms": _TURSO_LAST_BATCH_MS,
+    }

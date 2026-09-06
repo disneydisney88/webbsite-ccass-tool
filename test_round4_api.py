@@ -20,6 +20,7 @@ def test_health_model_exposes_round4_operational_fields():
     fields = api.HealthResponse.model_fields
     assert "db_backend" in fields
     assert "turso_ping_ms" in fields
+    assert "turso_last_batch_ms" in fields
     assert "db_path" in fields
     assert "disk_free_mb" in fields
     assert "worker_last_run" in fields

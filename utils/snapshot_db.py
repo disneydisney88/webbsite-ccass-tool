@@ -239,7 +239,7 @@ def upsert_longbridge_holdings(
             )
         )
     if _turso_enabled(path):
-        from .turso_db import ensure_turso_schema, turso_execute_many
+        from .turso_db import ensure_turso_schema, turso_execute_batch
 
         ensure_turso_schema()
         legacy_sql = """
@@ -254,7 +254,6 @@ def upsert_longbridge_holdings(
                 change_shares=excluded.change_shares,
                 fetched_at=excluded.fetched_at
         """
-        turso_execute_many(legacy_sql, values)
         unified_values = [
             (
                 row[0], row[1], row[2], row[3], row[4], row[5],
@@ -262,8 +261,7 @@ def upsert_longbridge_holdings(
             )
             for row in values
         ]
-        turso_execute_many(
-            """
+        unified_sql = """
             INSERT INTO holdings_daily
                 (code, data_date, ccass_id, participant_name, holding_shares,
                  stake_pct_of_issued, stake_pct_of_ccass, change_shares, source, fetched_at)
@@ -276,9 +274,10 @@ def upsert_longbridge_holdings(
                 change_shares=excluded.change_shares,
                 source=excluded.source,
                 fetched_at=excluded.fetched_at
-            """,
-            unified_values,
-        )
+            """
+        statements = [(legacy_sql, args) for args in values]
+        statements.extend((unified_sql, args) for args in unified_values)
+        turso_execute_batch(statements)
         return len(values)
     ensure_db(path)
     with closing(sqlite3.connect(path)) as conn:

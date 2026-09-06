@@ -8,7 +8,56 @@ import utils.turso_db as turso_db
 def test_turso_is_disabled_without_both_credentials() -> None:
     with patch.dict("os.environ", {}, clear=True):
         assert turso_db.turso_is_configured() is False
-        assert turso_db.turso_health() == {"db_backend": "sqlite", "turso_ping_ms": None}
+        assert turso_db.turso_health() == {
+            "db_backend": "sqlite",
+            "turso_ping_ms": None,
+            "turso_last_batch_ms": None,
+        }
+
+
+def test_turso_execute_many_uses_one_atomic_batch() -> None:
+    class FakeClient:
+        def __init__(self):
+            self.batch_calls = []
+            self.execute_calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def batch(self, statements):
+            self.batch_calls.append(statements)
+            return []
+
+        def execute(self, statement, args=None):
+            self.execute_calls.append((statement, args))
+
+    client = FakeClient()
+    with patch.object(turso_db, "_create_client", return_value=client):
+        assert turso_db.turso_execute_many("INSERT INTO t VALUES (?)", [(1,), (2,)]) == 2
+
+    assert len(client.batch_calls) == 1
+    assert len(client.batch_calls[0]) == 2
+    assert client.execute_calls == []
+
+
+def test_turso_batch_records_last_batch_duration() -> None:
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def batch(self, _statements):
+            return []
+
+    with patch.object(turso_db, "_create_client", return_value=FakeClient()):
+        turso_db.turso_execute_batch([("SELECT 1", ())])
+
+    assert isinstance(turso_db.turso_health()["turso_last_batch_ms"], float)
 
 
 def test_libsql_url_uses_https_transport() -> None:

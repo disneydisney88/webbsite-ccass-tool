@@ -75,3 +75,25 @@ def test_turso_longbridge_reads_do_not_initialize_local_sqlite(tmp_path: Path) -
 
     assert rows[0]["ccass_id"] == "B01438"
     assert calls
+
+
+def test_longbridge_upsert_uses_one_batch_for_both_tables(tmp_path: Path) -> None:
+    statements = []
+    rows = [
+        {"ccass_id": "B01438", "participant_name": "KINGSTON", "holding_shares": 540928000},
+        {"ccass_id": "B02094", "participant_name": "FUTU", "holding_shares": 1000000},
+    ]
+
+    def fake_batch(batch):
+        statements.append(batch)
+        return len(batch)
+
+    with patch.object(snapshot_db, "_turso_enabled", return_value=True), patch.object(
+        turso_db, "ensure_turso_schema"
+    ), patch.object(turso_db, "turso_execute_batch", side_effect=fake_batch):
+        count = snapshot_db.upsert_longbridge_holdings("06182", "2026-09-04", rows)
+
+    assert count == 2
+    assert len(statements) == 1
+    assert len(statements[0]) == 4
+    assert all("ON CONFLICT" in statement for statement, _args in statements[0])

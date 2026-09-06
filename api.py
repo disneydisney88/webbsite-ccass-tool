@@ -227,6 +227,7 @@ class HealthResponse(BaseModel):
     render_service_id: str = ""
     db_backend: str = "sqlite"
     turso_ping_ms: float | None = None
+    turso_last_batch_ms: float | None = None
     turso_error: str | None = None
     turso_migration: dict[str, Any] = Field(default_factory=dict)
     watchlist_counts: dict[str, int] = Field(default_factory=dict)

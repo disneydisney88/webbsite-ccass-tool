@@ -8,6 +8,7 @@ existing SQLite path for local development and fixture tests.
 from __future__ import annotations
 
 import json
+import csv
 import sqlite3
 import time
 import uuid
@@ -364,6 +365,9 @@ def build_brief(brief_date: str, path: Path = DB_PATH) -> dict[str, Any]:
     timeline_codes = {entry.code for group in GROUP_ORDER for entry in load_watchlist_entries(group=group)}
     s1: list[dict[str, Any]] = []
     s2: list[dict[str, Any]] = []
+    s3: list[dict[str, Any]] = []
+    s4_watchlist: list[dict[str, Any]] = []
+    s4_market: list[dict[str, Any]] = []
     for code in sorted(timeline_codes):
         rows = _holdings_rows(code, to_date=brief_date, path=path)
         for row in rows:
@@ -374,13 +378,40 @@ def build_brief(brief_date: str, path: Path = DB_PATH) -> dict[str, Any]:
                     s1.append({"code": code, "ccass_id": row["ccass_id"], "name": row["participant_name"],
                                "change_shares": change, "pct": round(abs(float(change)) / _issued_shares(code, path) * 100, 6),
                                "holding_after": row["holding_shares"]})
+        previous = rows[-2] if len(rows) >= 2 else None
+        current_timeline = build_timeline(code, to_date=brief_date, path=path)
+        for before, after in zip(current_timeline, current_timeline[1:]):
+            before_top5 = before.get("top5_pct_ccass")
+            after_top5 = after.get("top5_pct_ccass")
+            if before_top5 is not None and after_top5 is not None and abs(after_top5 - before_top5) >= 2:
+                s3.append({"code": code, "date": after["date"], "top5_before": before_top5, "top5_after": after_top5})
+    # Quote rows are populated by a permitted market-data collector. Keep the
+    # computation separate from holdings so missing quote coverage is visible.
+    quote_rows = _query(
+        "SELECT code,trade_date,turnover,market_cap FROM quote_daily WHERE trade_date<=? ORDER BY trade_date DESC",
+        (brief_date,), path,
+    )
+    for quote in quote_rows:
+        turnover = _as_float(quote.get("turnover"))
+        if turnover is None or turnover < 3_500_000:
+            continue
+        history = _query(
+            "SELECT turnover FROM quote_daily WHERE code=? AND trade_date<? AND turnover IS NOT NULL ORDER BY trade_date DESC LIMIT 20",
+            (quote["code"], quote["trade_date"]), path,
+        )
+        median = _median([_as_float(row.get("turnover")) for row in history])
+        if median and turnover / median >= 3:
+            item = {"code": quote["code"], "trade_date": quote["trade_date"], "turnover": turnover,
+                    "ratio": round(turnover / median, 6), "turnover_to_mcap": _ratio(turnover, _as_float(quote.get("market_cap")))}
+            (s4_watchlist if quote["code"] in timeline_codes else s4_market).append(item)
+    s5 = _event_signals(brief_date, timeline_codes)
     hypotheses = resolve_hypotheses(brief_date, path)
     payload = {
         "brief_date": brief_date,
         "data_date": brief_date,
         "trade_date_covered": "",
         "coverage": {group: len(load_watchlist_entries(group=group)) for group in GROUP_ORDER},
-        "signals": {"S1": s1, "S2": s2, "S3": [], "S4_watchlist": [], "S4_market": [], "S5": []},
+        "signals": {"S1": s1, "S2": s2, "S3": s3, "S4_watchlist": s4_watchlist, "S4_market": s4_market, "S5": s5},
         "hypotheses_resolved": hypotheses,
         "hypotheses_pending_next3d": [item for item in get_hypotheses(status="pending", path=path)
                                       if str(item["expected_date"]) <= (date.fromisoformat(brief_date) + timedelta(days=3)).isoformat()],
@@ -393,6 +424,61 @@ def build_brief(brief_date: str, path: Path = DB_PATH) -> dict[str, Any]:
            created_at=excluded.created_at""",
              (brief_date, brief_date, "", json.dumps(payload, ensure_ascii=False), now_iso()), path)
     return payload
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return None if value in (None, "") else float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _median(values: list[float | None]) -> float | None:
+    numbers = sorted(value for value in values if value is not None)
+    if not numbers:
+        return None
+    middle = len(numbers) // 2
+    return numbers[middle] if len(numbers) % 2 else (numbers[middle - 1] + numbers[middle]) / 2
+
+
+def _ratio(numerator: float | None, denominator: float | None) -> float | None:
+    return round(numerator / denominator, 6) if numerator is not None and denominator else None
+
+
+def _event_signals(brief_date: str, codes: set[str], event_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Return event dates falling within the next three calendar weekdays."""
+    root = event_dir or Path(__file__).parent / "../data/events"
+    try:
+        start = date.fromisoformat(brief_date)
+    except ValueError:
+        return []
+    target_dates = {(start + timedelta(days=offset)).isoformat() for offset in range(4)}
+    results: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*.csv")) if root.exists() else []:
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    raw_code = str(row.get("代號") or row.get("code") or "").split(".")[0].zfill(5)
+                    if raw_code not in codes:
+                        continue
+                    for field, value in row.items():
+                        parsed = _event_date(value)
+                        if parsed in target_dates:
+                            results.append({"code": raw_code, "event_type": path.stem,
+                                            "date_field": field, "date": parsed})
+        except (OSError, UnicodeError):
+            continue
+    return results
+
+
+def _event_date(value: Any) -> str:
+    text = str(value or "").strip().replace("/", "-")
+    for fmt in ("%d-%m-%y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return ""
 
 
 def load_brief(brief_date: str = "", path: Path = DB_PATH) -> dict[str, Any] | None:

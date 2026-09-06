@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import time
 from io import StringIO
 from collections.abc import Callable
@@ -214,6 +215,8 @@ class HealthResponse(BaseModel):
     turso_migration: dict[str, Any] = Field(default_factory=dict)
     watchlist_counts: dict[str, int] = Field(default_factory=dict)
     worker_last_run: dict[str, Any] = Field(default_factory=dict)
+    db_path: str = ""
+    disk_free_mb: float | None = None
 
 
 class StockMetadata(BaseModel):
@@ -1526,9 +1529,9 @@ def apply_longbridge_payload(
     webb_holdings_full: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     mode = (source_preference or "auto").lower()
-    should_fetch = mode in {"longbridge", "auto"} or (
-        mode == "hybrid_light" and (not payload.get("holdings") or not payload.get("changes"))
-    )
+    # hybrid_light is deliberately requests-only for Webb's lightweight pages;
+    # it must not silently turn into a Longbridge/browser-sized job.
+    should_fetch = mode in {"longbridge", "auto"}
     if not should_fetch:
         return payload
     original_holdings = list(payload.get("holdings") or [])
@@ -2561,7 +2564,11 @@ def build_officers_payload(
     description=(
         "Fetch Webb-site CCASS research data for a Hong Kong listed stock. "
         "Returns metadata, holdings_summary, holdings, changes, big_changes, "
-        "concentration, fetch_summary and data_quality_warnings as JSON."
+        "concentration, fetch_summary and data_quality_warnings as JSON. "
+        "source_preference='local_db' reads local snapshots only and is fastest; "
+        "'hybrid_light' reads local data plus requests-only orgdata, Concentration "
+        "and Big Changes, and marks browser-required Holdings/Changes as skipped; "
+        "'auto' fetches the full Webb/browser path and is slower."
     ),
 )
 async def get_ccass_stock_data(
@@ -2577,8 +2584,8 @@ async def get_ccass_stock_data(
             description=(
                 "Source preference: local_db reads local snapshots only and is fastest; "
                 "hybrid_light (default) reads local snapshots and fetches requests-only "
-                "orgdata, Concentration and Big Changes, and fills missing Holdings/Changes "
-                "from Longbridge when authenticated; longbridge uses Longbridge Holdings "
+                "orgdata, Concentration and Big Changes, while Holdings/Changes are skipped; "
+                "longbridge uses Longbridge Holdings "
                 "and locally derived Changes/Concentration; auto fetches the full Webb path "
                 "and Longbridge cross-check and is much slower."
             ),
@@ -2935,6 +2942,8 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
         "longbridge_token_key_configured": bool(os.getenv("LONGBRIDGE_TOKEN_KEY", "").strip()),
         "render_service_id": os.getenv("RENDER_SERVICE_ID", ""),
         "worker_last_run": dict(_worker_last_run),
+        "db_path": str(DB_PATH),
+        "disk_free_mb": round(shutil.disk_usage(DB_PATH.parent).free / (1024 * 1024), 1),
     }
     payload.update(turso_health())
     payload["turso_migration"] = turso_migration_status()

@@ -49,6 +49,7 @@ from utils.events import events_url, parse_events_html, parse_events_name
 from utils.f10_managers import f10_managers_url, parse_f10_managers_html
 from utils.f10_equity import f10_equity_url, parse_f10_buybacks, parse_f10_share_changes
 from utils.snapshot_db import DB_PATH, export_db_bytes, load_longbridge_holding_history
+from utils.research_pipeline import build_timeline, build_transfer_candidates, load_brief
 from utils.source_router import fetch_local_db_bundle, fetch_mirror_bundle, fetch_render_api_bundle, fetch_source_bundle_for_stock, get_source_mode, stock_code_for_issue_id
 
 exporters = importlib.reload(exporters)
@@ -1946,3 +1947,64 @@ st.markdown('<div id="download-files"></div>', unsafe_allow_html=True)
 st.subheader("Download Files")
 st.caption("Individual section files and the Markdown/JSON exports are available below. Partial exports keep the PARTIAL label.")
 render_download_buttons(parsed, results, report, "bottom", export_extras)
+
+st.divider()
+st.subheader("Research Panel")
+panel_tabs = st.tabs(["Daily Brief", "Timeline", "Broker stack"])
+with panel_tabs[0]:
+    brief = load_brief()
+    if brief is None:
+        st.info("No daily brief has been generated yet.")
+    else:
+        st.caption(f"Brief date: {brief.get('brief_date', '')} | Data date: {brief.get('data_date', '')} | Trade date covered: {brief.get('trade_date_covered') or 'not recorded'}")
+        signals = brief.get("signals") or {}
+        signal_tabs = st.tabs(["S1", "S2", "S3", "S4 watchlist", "S4 market", "S5", "Hypotheses"])
+        for tab, key in zip(signal_tabs[:6], ("S1", "S2", "S3", "S4_watchlist", "S4_market", "S5")):
+            with tab:
+                records = signals.get(key) or []
+                st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
+        with signal_tabs[6]:
+            st.dataframe(pd.DataFrame(brief.get("hypotheses_resolved") or []), use_container_width=True, hide_index=True)
+with panel_tabs[1]:
+    if not parsed.stock_code:
+        st.info("Enter a stock code to view the timeline.")
+    else:
+        timeline_rows = build_timeline(parsed.stock_code)
+        st.caption(f"{len(timeline_rows)} stored daily rows")
+        st.dataframe(pd.DataFrame(timeline_rows), use_container_width=True, hide_index=True)
+        transfer_rows = build_transfer_candidates("lshape79")
+        if transfer_rows:
+            st.caption("Transfer candidates in lshape79")
+            st.dataframe(pd.DataFrame([row for row in transfer_rows if row.get("code") == parsed.stock_code]), use_container_width=True, hide_index=True)
+with panel_tabs[2]:
+    if not parsed.stock_code:
+        st.info("Enter a stock code to view broker history.")
+    else:
+        history_rows = load_longbridge_holding_history(parsed.stock_code)
+        history = pd.DataFrame(history_rows)
+        if history.empty:
+            st.info("No Longbridge daily holdings are stored for this stock yet.")
+        else:
+            days = st.number_input("Days", min_value=1, max_value=60, value=60, step=1, key="panel_broker_days")
+            metric = st.radio("Y axis", ["Shares", "% issued", "% CCASS"], horizontal=True, key="panel_broker_metric")
+            dates = sorted(history["data_date"].dropna().unique())[-int(days):]
+            view = history[history["data_date"].isin(dates)].copy()
+            top_ids = (view.groupby("ccass_id", as_index=False)["holding_shares"].max()
+                       .sort_values("holding_shares", ascending=False).head(10)["ccass_id"].tolist())
+            view["broker"] = view["participant_name"].where(view["ccass_id"].isin(top_ids), "Others")
+            if metric == "Shares":
+                value_column = "holding_shares"
+            elif metric == "% issued":
+                value_column = "stake_pct_of_issued"
+            else:
+                total_by_date = view.groupby("data_date")["holding_shares"].transform("sum")
+                view["stake_pct_of_ccass_calc"] = view["holding_shares"] / total_by_date * 100
+                value_column = "stake_pct_of_ccass_calc"
+            chart = view.groupby(["data_date", "broker"], as_index=False)[value_column].sum()
+            if px is not None:
+                figure = px.area(chart, x="data_date", y=value_column, color="broker", line_group="broker",
+                                 title=f"{parsed.stock_code} broker holdings · {int(days)} days")
+                figure.update_layout(yaxis_title=metric, xaxis_title="Date", legend_title="Participant")
+                st.plotly_chart(figure, use_container_width=True)
+            else:
+                st.dataframe(chart, use_container_width=True, hide_index=True)

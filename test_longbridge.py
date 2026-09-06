@@ -376,10 +376,11 @@ class LongbridgeNormalizationTest(unittest.TestCase):
             "data_quality_warnings": [],
             "errors": [],
         }
-        with patch("api.fetch_longbridge_stock", return_value=data):
+        with patch("api.fetch_longbridge_stock", return_value=data) as fetch:
             result = api.apply_longbridge_payload(payload, "06182", "hybrid_light", 15, 20, 10, 20)
         self.assertEqual(result["concentration"]["records"][0]["source"], "webb")
-        self.assertEqual(result["source_trace"]["Holdings"], "longbridge")
+        fetch.assert_not_called()
+        self.assertNotIn("Holdings", result["source_trace"])
 
 
 if __name__ == "__main__":

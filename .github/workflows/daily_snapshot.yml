@@ -1,140 +1,93 @@
-name: Daily CCASS Snapshot Backup
+name: Daily CCASS Research Worker
 
 on:
   schedule:
-    - cron: "30 13 * * *"
+    - cron: "10 0 * * *"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: daily-ccass-snapshot
+  group: daily-ccass-worker
   cancel-in-progress: false
 
 jobs:
-  snapshot:
+  daily:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-
     env:
       API_BASE_URL: https://webbsite-ccass-api.onrender.com
       SNAPSHOT_MAX_AGE_DAYS: 7
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Verify API token secret
-        run: |
-          if [ -z "${{ secrets.CCASS_API_TOKEN }}" ]; then
-            echo "Missing repo secret CCASS_API_TOKEN"
-            exit 1
-          fi
+        run: test -n "${{ secrets.CCASS_API_TOKEN }}"
 
       - name: Wait for Render health
         run: |
           for attempt in 1 2 3 4 5; do
             if curl --fail --silent --show-error --max-time 45 "$API_BASE_URL/health"; then
               echo
-              echo "Render health check passed"
               exit 0
             fi
-            echo "Render health check failed; retrying in 30s ($attempt/5)"
             sleep 30
           done
-          echo "Render health check failed after retries"
           exit 1
 
-      - name: Run caiji snapshots
+      - name: Queue idempotent daily worker
         run: |
-          curl --fail --silent --show-error --max-time 1500 \
-            "$API_BASE_URL/api/snapshot_all?group=caiji&timeout=60&key=${{ secrets.CCASS_API_TOKEN }}" \
-            --output caiji_snapshot_result.json
+          curl --fail --silent --show-error --max-time 60 -X POST \
+            -H "Authorization: Bearer ${{ secrets.CCASS_API_TOKEN }}" \
+            -H "Content-Type: application/json" -d '{}' \
+            "$API_BASE_URL/admin/run_daily" > daily_job.json
           python - <<'PY'
           import json
-          data = json.load(open("caiji_snapshot_result.json", encoding="utf-8"))
-          rows = data.get("results") or []
-          succeeded = sum(1 for row in rows if row.get("ok") and not row.get("skipped") and row.get("price_ok", True) is not False)
-          skipped = sum(1 for row in rows if row.get("skipped"))
-          failed = len(rows) - succeeded - skipped
-          print(json.dumps({"group": data.get("group"), "total": len(rows), "succeeded": succeeded, "skipped": skipped, "failed": failed}, ensure_ascii=False))
-          if failed or (rows and succeeded == 0):
-              raise SystemExit("caiji snapshot had failures or was entirely skipped")
+          data = json.load(open("daily_job.json", encoding="utf-8"))
+          print(f"Queued {data['job_id']}; created={data.get('created')}")
+          open("job_id", "w", encoding="utf-8").write(data["job_id"])
           PY
 
-      - name: Run lshape snapshots
+      - name: Wait for worker and publish summary
         run: |
-          curl --fail --silent --show-error --max-time 1500 \
-            "$API_BASE_URL/api/snapshot_all?group=lshape&timeout=60&key=${{ secrets.CCASS_API_TOKEN }}" \
-            --output lshape_snapshot_result.json
-          python - <<'PY'
+          job_id="$(cat job_id)"
+          for attempt in $(seq 1 180); do
+            curl --fail --silent --show-error --max-time 60 \
+              -H "Authorization: Bearer ${{ secrets.CCASS_API_TOKEN }}" \
+              "$API_BASE_URL/admin/jobs/$job_id" > job.json
+            python - <<'PY'
           import json
-          data = json.load(open("lshape_snapshot_result.json", encoding="utf-8"))
-          rows = data.get("results") or []
-          succeeded = sum(1 for row in rows if row.get("ok") and not row.get("skipped") and row.get("price_ok", True) is not False)
-          skipped = sum(1 for row in rows if row.get("skipped"))
-          failed = len(rows) - succeeded - skipped
-          print(json.dumps({"group": data.get("group"), "total": len(rows), "succeeded": succeeded, "skipped": skipped, "failed": failed}, ensure_ascii=False))
-          if failed or (rows and succeeded == 0):
-              raise SystemExit("lshape snapshot had failures or was entirely skipped")
+          data=json.load(open("job.json", encoding="utf-8"))
+          job=data.get("job", {})
+          detail=job.get("detail", {}) or {}
+          print(json.dumps({"status": job.get("status"), "total": detail.get("total", 0), "succeeded": detail.get("succeeded", 0), "skipped": detail.get("skipped", 0), "failed": detail.get("failed", 0)}, ensure_ascii=False))
+          open("job_status", "w", encoding="utf-8").write(str(job.get("status", "")))
           PY
-
-      - name: Download snapshot DB backup
-        run: |
-          mkdir -p data/backups
-          curl --fail --silent --show-error --max-time 300 \
-            "$API_BASE_URL/api/snapshots/export?key=${{ secrets.CCASS_API_TOKEN }}" \
-            --output data/backups/ccass_snapshots_latest.db
-          test -s data/backups/ccass_snapshots_latest.db
-
+            status="$(cat job_status)"
+            if [ "$status" = "succeeded" ] || [ "$status" = "failed" ]; then break; fi
+            sleep 20
+          done
           python - <<'PY'
-          import os, sqlite3
+          import json, os
           from datetime import date
-          db = sqlite3.connect("data/backups/ccass_snapshots_latest.db")
-          tables = {row[0] for row in db.execute("select name from sqlite_master where type='table'")}
-          latest = None
-          for table in ("ccass_snapshots", "snapshots") & tables:
-              for column in ("snapshot_date", "date", "data_date"):
-                  try:
-                      row = db.execute(f"select max({column}) from {table}").fetchone()
-                  except sqlite3.Error:
-                      continue
-                  if row and row[0]:
-                      latest = max(str(row[0]), latest or "")
-          if latest:
-              age = (date.today() - date.fromisoformat(latest[:10])).days
-              print(f"Latest CCASS snapshot: {latest}; age={age} days")
-              if age > int(os.environ.get("SNAPSHOT_MAX_AGE_DAYS", "7")):
-                  print(f"::warning::Latest CCASS snapshot is stale ({age} days old)")
-          else:
-              print("::warning::Could not determine latest CCASS snapshot date")
+          data=json.load(open("job.json", encoding="utf-8"))
+          job=data.get("job", {})
+          detail=job.get("detail", {}) or {}
+          rows=detail.get("results", []) or []
+          succeeded=sum(1 for row in rows if row.get("ok") and not row.get("skipped"))
+          skipped=sum(1 for row in rows if row.get("skipped"))
+          failed=len(rows)-succeeded-skipped
+          dates=[str(row.get("data_date"))[:10] for row in rows if row.get("data_date")]
+          latest=max(dates) if dates else ""
+          age=(date.today()-date.fromisoformat(latest)).days if latest else None
+          summary=f"### Daily worker\n- succeeded: {succeeded}\n- skipped: {skipped}\n- failed: {failed}\n- latest data date: {latest or 'unknown'}\n"
+          if age is None or age > int(os.environ.get("SNAPSHOT_MAX_AGE_DAYS", "7")):
+              summary += f"- warning: snapshot data is stale or unavailable (age={age})\n"
+              print("::warning::Latest CCASS snapshot is stale; Longbridge data is stale or unavailable")
+          if succeeded == 0:
+              print("::warning::No daily snapshot succeeded; this run is not a pure success")
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as handle:
+              handle.write(summary)
+          if job.get("status") != "succeeded" or failed:
+              raise SystemExit("daily worker failed")
           PY
-
-          today="$(date -u +%Y%m%d)"
-          weekday="$(date -u +%u)"
-          if [ "$weekday" = "7" ]; then
-            cp data/backups/ccass_snapshots_latest.db "data/backups/ccass_snapshots_${today}.db"
-          fi
-
-          weekly_count="$(find data/backups -maxdepth 1 -name 'ccass_snapshots_[0-9]*.db' | wc -l)"
-          if [ "$weekly_count" -gt 8 ]; then
-            find data/backups -maxdepth 1 -name 'ccass_snapshots_[0-9]*.db' -printf '%T@ %p\n' \
-              | sort -nr \
-              | tail -n +9 \
-              | cut -d' ' -f2- \
-              | xargs -r rm -f
-          fi
-
-      - name: Commit backup
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/backups/
-          if git diff --cached --quiet; then
-            echo "No backup changes to commit"
-            exit 0
-          fi
-          today="$(date -u +%Y-%m-%d)"
-          git commit -m "Backup CCASS snapshots ${today} [skip render]"
-          git push

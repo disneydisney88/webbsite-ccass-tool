@@ -233,3 +233,26 @@ fields are withheld with a warning.
 ## Deployment State
 
 The repair described above is local-only until merged into the GitHub-linked repo. The next engineer owns the final diff review, commit/push, and live acceptance. A successful local test does not by itself update Streamlit Cloud, Render, or the GPT Action/MCP deployment.
+
+## Round 4 v2 Status (2026-09-06)
+
+- `40a151c` is live on Render. `/health` verified Turso, Longbridge
+  authentication, and watchlist counts `lshape79=79`, `caiji=28`,
+  `research=557`.
+- `ece9ec1` adds the Turso-backed daily worker contract, idempotent `job_log`,
+  unified `holdings_daily` timeline, transfer candidates, hypotheses, numeric
+  briefs, authenticated panel/brief endpoints, and the first Streamlit
+  Research Panel. Local full suite after this work: `226 passed`, `5 warnings`,
+  `10 subtests passed`.
+- `POST /admin/run_daily` is queued/background work and is not yet a claim that
+  a full 557-stock production run has completed. A valid production API token
+  is required for that live acceptance.
+- The existing Longbridge read-only whitelist does not expose a market-wide
+  `security_list`/`quote` call, so the full-market quote scan remains
+  explicitly unclaimed rather than fabricated. Google Drive service-account
+  upload remains a stub because no service account is configured.
+- The supplied Round 4 precondition said Render Starter/persistent disk, but
+  the project decision is Render Free with Turso. Health now reports
+  `db_backend`, `turso_ping_ms`, `db_path`, `disk_free_mb`, authentication,
+  watchlist counts, and process-local `worker_last_run`; Turso is the durable
+  store for Round 4 data.

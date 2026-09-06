@@ -347,3 +347,11 @@ is not claimed until a permitted Longbridge quote/security-list source is
 available; the current read-only whitelist deliberately does not invent that
 source. Google Drive upload is also a stub until a service account is
 configured.
+
+The brief now emits S1 participant moves, S2 first-seen holdings, S3
+concentration moves, S4 turnover anomalies, and S5 event-date matches. Its
+coverage object includes the watchlist group sizes plus the worker's
+`fetched_ok` and `fetched_fail` counts, and `trade_date_covered` is derived
+from the HKT/XHKG settlement date rather than left blank. S4 market-wide
+coverage remains unavailable until an approved market-wide quote source is
+added.

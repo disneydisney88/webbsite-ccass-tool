@@ -1660,13 +1660,24 @@ results = results or {}
 st.subheader("Resolved Metadata")
 meta_cols = st.columns(4)
 meta_cols[0].metric("Stock code", lookup.stock_code or "-")
-meta_cols[2].metric("Webb-site issue ID", lookup.issue_id or "-")
-meta_cols[3].metric("ID lookup status", lookup.status or "-")
+is_longbridge_source = "longbridge" in str(source_metadata.get("source") or "").lower()
+if is_longbridge_source:
+    meta_cols[2].metric("Longbridge data date", source_metadata.get("holdings_date") or lookup.message or "-")
+    meta_cols[3].metric("Source", "longbridge")
+else:
+    meta_cols[2].metric("Webb-site issue ID", lookup.issue_id or "-")
+    meta_cols[3].metric("ID lookup status", lookup.status or "-")
+display_source = str(source_metadata.get("source", "not fetched"))
+if is_longbridge_source:
+    display_source = f"longbridge (data_date {source_metadata.get('holdings_date') or 'unknown'})"
+display_history_depth = source_metadata.get("history_depth_days", 0)
+if is_longbridge_source and lookup.stock_code:
+    display_history_depth = len({str(row.get("data_date")) for row in load_longbridge_holding_history(lookup.stock_code) if row.get("data_date")})
 st.caption(
-    f"Source mode: {get_source_mode()} | Source used: {source_metadata.get('source', 'not fetched')} | "
+    f"Source mode: {get_source_mode()} | Source used: {display_source} | "
     f"Mirror status: {source_metadata.get('mirror_status', 'not recorded')} | "
     f"Mirror base URL: {source_metadata.get('mirror_base_url', 'not recorded')} | "
-    f"Local history depth days: {source_metadata.get('history_depth_days', 0)}"
+    f"Local history depth days: {display_history_depth}"
 )
 if lookup.method:
     st.caption(f"ID lookup method: {lookup.method}")

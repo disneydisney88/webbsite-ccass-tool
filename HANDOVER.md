@@ -247,6 +247,11 @@ The repair described above is local-only until merged into the GitHub-linked rep
 - `POST /admin/run_daily` is queued/background work and is not yet a claim that
   a full 557-stock production run has completed. A valid production API token
   is required for that live acceptance.
+- Latest local full suite after the brief S2/date-coverage completion:
+  `229 passed`, `5 warnings`, `10 subtests passed`. S2 now reports the first
+  historical appearance of a participant at or above 0.5% of issued shares;
+  the brief also records `fetched_ok`, `fetched_fail`, and an XHKG-derived
+  `trade_date_covered`.
 - The existing Longbridge read-only whitelist does not expose a market-wide
   `security_list`/`quote` call, so the full-market quote scan remains
   explicitly unclaimed rather than fabricated. Google Drive service-account

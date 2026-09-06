@@ -3,6 +3,7 @@ import sqlite3
 
 from utils.longbridge import LongbridgeData
 from utils.research_pipeline import (
+    build_brief,
     build_timeline,
     build_transfer_candidates,
     get_job,
@@ -64,3 +65,39 @@ def test_timeline_and_transfer_candidate_shape(tmp_path, monkeypatch):
     assert timeline[0]["top1_id"] == "B01438"
     transfers = build_transfer_candidates("lshape79", path=db)
     assert transfers and transfers[0]["from_id"] == "B01438"
+
+
+def test_brief_emits_first_seen_signal_and_coverage_dates(tmp_path, monkeypatch):
+    db = tmp_path / "brief.db"
+    monkeypatch.setattr("utils.research_pipeline.DB_PATH", db)
+    monkeypatch.setattr("utils.snapshot_db.DB_PATH", db)
+    ensure_db(db)
+
+    upsert_longbridge_holdings("06182", "2026-09-01", [
+        {"ccass_id": "B01438", "participant_name": "KGI", "holding_shares": 60_000_000,
+         "stake_pct_of_issued": 7.5, "change_shares": 60_000_000},
+    ], path=db)
+    upsert_longbridge_holdings("06182", "2026-09-02", [
+        {"ccass_id": "B01438", "participant_name": "KGI", "holding_shares": 60_000_000,
+         "stake_pct_of_issued": 7.5, "change_shares": 0},
+    ], path=db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO stock_meta(code, name, issued_shares, issued_shares_as_of) VALUES (?, ?, ?, ?)",
+                     ("06182", "Test", "800000000", "2026-09-02"))
+        conn.commit()
+
+    class Entry:
+        code = "06182"
+        groups = ("lshape79",)
+
+    monkeypatch.setattr("utils.research_pipeline.load_watchlist_entries", lambda group=None: [Entry()])
+    brief = build_brief("2026-09-02", path=db, fetch_stats={"fetched_ok": 1, "fetched_fail": 0})
+
+    assert brief["trade_date_covered"] == "2026-08-31"
+    assert brief["coverage"]["fetched_ok"] == 1
+    assert brief["coverage"]["fetched_fail"] == 0
+    assert brief["signals"]["S2"] == [{
+        "code": "06182", "ccass_id": "B01438", "name": "KGI",
+        "change_shares": 60_000_000, "pct": 7.5,
+        "holding_after": 60_000_000, "first_seen": "2026-09-01",
+    }]

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from .date_semantics import shift_trading_date
 from .fetcher import clean_stock_code, now_iso
 from .longbridge import LongbridgeAuthError, LongbridgeError, fetch_longbridge_stock
 from .snapshot_db import DB_PATH, ensure_db, load_watchlist_entries
@@ -197,7 +198,12 @@ def run_daily_job(
     }
     successful_dates = [str(row.get("data_date")) for row in rows if row.get("ok") and row.get("data_date")]
     try:
-        detail["brief"] = build_brief(max(successful_dates) if successful_dates else hkt_today(), path)
+        brief_date = max(successful_dates) if successful_dates else hkt_today()
+        detail["brief"] = build_brief(
+            brief_date,
+            path,
+            fetch_stats={"fetched_ok": detail["succeeded"], "fetched_fail": detail["failed"]},
+        )
     except Exception as exc:
         detail["brief_error"] = f"{type(exc).__name__}: {exc}"
     _set_job(job_id, "succeeded" if detail["failed"] == 0 else "failed", detail, path)
@@ -361,7 +367,11 @@ def resolve_hypotheses(as_of: str, path: Path = DB_PATH) -> list[dict[str, Any]]
     return resolved
 
 
-def build_brief(brief_date: str, path: Path = DB_PATH) -> dict[str, Any]:
+def build_brief(
+    brief_date: str,
+    path: Path = DB_PATH,
+    fetch_stats: dict[str, int] | None = None,
+) -> dict[str, Any]:
     timeline_codes = {entry.code for group in GROUP_ORDER for entry in load_watchlist_entries(group=group)}
     s1: list[dict[str, Any]] = []
     s2: list[dict[str, Any]] = []
@@ -370,15 +380,30 @@ def build_brief(brief_date: str, path: Path = DB_PATH) -> dict[str, Any]:
     s4_market: list[dict[str, Any]] = []
     for code in sorted(timeline_codes):
         rows = _holdings_rows(code, to_date=brief_date, path=path)
+        issued = _issued_shares(code, path)
+        seen_ids: set[str] = set()
         for row in rows:
             pct = row.get("stake_pct_of_issued")
             change = row.get("change_shares")
-            if pct not in (None, "") and abs(float(change or 0)) and _issued_shares(code, path):
-                if abs(float(change)) / _issued_shares(code, path) >= 0.01:
+            ccass_id = str(row.get("ccass_id") or "")
+            holding = _as_float(row.get("holding_shares"))
+            if issued and ccass_id and ccass_id not in seen_ids and holding is not None:
+                if holding / issued >= 0.005:
+                    s2.append({
+                        "code": code,
+                        "ccass_id": ccass_id,
+                        "name": row["participant_name"],
+                        "change_shares": change,
+                        "pct": round(holding / issued * 100, 6),
+                        "holding_after": row["holding_shares"],
+                        "first_seen": row["data_date"],
+                    })
+            seen_ids.add(ccass_id)
+            if issued and abs(float(change or 0)) and pct not in (None, ""):
+                if abs(float(change)) / issued >= 0.01:
                     s1.append({"code": code, "ccass_id": row["ccass_id"], "name": row["participant_name"],
-                               "change_shares": change, "pct": round(abs(float(change)) / _issued_shares(code, path) * 100, 6),
+                               "change_shares": change, "pct": round(abs(float(change)) / issued * 100, 6),
                                "holding_after": row["holding_shares"]})
-        previous = rows[-2] if len(rows) >= 2 else None
         current_timeline = build_timeline(code, to_date=brief_date, path=path)
         for before, after in zip(current_timeline, current_timeline[1:]):
             before_top5 = before.get("top5_pct_ccass")
@@ -406,16 +431,23 @@ def build_brief(brief_date: str, path: Path = DB_PATH) -> dict[str, Any]:
             (s4_watchlist if quote["code"] in timeline_codes else s4_market).append(item)
     s5 = _event_signals(brief_date, timeline_codes)
     hypotheses = resolve_hypotheses(brief_date, path)
+    trade_date_covered, trade_date_warning = shift_trading_date(brief_date, -2)
+    data_quality = []
+    if trade_date_warning:
+        data_quality.append(trade_date_warning)
     payload = {
         "brief_date": brief_date,
         "data_date": brief_date,
-        "trade_date_covered": "",
-        "coverage": {group: len(load_watchlist_entries(group=group)) for group in GROUP_ORDER},
+        "trade_date_covered": trade_date_covered,
+        "coverage": {
+            **{group: len(load_watchlist_entries(group=group)) for group in GROUP_ORDER},
+            **(fetch_stats or {}),
+        },
         "signals": {"S1": s1, "S2": s2, "S3": s3, "S4_watchlist": s4_watchlist, "S4_market": s4_market, "S5": s5},
         "hypotheses_resolved": hypotheses,
         "hypotheses_pending_next3d": [item for item in get_hypotheses(status="pending", path=path)
                                       if str(item["expected_date"]) <= (date.fromisoformat(brief_date) + timedelta(days=3)).isoformat()],
-        "data_quality": [],
+        "data_quality": data_quality,
     }
     _execute(
         """INSERT INTO briefs(brief_date,data_date,trade_date_covered,payload_json,created_at)

@@ -144,6 +144,13 @@ path, add these App Secrets (not GitHub Actions secrets):
 `CCASS_RENDER_FULL=true`. Optional:
 `CCASS_RENDER_API_URL=https://webbsite-ccass-api.onrender.com`.
 
+The Streamlit Longbridge selection uses the authenticated Render service when
+`CCASS_API_TOKEN` is configured. Complete normalized participant rows are read
+from `GET /api/longbridge/stock?code=01753`; Longbridge OAuth credentials remain
+on Render. Without a bridge token, local Longbridge credentials are required.
+Failed requests remain visible even when no tables are available. Broker history
+is loaded on demand using the "Load broker history" button.
+
 Price History is routed independently: `dbpub/hpu.asp` on the configured
 Webb-site mirror is preferred even when Holdings/Changes have fallen back to
 SDW. Yahoo Finance is used only when that price page cannot be fetched.

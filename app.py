@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-for _secret_name in ("CCASS_API_TOKEN", "CCASS_RENDER_API_URL"):
+for _secret_name in ("CCASS_API_TOKEN", "CCASS_RENDER_API_URL", "CCASS_RENDER_FULL"):
     if not os.getenv(_secret_name):
         try:
             _secret_value = st.secrets.get(_secret_name, "")
@@ -43,6 +43,7 @@ from utils.fetcher import (
     resolve_issue_id_from_stock,
 )
 from utils.longbridge import LongbridgeAuthError, LongbridgeError, fetch_broker_daily, fetch_longbridge_stock
+from utils.streamlit_longbridge import fetch_streamlit_longbridge
 from utils.parser import SECTIONS, build_fetch_summary, parse_results, table_preview_records
 from utils.report import build_report
 from utils.events import events_url, parse_events_html, parse_events_name
@@ -893,6 +894,8 @@ def render_longbridge_broker_rainbow(stock_code: str, parsed, timeout: float = 2
     metric = controls[1].selectbox("Y-axis", ["Shares", "% of issued", "% of CCASS"], key="lb_rainbow_metric")
     cache_key = f"{stock_code}:{days}"
     if st.session_state.get("longbridge_rainbow_key") != cache_key:
+        if not st.button("Load broker history", key="load_broker_history"):
+            return
         try:
             with st.spinner("Loading Top-10 broker history..."):
                 st.session_state.longbridge_rainbow_data = build_longbridge_broker_rainbow(stock_code, parsed, days, timeout)
@@ -1510,9 +1513,13 @@ if fetch_clicked:
                 if source_choice == "Longbridge":
                     bundle = fetch_local_db_bundle(stock_code, timeout=int(timeout), mirror_status="longbridge_only")
                     try:
-                        longbridge_data = fetch_longbridge_stock(stock_code, timeout=min(int(timeout), 30))
+                        longbridge_data = fetch_streamlit_longbridge(stock_code, timeout=min(int(timeout), 30))
                         bundle.results.update(longbridge_fetch_results(longbridge_data))
+                        bundle.lookup.status = "success"
+                        bundle.lookup.method = "longbridge"
+                        bundle.lookup.message = f"Longbridge data date: {longbridge_data.data_date}"
                         bundle.metadata.update({"source": "longbridge", "longbridge_data_date": longbridge_data.data_date})
+                        bundle.metadata["holdings_date"] = longbridge_data.data_date
                         bundle.warnings.extend(longbridge_data.warnings)
                     except LongbridgeAuthError:
                         bundle.warnings.append(
@@ -1527,7 +1534,7 @@ if fetch_clicked:
                         or not (bundle.results.get("Changes") and bundle.results["Changes"].ok)
                     ):
                         try:
-                            longbridge_data = fetch_longbridge_stock(stock_code, timeout=min(int(timeout), 30))
+                            longbridge_data = fetch_streamlit_longbridge(stock_code, timeout=min(int(timeout), 30))
                             supplement = longbridge_fetch_results(longbridge_data)
                             for section in ("Holdings", "Changes"):
                                 current = bundle.results.get(section)
@@ -1685,7 +1692,12 @@ if lookup.message:
     st.info(lookup.message)
 
 if not results:
-    st.info("Choose an input type, enter a value, then click Fetch Webb-site Data.")
+    if lookup.stock_code or source_warnings:
+        st.error("No data returned for this request.")
+        for warning in source_warnings:
+            st.warning(warning)
+    else:
+        st.info("Choose an input type, enter a value, then click Fetch CCASS Data.")
     st.stop()
 
 manual_overrides = {}

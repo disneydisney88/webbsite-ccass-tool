@@ -2984,6 +2984,18 @@ def health(upstreams: bool = Query(False, description="Probe Webb-site, HKEX and
     return payload
 
 
+@app.get("/api/longbridge/stock", dependencies=[Depends(verify_api_token)])
+def get_longbridge_stock_full(code: str = Query(..., pattern=r"^\d{1,5}$")) -> dict[str, Any]:
+    """Complete normalized holdings for Streamlit; credentials stay on Render."""
+    try:
+        data = fetch_longbridge_stock(clean_stock_code(code), timeout=30.0)
+        return {"ok": True, "data": {
+            key: value for key, value in vars(data).items() if key != "tool_results"
+        }}
+    except LongbridgeError as exc:
+        return {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+
+
 @app.post("/admin/longbridge/authenticate", dependencies=[Depends(verify_api_token)])
 def authenticate_longbridge(request: LongbridgeAuthRequest) -> dict[str, Any]:
     try:

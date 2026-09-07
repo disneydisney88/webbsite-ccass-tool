@@ -3354,17 +3354,9 @@ async def stop_mcp_session_manager() -> None:
         _mcp_session_context = None
 
 
-@app.get("/robots.txt", include_in_schema=False)
-def robots_txt() -> Response:
-    return Response(
-        "User-agent: *\n"
-        "Allow: /api/\n"
-        "Allow: /mcp\n"
-        "Allow: /health\n"
-        "Allow: /openapi.json\n"
-        "Disallow:\n",
-        media_type="text/plain",
-    )
+@app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
+def robots_txt() -> str:
+    return "User-agent: *\nAllow: /\n"
 
 
 @app.get(

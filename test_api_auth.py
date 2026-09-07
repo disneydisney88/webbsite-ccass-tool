@@ -185,8 +185,7 @@ class ApiAuthTests(unittest.TestCase):
     def test_robots_txt_allows_api_fetching(self) -> None:
         status_code, payload = asgi_get("/robots.txt")
         self.assertEqual(status_code, 200)
-        self.assertIn("Allow: /api/", payload["raw"])
-        self.assertIn("Allow: /mcp", payload["raw"])
+        self.assertEqual(payload["raw"], "User-agent: *\nAllow: /\n")
         self.assertNotIn("Disallow: /", payload["raw"])
 
     def test_mcp_route_is_mounted(self) -> None:

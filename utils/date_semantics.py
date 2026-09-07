@@ -121,6 +121,15 @@ def _fallback_holidays() -> tuple[set[date], int, int]:
     return holidays, min(years, default=0), max(years, default=0)
 
 
+@lru_cache(maxsize=1)
+def _market_calendar():
+    import pandas_market_calendars as market_calendars
+
+    # Calendar instances cache their holiday rules. Rebuilding one per row
+    # makes multi-year CCASS tables spend minutes in identical holiday work.
+    return market_calendars.get_calendar(CALENDAR_NAME)
+
+
 @lru_cache(maxsize=512)
 def _sessions_between(start_iso: str, end_iso: str) -> tuple[tuple[date, ...], str]:
     start = date.fromisoformat(start_iso)
@@ -133,9 +142,7 @@ def _sessions_between(start_iso: str, end_iso: str) -> tuple[tuple[date, ...], s
         return (), coverage_warning
 
     try:
-        import pandas_market_calendars as market_calendars
-
-        calendar = market_calendars.get_calendar(CALENDAR_NAME)
+        calendar = _market_calendar()
         sessions = calendar.valid_days(start_date=start.isoformat(), end_date=end.isoformat())
         return tuple(item.date() for item in sessions), ""
     except (ImportError, ModuleNotFoundError):

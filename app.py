@@ -3,6 +3,8 @@
 import json
 import os
 import importlib
+import logging
+from time import perf_counter
 
 import pandas as pd
 import streamlit as st
@@ -1669,14 +1671,14 @@ meta_cols = st.columns(4)
 meta_cols[0].metric("Stock code", lookup.stock_code or "-")
 is_longbridge_source = "longbridge" in str(source_metadata.get("source") or "").lower()
 if is_longbridge_source:
-    meta_cols[2].metric("Longbridge data date", source_metadata.get("holdings_date") or lookup.message or "-")
-    meta_cols[3].metric("Source", "longbridge")
+    meta_cols[2].metric("Longbridge data date", source_metadata.get("longbridge_data_date") or source_metadata.get("holdings_date") or "-")
+    meta_cols[3].metric("Source", source_metadata.get("source") or "longbridge")
 else:
     meta_cols[2].metric("Webb-site issue ID", lookup.issue_id or "-")
     meta_cols[3].metric("ID lookup status", lookup.status or "-")
 display_source = str(source_metadata.get("source", "not fetched"))
 if is_longbridge_source:
-    display_source = f"longbridge (data_date {source_metadata.get('holdings_date') or 'unknown'})"
+    display_source = f"{display_source} (data_date {source_metadata.get('longbridge_data_date') or source_metadata.get('holdings_date') or 'unknown'})"
 display_history_depth = source_metadata.get("history_depth_days", 0)
 if is_longbridge_source and lookup.stock_code:
     display_history_depth = len({str(row.get("data_date")) for row in load_longbridge_holding_history(lookup.stock_code) if row.get("data_date")})
@@ -1711,15 +1713,21 @@ with st.expander("Advanced table selection", expanded=False):
         if selected is not None:
             manual_overrides[section] = selected
 
-parsed = parse_results(
-    lookup.issue_id,
-    results,
-    stock_code=lookup.stock_code,
-    id_lookup_method=lookup.method,
-    id_lookup_status=lookup.status,
-    selected_indices=manual_overrides,
-    source_metadata=source_metadata,
-)
+with st.status("Parsing tables and aligning trading dates...", expanded=True) as parse_status:
+    parse_started = perf_counter()
+    logging.getLogger(__name__).info("CCASS parse started code=%s", lookup.stock_code)
+    parsed = parse_results(
+        lookup.issue_id,
+        results,
+        stock_code=lookup.stock_code,
+        id_lookup_method=lookup.method,
+        id_lookup_status=lookup.status,
+        selected_indices=manual_overrides,
+        source_metadata=source_metadata,
+    )
+    parse_elapsed = perf_counter() - parse_started
+    logging.getLogger(__name__).info("CCASS parse complete code=%s elapsed_s=%.3f", lookup.stock_code, parse_elapsed)
+    parse_status.update(label=f"Tables and dates ready ({parse_elapsed:.1f}s)", state="complete", expanded=False)
 apply_source_metadata(parsed, source_metadata, source_warnings)
 if getattr(parsed, "completeness_status", "complete") == "partial":
     st.error(

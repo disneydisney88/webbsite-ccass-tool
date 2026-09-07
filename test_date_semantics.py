@@ -1,6 +1,11 @@
 import unittest
+from datetime import date, timedelta
+from unittest.mock import patch
+
+import pandas as pd
 
 import api
+from utils import date_semantics
 from utils.date_semantics import (
     align_event_date,
     annotate_records,
@@ -11,6 +16,27 @@ from utils.date_semantics import (
 
 
 class HKEXTradingCalendarTest(unittest.TestCase):
+    def test_multi_year_history_reuses_calendar_after_window_cache_eviction(self):
+        class Calendar:
+            def valid_days(self, start_date, end_date):
+                return pd.bdate_range(start_date, end_date, tz="UTC")
+
+        date_semantics._market_calendar.cache_clear()
+        date_semantics._sessions_between.cache_clear()
+        try:
+            with patch("pandas_market_calendars.get_calendar", return_value=Calendar()) as factory:
+                dates = [(date(2026, 9, 4) - timedelta(days=i)).isoformat() for i in range(600)]
+                rows = [{"Date": value, "Top 5 %": 50} for value in dates]
+                first, _ = annotate_records(rows, "Concentration")
+                second, _ = annotate_records(rows, "Concentration")
+                self.assertEqual(len(first), 600)
+                self.assertEqual(first, second)
+                self.assertEqual(first[0]["trade_date"], "2026-09-02")
+                factory.assert_called_once_with("XHKG")
+        finally:
+            date_semantics._market_calendar.cache_clear()
+            date_semantics._sessions_between.cache_clear()
+
     def test_required_settlement_to_trade_regressions(self):
         cases = {
             "2026-05-11": "2026-05-07",

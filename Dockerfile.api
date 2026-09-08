@@ -42,4 +42,5 @@ COPY . .
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-10000}"]
+# P4 Z2: gunicorn 收長工（uvicorn 裸跑會被 Render worker timeout 殺）
+CMD ["sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w 1 --timeout 300 --graceful-timeout 120 -b 0.0.0.0:${PORT:-10000} api:app"]

@@ -899,7 +899,22 @@ def build_base_payload(
     elif source_preference == "mirror":
         bundle = fetch_mirror_bundle(stock_code, issue_id=known_issue_id, timeout=timeout, headless=headless)
     else:
-        bundle = fetch_source_bundle_for_stock(stock_code, timeout=timeout, headless=headless)
+        # P4 Z2 cache-first：auto 先試 local_db（Turso）快照，有真 CCASS 數據即回，
+        # 免去 Playwright 長抓（free plan worker timeout／OOM 根因）。冇先至行原 auto 路由。
+        bundle = None
+        try:
+            cached_bundle = fetch_local_db_bundle(
+                stock_code,
+                issue_id=known_issue_id,
+                timeout=max(10, min(timeout, 15)),
+                mirror_status="cache_first",
+            )
+            if has_real_ccass_data(cached_bundle.results):
+                bundle = cached_bundle
+        except Exception:  # noqa: BLE001——快取路徑任何失手都退返原 auto 抓取
+            bundle = None
+        if bundle is None:
+            bundle = fetch_source_bundle_for_stock(stock_code, timeout=timeout, headless=headless)
     lookup = bundle.lookup
     warnings = []
     source_name = str(bundle.metadata.get("source") or "")
@@ -3386,6 +3401,10 @@ def get_stock(
     changes_limit: int = Query(20, ge=1, le=100, description="Maximum changes rows returned."),
     big_changes_limit: int = Query(10, ge=1, le=100, description="Maximum big changes rows returned."),
     concentration_limit: int = Query(15, ge=1, le=100, description="Maximum concentration rows returned."),
+    light: bool = Query(
+        False,
+        description="P4 Z2: light=1 forces hybrid_light source (fast fetch, Concentration + Big Changes focus).",
+    ),
     source_preference: str = Query(
         "auto",
         pattern=r"^(auto|local_db|hybrid_light|longbridge|mirror)$",
@@ -3400,6 +3419,8 @@ def get_stock(
     requested_code = code or stock_code or ""
     if not requested_code:
         raise HTTPException(status_code=400, detail="Provide code.")
+    if light:
+        source_preference = "hybrid_light"
     payload = build_stock_payload(
         stock_code=requested_code,
         timeout=timeout,

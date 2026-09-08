@@ -17,3 +17,4 @@ playwright>=1.44,<2
 openpyxl>=3.1,<4
 tabulate>=0.9,<1
 PyMuPDF>=1.24,<2
+gunicorn==23.0.0

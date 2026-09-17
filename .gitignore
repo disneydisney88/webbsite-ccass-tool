@@ -13,3 +13,5 @@ longbridge_token.enc
 
 # Cloudflare transplant test artifacts (live cookies) - never commit
 data/_0xmd_cf_test.json
+data/warm_ccass_cache_checkpoint.json
+data/warm_babysit.log

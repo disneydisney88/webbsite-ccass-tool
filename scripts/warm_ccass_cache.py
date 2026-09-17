@@ -106,6 +106,9 @@ def parse_args() -> argparse.Namespace:
                         help="After warming, re-read N cache keys to prove Turso hits.")
     parser.add_argument("--skip-prefetch", action="store_true",
                         help="Skip the issue-id batch pre-pass (use existing stock_map only).")
+    parser.add_argument("--prefetch-only", action="store_true",
+                        help="Only run the issue-id pre-pass, then exit (lets the fetch "
+                             "phase use different pacing without re-probing the mirror).")
     parser.add_argument("--dry-run", action="store_true", help="List codes without fetching or writing.")
     return parser.parse_args()
 
@@ -190,6 +193,7 @@ def prefetch_issue_ids(codes: list[str], workers: int, sleep_s: float,
     resolved: dict[str, str] = {}
     lock = threading.Lock()
     done = 0
+    error_types: dict[str, int] = {}
 
     def resolve(code: str) -> tuple[str, str, str]:
         result = fetch_with_requests("Company / orgdata", orgdata_url(code), timeout=timeout)
@@ -208,6 +212,8 @@ def prefetch_issue_ids(codes: list[str], workers: int, sleep_s: float,
             code, issue_id, error = future.result()
             with lock:
                 done += 1
+                if error:
+                    error_types[error] = error_types.get(error, 0) + 1
                 if issue_id:
                     resolved[code] = issue_id
                     try:
@@ -215,10 +221,11 @@ def prefetch_issue_ids(codes: list[str], workers: int, sleep_s: float,
                     except Exception:
                         pass
             if done % 25 == 0 or done == len(missing):
-                print(json.dumps({"prefetch_progress": done, "resolved": len(resolved)}),
-                      flush=True)
+                print(json.dumps({"prefetch_progress": done, "resolved": len(resolved),
+                                  "error_types": error_types}), flush=True)
     print(json.dumps({"prefetch": "done", "resolved": len(resolved),
-                      "unresolved": len(missing) - len(resolved)}), flush=True)
+                      "unresolved": len(missing) - len(resolved),
+                      "error_types": error_types}), flush=True)
     return resolved
 
 
@@ -283,6 +290,10 @@ def main() -> int:
     if not args.skip_prefetch:
         resolved = prefetch_issue_ids(codes, max(1, args.workers),
                                       max(0.0, args.sleep) / 2, args.timeout)
+        if args.prefetch_only:
+            print(json.dumps({"prefetch_only": True, "resolved_this_run": len(resolved)}),
+                  flush=True)
+            return 0
         unresolved = [c for c in codes if c not in resolved]
         if unresolved and not resolved:
             # 全部查唔到 issue id：唔好盲目掃，直接標失敗留紀錄

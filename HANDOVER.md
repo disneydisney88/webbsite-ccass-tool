@@ -329,3 +329,10 @@ The repair described above is local-only until merged into the GitHub-linked rep
   08059, 01592, and 03301 returned empty HTTP 503; `/health` briefly returned
   503/429 before recovering on commit `64889aa`. This is recorded as PART 1
   incomplete; no STOCKSCAN integration or predictor rerun was started.
+- Follow-up warm path: `scripts/warm_ccass_cache.py` now reads panel `code5`
+  values, fetches locally through the existing requests-only `hybrid_light`
+  path, sleeps between stocks, resumes by code, and writes only verified
+  payloads to `api_stock_cache`. It refuses to call Render on a cache miss.
+  This machine currently has no `TURSO_DATABASE_URL` or `TURSO_AUTH_TOKEN`, so
+  the actual warm run is intentionally not claimed; provide those secrets in
+  the local process environment before running it.

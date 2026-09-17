@@ -543,6 +543,9 @@ class AnnouncementPdfTests(unittest.TestCase):
         self.assertTrue(any(warning in item for item in payload["data_quality_warnings"]))
 
     def test_cache_second_request_uses_cached_base_payload(self) -> None:
+        # Keep this contract test isolated from any payload cached by a
+        # preceding route test in the same interpreter.
+        api._stock_cache.clear()
         lookup = api.IssueLookup(stock_code="01592", issue_id="12345", method="mock", status="success")
         bundle = SimpleNamespace(
             lookup=lookup,
@@ -565,12 +568,14 @@ class AnnouncementPdfTests(unittest.TestCase):
                 "error_message": "",
             },
         ):
-            with patch.object(api, "fetch_source_bundle_for_stock", return_value=bundle) as fetch_source:
-                with patch.object(api, "parse_results", return_value=object()):
-                    with patch.object(api, "parsed_to_json_ready", return_value=exported):
-                        first = api.build_base_payload("01592", timeout=30)
-                        second = api.build_base_payload("01592", timeout=30)
-                        bypassed = api.build_base_payload("01592", timeout=30, bypass_cache=True)
+            with patch.object(api, "resolve_issue_id", return_value=lookup):
+                with patch.object(api, "fetch_local_db_bundle", return_value=bundle):
+                    with patch.object(api, "fetch_source_bundle_for_stock", return_value=bundle) as fetch_source:
+                        with patch.object(api, "parse_results", return_value=object()):
+                            with patch.object(api, "parsed_to_json_ready", return_value=exported):
+                                first = api.build_base_payload("01592", timeout=30)
+                                second = api.build_base_payload("01592", timeout=30)
+                                bypassed = api.build_base_payload("01592", timeout=30, bypass_cache=True)
         first_without_cache_marker = json.loads(json.dumps(first))
         second_without_cache_marker = json.loads(json.dumps(second))
         first_without_cache_marker["exported"]["metadata"].pop("served_from_cache", None)

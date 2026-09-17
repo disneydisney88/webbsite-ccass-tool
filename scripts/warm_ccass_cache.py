@@ -99,6 +99,16 @@ def main() -> int:
     checkpoint = args.checkpoint if args.checkpoint.is_absolute() else REPO_ROOT / args.checkpoint
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_rows: list[dict[str, object]] = []
+    if checkpoint.exists():
+        try:
+            previous = json.loads(checkpoint.read_text(encoding="utf-8"))
+            checkpoint_rows = [
+                row for row in (previous.get("completed") or []) if isinstance(row, dict)
+            ]
+        except (OSError, json.JSONDecodeError):
+            checkpoint_rows = []
+    ok_count = sum(row.get("status") == "OK" for row in checkpoint_rows)
+    failed_count = sum(row.get("status") in {"FETCH_FAIL", "TURSO_WRITE_FAIL"} for row in checkpoint_rows)
     for index, code in enumerate(codes, start=1):
         item_started = time.monotonic()
         try:

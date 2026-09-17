@@ -10,3 +10,6 @@ data/mirror_probe_status.json
 debug/
 
 longbridge_token.enc
+
+# Cloudflare transplant test artifacts (live cookies) - never commit
+data/_0xmd_cf_test.json

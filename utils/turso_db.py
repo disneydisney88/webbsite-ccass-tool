@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import json
+from datetime import datetime, timezone
 from threading import Lock
 from time import perf_counter
 from typing import Any
@@ -25,6 +27,7 @@ TURSO_SCHEMA: tuple[str, ...] = (
     "CREATE TABLE IF NOT EXISTS quote_daily (code TEXT NOT NULL, trade_date TEXT NOT NULL, close REAL, turnover REAL, volume INTEGER, market_cap REAL, fetched_at TEXT NOT NULL, PRIMARY KEY (code, trade_date))",
     "CREATE TABLE IF NOT EXISTS hypotheses (id TEXT PRIMARY KEY, code TEXT NOT NULL, created TEXT NOT NULL, expected_date TEXT NOT NULL, ccass_id TEXT NOT NULL, field TEXT NOT NULL, op TEXT NOT NULL, value TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, resolved_date TEXT, actual TEXT)",
     "CREATE TABLE IF NOT EXISTS briefs (brief_date TEXT PRIMARY KEY, data_date TEXT NOT NULL, trade_date_covered TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS api_stock_cache (cache_key TEXT PRIMARY KEY, payload_json TEXT NOT NULL, fetched_at TEXT NOT NULL)",
 )
 
 _TURSO_LAST_BATCH_MS: float | None = None
@@ -127,6 +130,50 @@ def ensure_turso_schema() -> None:
             return
         turso_execute_batch([(statement, ()) for statement in TURSO_SCHEMA])
         _TURSO_SCHEMA_READY_FOR = schema_key
+
+
+def get_api_stock_cache(cache_key: str, max_age_seconds: int) -> dict[str, Any] | None:
+    """Read a compact stock response from the persistent Turso cache.
+
+    This cache is deliberately separate from the research snapshots: it is a
+    response cache only, so a Render worker can serve a previously verified
+    payload after a free-plan spin-down without fetching Webb-site inline.
+    """
+    if not turso_is_configured():
+        return None
+    try:
+        ensure_turso_schema()
+        rows = turso_query(
+            "SELECT payload_json, fetched_at FROM api_stock_cache WHERE cache_key=?",
+            (cache_key,),
+        )
+        if not rows:
+            return None
+        fetched_at = datetime.fromisoformat(str(rows[0]["fetched_at"]).replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - fetched_at.astimezone(timezone.utc)).total_seconds()
+        if age > max(0, max_age_seconds):
+            return None
+        payload = json.loads(str(rows[0]["payload_json"]))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def put_api_stock_cache(cache_key: str, payload: dict[str, Any]) -> bool:
+    """Persist one verified compact response; cache failures never fail API reads."""
+    if not turso_is_configured():
+        return False
+    try:
+        ensure_turso_schema()
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        turso_execute(
+            "INSERT INTO api_stock_cache(cache_key,payload_json,fetched_at) VALUES(?,?,?) "
+            "ON CONFLICT(cache_key) DO UPDATE SET payload_json=excluded.payload_json, fetched_at=excluded.fetched_at",
+            (cache_key, json.dumps(payload, ensure_ascii=False, separators=(",", ":")), fetched_at),
+        )
+        return True
+    except Exception:
+        return False
 
 
 def turso_health() -> dict[str, Any]:

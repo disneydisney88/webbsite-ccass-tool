@@ -104,7 +104,7 @@ from utils.longbridge import (
     poll_device_authorization,
     start_device_authorization,
 )
-from utils.turso_db import turso_health
+from utils.turso_db import get_api_stock_cache, put_api_stock_cache, turso_health
 from utils.google_drive import drive_config_status
 from utils.research_pipeline import (
     add_hypothesis,
@@ -3421,18 +3421,42 @@ def get_stock(
         raise HTTPException(status_code=400, detail="Provide code.")
     if light:
         source_preference = "hybrid_light"
-    payload = build_stock_payload(
-        stock_code=requested_code,
-        timeout=timeout,
-        holdings_limit=holdings_limit,
-        changes_limit=changes_limit,
-        big_changes_limit=big_changes_limit,
-        concentration_limit=concentration_limit,
-        source_preference=source_preference,
-        include_price_history=include_price_history,
-        headless=True,
-        bypass_cache=bypass_cache,
-    )
+        persistent_cache_key = f"stock:{clean_stock_code(requested_code)}:light:v1"
+        persistent_payload = None
+        if not bypass_cache:
+            persistent_payload = get_api_stock_cache(persistent_cache_key, CACHE_TTL_SECONDS)
+        if persistent_payload:
+            persistent_payload.setdefault("metadata", {})["served_from_cache"] = True
+            persistent_payload["metadata"]["cache_status"] = "persistent_turso"
+            payload = persistent_payload
+        else:
+            payload = build_stock_payload(
+                stock_code=requested_code,
+                timeout=timeout,
+                holdings_limit=holdings_limit,
+                changes_limit=changes_limit,
+                big_changes_limit=big_changes_limit,
+                concentration_limit=concentration_limit,
+                source_preference=source_preference,
+                include_price_history=include_price_history,
+                headless=True,
+                bypass_cache=bypass_cache,
+            )
+            if payload.get("ok") and not payload.get("errors"):
+                put_api_stock_cache(persistent_cache_key, payload)
+    else:
+        payload = build_stock_payload(
+            stock_code=requested_code,
+            timeout=timeout,
+            holdings_limit=holdings_limit,
+            changes_limit=changes_limit,
+            big_changes_limit=big_changes_limit,
+            concentration_limit=concentration_limit,
+            source_preference=source_preference,
+            include_price_history=include_price_history,
+            headless=True,
+            bypass_cache=bypass_cache,
+        )
     if format.lower() in {"markdown", "md"}:
         return PlainTextResponse(compact_payload_to_markdown(payload), media_type="text/markdown; charset=utf-8")
     return payload

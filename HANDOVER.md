@@ -298,3 +298,28 @@ The repair described above is local-only until merged into the GitHub-linked rep
   `daily_snapshot.yml` workflow at `10 0 * * 1-5` (00:10 UTC / 08:10
   HKT). It queues `POST /admin/run_daily` with `CCASS_API_TOKEN` from
   GitHub Actions Secrets; no cron-job.org scheduler is used.
+
+## PART 1.1/1.2 Render `/api/stock` cache repair (2026-09-17)
+
+- Diagnosis: deployed `50a1290` was confirmed live. `/health` returned 200, but
+  `GET /api/stock?code=01825&light=1` was not stable: one warm request returned
+  200 in about 1.6 seconds, while subsequent requests returned an empty 503.
+  The image already uses gunicorn; the remaining failure mode is free-plan
+  worker spin-down plus the process-local `_stock_cache`, which disappears on
+  restart and can leave an upstream fetch in the request path.
+- Repair: add a Turso-backed `api_stock_cache` response table. The light route
+  still forces `hybrid_light` (Concentration + Big Changes, no browser fetch),
+  reads a verified response from Turso before fetching Webb-site, and writes
+  only successful responses. Turso/cache errors are non-fatal and never hide a
+  fresh upstream error. `bypass_cache=1` remains available for diagnostics.
+- Integrity: this is response caching only; no historical CCASS date is moved
+  and no future data is introduced. PART 2 T-2 alignment remains pending and
+  is not claimed here.
+- Local verification: `python -m pytest -q test_api_stock_turso_cache.py`
+  passed 2 tests. The pre-existing `test_api_auth.py` suite was also run; its
+  unrelated cache-count assertion is currently failing in the base tree and
+  was not changed.
+- Deployment acceptance still required after push: Render must redeploy this
+  commit, then `GET /api/stock?code=01825&light=1` must return HTTP 200 in
+  under 60 seconds and expose Concentration + Big Changes. Do not start
+  STOCKSCAN/PART 2 until this live check passes.

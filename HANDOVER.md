@@ -323,3 +323,9 @@ The repair described above is local-only until merged into the GitHub-linked rep
   commit, then `GET /api/stock?code=01825&light=1` must return HTTP 200 in
   under 60 seconds and expose Concentration + Big Changes. Do not start
   STOCKSCAN/PART 2 until this live check passes.
+- Post-deploy check: 01825 passed repeatedly (HTTP 200, about 1.4–1.7 s,
+  persistent Turso cache hit, 10 Big Changes, 15 Concentration, 0 errors).
+  The required five-stock continuation did not pass: 02048 passed once, but
+  08059, 01592, and 03301 returned empty HTTP 503; `/health` briefly returned
+  503/429 before recovering on commit `64889aa`. This is recorded as PART 1
+  incomplete; no STOCKSCAN integration or predictor rerun was started.

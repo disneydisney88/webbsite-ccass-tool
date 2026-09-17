@@ -38,6 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sleep", type=float, default=3.0, help="Seconds between upstream stocks.")
     parser.add_argument("--timeout", type=int, default=30, help="Per-stock Webb-site request budget.")
     parser.add_argument("--start-after", default="", help="Resume after this code5 (exclusive).")
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=Path("data/warm_ccass_cache_checkpoint.json"),
+        help="JSON checkpoint written after every attempted code5.",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Optional maximum number of stocks.")
     parser.add_argument("--dry-run", action="store_true", help="List codes without fetching or writing.")
     return parser.parse_args()
@@ -90,6 +96,9 @@ def main() -> int:
 
     started = time.monotonic()
     ok_count = failed_count = 0
+    checkpoint = args.checkpoint if args.checkpoint.is_absolute() else REPO_ROOT / args.checkpoint
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_rows: list[dict[str, object]] = []
     for index, code in enumerate(codes, start=1):
         item_started = time.monotonic()
         try:
@@ -109,18 +118,30 @@ def main() -> int:
             )
             if not verified:
                 failed_count += 1
+                checkpoint_rows.append({"code": code, "status": "FETCH_FAIL"})
                 print(json.dumps({"index": index, "code": code, "status": "FETCH_FAIL", "errors": errors[:3]}, ensure_ascii=False), flush=True)
             else:
                 cache_key = f"stock:{code}:light:v1"
                 if not put_api_stock_cache(cache_key, payload):
                     failed_count += 1
+                    checkpoint_rows.append({"code": code, "status": "TURSO_WRITE_FAIL"})
                     print(json.dumps({"index": index, "code": code, "status": "TURSO_WRITE_FAIL"}), flush=True)
                 else:
                     ok_count += 1
+                    checkpoint_rows.append({"code": code, "status": "OK"})
                     print(json.dumps({"index": index, "code": code, "status": "OK", "seconds": round(time.monotonic() - item_started, 1)}), flush=True)
         except Exception as exc:  # one stock must not discard completed cache entries
             failed_count += 1
+            checkpoint_rows.append({"code": code, "status": "FETCH_FAIL", "error_type": type(exc).__name__})
             print(json.dumps({"index": index, "code": code, "status": "FETCH_FAIL", "error_type": type(exc).__name__}), flush=True)
+        checkpoint.write_text(
+            json.dumps(
+                {"updated_at": time.time(), "last_code": code, "completed": checkpoint_rows},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         if index < len(codes):
             time.sleep(max(0.0, args.sleep))
 

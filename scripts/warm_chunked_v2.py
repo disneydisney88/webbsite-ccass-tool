@@ -28,8 +28,14 @@ BAN_COOL_S = 900            # 15 min cool when the probe says blocked
 MAX_CYCLES = 40
 
 
+LOG_FILE = REPO / "data" / "warm_chunked_v2.log"
+
+
 def log(msg: str) -> None:
-    print(f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} {msg}", flush=True)
+    line = f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} {msg}"
+    print(line, flush=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
 
 
 def latest_status() -> dict[str, str]:

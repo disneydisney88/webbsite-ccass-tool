@@ -336,3 +336,22 @@ The repair described above is local-only until merged into the GitHub-linked rep
   This machine currently has no `TURSO_DATABASE_URL` or `TURSO_AUTH_TOKEN`, so
   the actual warm run is intentionally not claimed; provide those secrets in
   the local process environment before running it.
+
+## Warm v2 direct-connection status (2026-09-17/18 overnight)
+
+- `scripts/warm_ccass_cache.py` v2: batch issue-id pre-pass (optional `--prefetch-only`),
+  `--workers` concurrency, Yahoo side-fetch disabled (was ~30s hang/stock on empty snapshot DB),
+  unified secrets loader (`G:\我的雲端硬碟\STOCKSCAN\_secrets\.env`, gitignored; env vars win).
+  100-stock trial: 100/100 issue ids resolved, warm 6.1 s/stock wall, Turso verify hits OK.
+- Rate-limit reality: webb-database.com hard-403s (IIS "Access is denied", no challenge page)
+  after bursts; ~60-100 stocks per open window, windows reopen after ~20-40 min.
+  `scripts/warm_chunked_v2.py` (chunk 100, 8-min cool, 15-min probe, MAX_CYCLES 40, idempotent
+  via checkpoint latest-status) is the overnight driver. Resume = rerun the same command.
+- 0xmd verdict: cookie transplant works (jar + exact UA, same IP, TTL ~1-2h) but 0xmd CCASS
+  pages are 200-with-no-tables JS shells - no data. `scripts/warm_0xmd_pass.py` retired as a
+  findings record.
+- Render API retested for warming: 60.9s RemoteDisconnected then 503s - upstream unstable, as
+  before. Local direct connection is the only working path.
+- State at handover: 341/1,226 OK (28%), 871 pending retry. Continue: rerun
+  `python scripts/warm_chunked_v2.py`; when pending=0 run the STOCKSCAN PART 2 pair
+  (`build_concentration_features.py` then `build_go_predictors.py`).

@@ -7,6 +7,7 @@ status in the shared checkpoint, and repeats until the panel is done.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -22,10 +23,12 @@ from scripts.warm_ccass_cache import (  # noqa: E402
 PANEL = Path(r"G:\我的雲端硬碟\STOCKSCAN\data\eod\radar_eod_panel_full.csv")
 CHECKPOINT = REPO / "data" / "warm_ccass_cache_checkpoint.json"
 RESUME_AFTER = "00351"
-CHUNK = 100
-CHUNK_COOL_S = 480          # 8 min cool between chunks
-BAN_COOL_S = 900            # 15 min cool when the probe says blocked
-MAX_CYCLES = 40
+# 實測節律（2026-09-17/18）：burst ~60-100 隻後 mirror 硬 403，20-40 分鐘自動解封。
+# 三個數全部可以環境變數覆寫，唔使改 code。
+CHUNK = int(os.getenv("WARM_CHUNK", "100"))
+CHUNK_COOL_S = int(os.getenv("WARM_CHUNK_COOL_S", "480"))   # 8 min cool between chunks
+BAN_COOL_S = int(os.getenv("WARM_BAN_COOL_S", "900"))       # 15 min cool when blocked
+MAX_CYCLES = int(os.getenv("WARM_MAX_CYCLES", "40"))
 
 
 LOG_FILE = REPO / "data" / "warm_chunked_v2.log"
